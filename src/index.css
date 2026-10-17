@@ -1,0 +1,163 @@
+@import "tailwindcss";
+@import "@fontsource-variable/inter";
+
+/* Semantic tokens. Components use these (bg-surface, text-muted, ...) rather
+   than raw palette colors so light and dark stay consistent. */
+@theme inline {
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+
+  /* Dense desktop scale: body text is 13px. Spacing stays on the default rem scale. */
+  --text-xs: 11.5px;
+  --text-xs--line-height: 16px;
+  --text-sm: 13px;
+  --text-sm--line-height: 20px;
+  --text-base: 14px;
+  --text-base--line-height: 22px;
+  --text-lg: 16px;
+  --text-lg--line-height: 24px;
+
+  --color-bg: var(--bg);
+  --color-sidebar: var(--sidebar);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-text: var(--text);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+  --color-on-accent: var(--on-accent);
+  --color-ok: var(--ok);
+  --color-ok-soft: color-mix(in srgb, var(--ok) 13%, transparent);
+  --color-warn: var(--warn);
+  --color-warn-soft: color-mix(in srgb, var(--warn) 14%, transparent);
+  --color-err: var(--err);
+  --color-err-soft: color-mix(in srgb, var(--err) 13%, transparent);
+
+  --animate-pop: pop 120ms ease-out;
+  --animate-fade: fade 120ms ease-out;
+}
+
+@keyframes pop {
+  from {
+    opacity: 0;
+    transform: translateY(-2px) scale(0.98);
+  }
+}
+@keyframes fade {
+  from {
+    opacity: 0;
+  }
+}
+
+:root {
+  color-scheme: light;
+  --bg: #fbfbfc;
+  --sidebar: #f4f5f7;
+  --surface: #ffffff;
+  --surface-2: #f3f4f6;
+  --surface-3: #eaecef;
+  --border: #e4e6ea;
+  --border-strong: #d3d7dd;
+  --text: #16181d;
+  --muted: #5b626e;
+  --faint: #8b929d;
+  --accent: #3b5bdb;
+  --accent-hover: #3250c8;
+  --on-accent: #ffffff;
+  --ok: #1a7f37;
+  --warn: #9a6700;
+  --err: #cf222e;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg: #0d0f12;
+    --sidebar: #0a0c0e;
+    --surface: #13161a;
+    --surface-2: #181c21;
+    --surface-3: #1f242b;
+    --border: #22272e;
+    --border-strong: #2f353e;
+    --text: #e4e7eb;
+    --muted: #979ea9;
+    --faint: #626a76;
+    --accent: #5e7bf7;
+    --accent-hover: #7189fa;
+    --on-accent: #ffffff;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --err: #f85149;
+  }
+}
+
+/* Base rules live in the base layer so Tailwind utilities (e.g. outline-none) can override them. */
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    line-height: 20px;
+    font-feature-settings: "cv11", "ss01";
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Numbers in tables, counts and times line up. */
+  .tabular-nums,
+  time {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Desktop-app feel: the interface itself isn't selectable (so Ctrl+A doesn't
+     highlight the whole window); content people may copy stays selectable. */
+  body {
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  input,
+  textarea,
+  pre,
+  code,
+  td,
+  dd,
+  [data-selectable] {
+    user-select: text;
+    -webkit-user-select: text;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
+  ::selection {
+    background: color-mix(in srgb, var(--accent) 25%, transparent);
+  }
+
+  /* Thin, quiet scrollbars. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-strong) transparent;
+  }
+}
+
+/* Chevron for selects styled with appearance-none (see selectClass in ui.tsx). */
+.select-chevron {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238b929d' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.5rem center;
+  background-size: 0.875rem;
+}
