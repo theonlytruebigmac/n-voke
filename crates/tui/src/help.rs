@@ -47,6 +47,15 @@ pub fn footer_hints(app: &App) -> Vec<Hint> {
     hints
 }
 
+const READING: &[Hint] = &[
+    ("esc", "close the output"),
+    ("↑ ↓  PgUp PgDn", "scroll · home/end for the ends"),
+    ("← →", "previous / next device in the group"),
+    ("/  n  N", "search · next · previous match"),
+    ("w  < >", "wrap lines · scroll sideways when not wrapped"),
+    ("y  e", "copy to the clipboard · save to a file"),
+];
+
 /// A group of keys in the help overlay.
 pub struct Section {
     pub title: &'static str,
@@ -58,7 +67,10 @@ pub fn help_sections(app: &App) -> Vec<Section> {
     let mut sections = vec![];
     let section = |title, keys: &[Hint]| Section { title, keys: keys.to_vec() };
 
-    if app.tag_form.is_some() && app.page == Page::Tags {
+    // The output viewer covers the page, so its keys are the ones that matter.
+    if app.viewer.is_some() {
+        sections.push(section("Reading output", READING));
+    } else if app.tag_form.is_some() && app.page == Page::Tags {
         sections.push(section(
             "Tag form",
             &[
@@ -89,21 +101,11 @@ pub fn help_sections(app: &App) -> Vec<Section> {
                     "Activity",
                     &[
                         ("→  ←", "runs ⇄ results ⇄ menu"),
-                        ("enter", "on a result: read its output in full"),
+                        ("enter", "on a result: read its output in full (press ? there for its keys)"),
                         ("R  F", "run again · re-run only the devices that failed"),
                         ("T", "put these devices in a tag (or make a new one)"),
                         ("W", "watch a run started elsewhere, by its task ID"),
                         ("s  w  x", "stop watching · resume watching · remove from history"),
-                    ],
-                ));
-                sections.push(section(
-                    "Reading output",
-                    &[
-                        ("↑ ↓  PgUp PgDn", "scroll · home/end for the ends"),
-                        ("← →", "previous / next device in the group"),
-                        ("/  n  N", "search · next · previous match"),
-                        ("w  < >", "wrap lines · scroll sideways when not wrapped"),
-                        ("y  e", "copy to the clipboard · save to a file"),
                     ],
                 ));
             }
@@ -172,6 +174,15 @@ mod tests {
         assert!(!footer_hints(&app).iter().any(|h| h.0 == "d") && !help_sections(&app).iter().any(|s| s.title == "Dry run"));
         app.core().set_dry_run(true);
         assert!(footer_hints(&app).iter().any(|h| h.0 == "d") && help_sections(&app).iter().any(|s| s.title == "Dry run"));
+    }
+
+    #[test]
+    fn the_output_viewer_gets_its_own_help_first() {
+        let (_rt, mut app) = crate::app::viewer::tests::viewer_app();
+        crate::app::viewer::tests::open(&mut app);
+        let sections = help_sections(&app);
+        assert_eq!(sections[0].title, "Reading output");
+        assert!(sections[0].keys.iter().any(|k| k.1.contains("copy")));
     }
 
     #[test]

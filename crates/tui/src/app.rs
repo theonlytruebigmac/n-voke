@@ -562,18 +562,6 @@ impl App {
             }
             return; // any other key cancels
         }
-        if self.watch.is_some() {
-            return self.on_watch_key(key);
-        }
-        if self.viewer.is_some() {
-            return self.on_viewer_key(key);
-        }
-        if self.show_dry_log {
-            return self.on_dry_log_key(key);
-        }
-        if self.run_captures_keys() {
-            return self.on_run_modal_key(key);
-        }
         if self.show_help {
             match key.code {
                 KeyCode::Esc | KeyCode::Char('?' | 'q') | KeyCode::F(1) => {
@@ -589,6 +577,18 @@ impl App {
                 _ => {} // other keys do nothing: the help is modal, and nothing leaks to the page behind it
             }
             return;
+        }
+        if self.watch.is_some() {
+            return self.on_watch_key(key);
+        }
+        if self.viewer.is_some() {
+            return self.on_viewer_key(key);
+        }
+        if self.show_dry_log {
+            return self.on_dry_log_key(key);
+        }
+        if self.run_captures_keys() {
+            return self.on_run_modal_key(key);
         }
         match key.code {
             // With a tag form open, q would throw away unsaved work: esc leaves it, asking first.
@@ -742,6 +742,7 @@ impl App {
         let count = self.core.dry_run_log().len();
         match key.code {
             KeyCode::Esc | KeyCode::Char('d' | 'q') => self.show_dry_log = false,
+            KeyCode::Char('?') | KeyCode::F(1) => self.show_help = true,
             KeyCode::Down | KeyCode::Char('j') => {
                 self.dry_table.select(Some((self.dry_table.selected().unwrap_or(0) + 1).min(count.saturating_sub(1))));
                 self.dry_scroll = 0;
@@ -754,6 +755,11 @@ impl App {
             KeyCode::PageUp => self.dry_scroll = self.dry_scroll.saturating_sub(8),
             _ => {}
         }
+    }
+
+    /// Whether `?` opens the help here: not while a text box is taking every key, where it is a character.
+    pub fn help_reachable(&self) -> bool {
+        self.watch.is_none() && !self.run_captures_keys() && !self.viewer.as_ref().is_some_and(|v| v.searching)
     }
 
     pub fn jobs_loaded(&self) -> bool {

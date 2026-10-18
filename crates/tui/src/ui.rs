@@ -74,7 +74,7 @@ fn draw_main(frame: &mut Frame, area: Rect, app: &mut App) {
         ]);
         frame.render_widget(Paragraph::new(prompt), footer);
     } else {
-        frame.render_widget(Paragraph::new(theme::fit_hints(&hints, footer.width as usize)), footer);
+        frame.render_widget(Paragraph::new(theme::fit_hints(&hints, footer.width as usize, app.help_reachable())), footer);
     }
 
     if app.watch.is_some() {
@@ -85,7 +85,8 @@ fn draw_main(frame: &mut Frame, area: Rect, app: &mut App) {
         crate::run_ui::draw_picker(frame, area, app);
     } else if app.show_dry_log {
         draw_dry_log(frame, area, app);
-    } else if app.show_help {
+    }
+    if app.show_help {
         draw_help(frame, area, app);
     }
 }
@@ -1497,7 +1498,7 @@ mod tests {
     fn an_empty_run_form_says_what_to_do_first() {
         let (_rt, mut app) = run_tests::run_app();
         let screen = text_of(&draw_at(&mut app, 130, 30));
-        for expected in ["run a script", "choose an organization", "How a run works", "→ Choose an organization", "○ Choose a script", "○ Review the devices", "The devices appear here"] {
+        for expected in ["run a script", "Organization", "choose ▾", "How a run works", "→ Choose an organization", "○ Choose a script", "○ Review the devices", "The devices appear here"] {
             assert!(screen.contains(expected), "missing {expected:?}:\n{screen}");
         }
     }
@@ -1997,6 +1998,46 @@ mod tests {
     }
 
     #[test]
+    fn the_position_readout_uses_the_same_numbers_as_the_gutter() {
+        let (_rt, mut app) = viewer_tests::viewer_app();
+        viewer_tests::open(&mut app);
+        viewer_tests::draw(&mut app, 100, 20);
+        for _ in 0..30 {
+            run_tests::press(&mut app, KeyCode::Down);
+        }
+        let screen = viewer_tests::draw(&mut app, 100, 20);
+        let gutter_numbers: Vec<usize> = screen.lines().filter_map(|l| l.trim_start_matches('│').split_whitespace().next().and_then(|w| w.parse().ok())).collect();
+        let (first, last) = (gutter_numbers.iter().min().unwrap(), gutter_numbers.iter().max().unwrap());
+        assert!(screen.contains(&format!("lines {first}–{last} of ")), "footer must agree with the line numbers shown ({first}–{last}):\n{screen}");
+    }
+
+    #[test]
+    fn help_opens_from_the_viewer_over_it_and_esc_returns_to_the_output() {
+        let (_rt, mut app) = viewer_tests::viewer_app();
+        viewer_tests::open(&mut app);
+        run_tests::press(&mut app, KeyCode::Char('?'));
+        assert!(app.show_help && app.viewer.is_some());
+        let screen = text_of(&draw_at(&mut app, 120, 34));
+        assert!(screen.contains("Reading output") && screen.contains("close the output"), "{screen}");
+        run_tests::press(&mut app, KeyCode::Esc);
+        assert!(!app.show_help && app.viewer.is_some(), "esc closes the help, not the output behind it");
+    }
+
+    #[test]
+    fn the_footer_only_offers_help_where_the_question_mark_works() {
+        let (_rt, mut app) = run_tests::run_app();
+        let footer = |app: &mut App| {
+            let screen = draw_at(app, 130, 30);
+            let last = screen.area.height - 1;
+            (0..screen.area.width).map(|x| screen[(x, last)].symbol().to_string()).collect::<String>()
+        };
+        assert!(footer(&mut app).contains("? help"));
+        // A picker takes every key as search text, so `?` can't open help there.
+        run_tests::press(&mut app, KeyCode::Enter);
+        assert!(app.picker.is_some() && !footer(&mut app).contains("? help"));
+    }
+
+    #[test]
     fn the_viewer_explains_it_too_and_only_says_what_is_true_about_wrapping() {
         let (_rt, mut app) = bitlocker_app();
         run_tests::press(&mut app, KeyCode::Enter);
@@ -2008,7 +2049,7 @@ mod tests {
         assert!(!screen.contains("N-able says"), "{screen}");
         assert!(!screen.contains("wrapped"), "nothing here wraps, so no hint about wrapping:\n{screen}");
         // With a line that really is wrapped, the hint appears.
-        let narrow = text_of(&draw_at(&mut app, 50, 24));
+        let narrow = text_of(&draw_at(&mut app, 40, 24));
         assert!(narrow.contains("Some long lines are wrapped"), "{narrow}");
     }
 

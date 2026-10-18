@@ -78,6 +78,7 @@ impl App {
 
         match key.code {
             KeyCode::Char('q') => self.viewer = None,
+            KeyCode::Char('?') | KeyCode::F(1) => self.show_help = true,
             // Esc backs out one step: first the search, then the viewer.
             KeyCode::Esc => {
                 if v.search.is_empty() {
@@ -349,7 +350,7 @@ pub(crate) mod tests {
     fn the_viewer_owns_the_keyboard_so_nothing_leaks_to_the_app_behind_it() {
         let (_rt, mut app) = viewer_app();
         open(&mut app);
-        for c in ['1', '2', '?', 'd', 'x', 'R', 's'] {
+        for c in ['1', '2', 'd', 'x', 'R', 's'] {
             press(&mut app, KeyCode::Char(c));
         }
         assert!(app.page == Page::Activity && !app.show_help && app.confirm.is_none() && !app.quit);

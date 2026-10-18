@@ -58,11 +58,18 @@ pub fn draw_viewer(frame: &mut Frame, area: Rect, app: &mut App) {
     let top = viewer.top;
     let shown: Vec<Line> = visuals.iter().skip(top).take(body.height as usize).map(|v| visual_line(v, &lines, gutter, text_width, &viewer.search, current_line)).collect();
 
-    // Position, in the panel's own border.
-    let (first, last) = (top + 1, (top + body.height as usize).min(viewer.total));
+    // Position, in the panel's own border: the numbers on screen are the script's own line numbers, so the
+    // readout speaks in those too, and never in rows (which wrapping and the detail rows would shift).
     let percent = if viewer.total <= viewer.height { 100 } else { top * 100 / viewer.max_top().max(1) };
     let wrap_note = if viewer.wrap { "wrap on" } else { "wrap off" };
-    let footer = if viewer.total == 0 { theme::footer_text(wrap_note) } else { theme::footer_text(&format!("lines {first}–{last} of {} · {percent}% · {wrap_note}", viewer.total)) };
+    let output_wrapped = viewer.wrap && visuals.iter().any(|v| !v.first && matches!(lines[v.line].kind, output_view::Kind::Stdout | output_view::Kind::Stderr));
+    let seen: Vec<usize> = visuals.iter().skip(top).take(body.height as usize).filter(|v| v.first).filter_map(|v| lines[v.line].number).collect();
+    let all = lines.iter().filter_map(|l| l.number).max().unwrap_or(0);
+    let footer = match (seen.iter().min(), seen.iter().max()) {
+        (Some(first), Some(last)) if viewer.total > 0 => theme::footer_text(&format!("lines {first}–{last} of {all} · {percent}% · {wrap_note}")),
+        _ if viewer.total > 0 => theme::footer_text(&format!("{percent}% · {wrap_note}")),
+        _ => theme::footer_text(wrap_note),
+    };
     frame.render_widget(block.title_bottom(footer), popup);
 
     frame.render_widget(Paragraph::new(shown), Rect { width: body.width.saturating_sub(1), ..body });
@@ -89,8 +96,8 @@ pub fn draw_viewer(frame: &mut Frame, area: Rect, app: &mut App) {
                 Span::styled("   n next · N previous · esc clears", Style::new().fg(DIM)),
             ])
         }
-    } else if viewer.wrap && viewer.total > lines.len() {
-        // Only said when it is true: some line really was wrapped.
+    } else if output_wrapped {
+        // Only said when it is true: a line of the script's output really was wrapped.
         Line::styled("Some long lines are wrapped: w shows them whole, and < > then scroll sideways.", Style::new().fg(DIM))
     } else if !viewer.wrap {
         Line::styled("Lines are shown whole: < > scroll sideways, w wraps them again.", Style::new().fg(DIM))

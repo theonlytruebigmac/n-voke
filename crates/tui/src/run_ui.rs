@@ -130,7 +130,7 @@ fn draw_form(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
     // Organization / script / targets.
     row(&mut lines, RunField::Org, "Organization", match &run.org {
         Some(o) => vec![Span::styled(truncate(&o.name, value_width), Style::new().fg(TEXT)), Span::styled(" ▾", Style::new().fg(DIM))],
-        None => placeholder("choose an organization ▾"),
+        None => placeholder("choose ▾"),
     });
     if run.org.is_some() {
         row(&mut lines, RunField::Script, "Script", match &run.script {
@@ -139,7 +139,7 @@ fn draw_form(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
                 Span::styled(format!("  {}", language_name(&s.language)), Style::new().fg(DIM)),
                 Span::styled(" ▾", Style::new().fg(DIM)),
             ],
-            None => placeholder("choose a script ▾"),
+            None => placeholder("choose ▾"),
         });
         row(&mut lines, RunField::Targets, "Run on", if run.targets.is_empty() {
             placeholder("add devices or tags ▾")
@@ -252,6 +252,13 @@ fn push_wrapped(lines: &mut Vec<Line<'static>>, text: &str, width: usize, indent
         // Continuation lines line up under the words, not under a leading mark.
         let lead = if i == 0 { indent } else { indent + 2 };
         lines.push(Line::styled(format!("{}{piece}", " ".repeat(lead)), style));
+    }
+}
+
+/// Prose with a one-column margin on every line.
+fn push_wrapped_flat(lines: &mut Vec<Line<'static>>, text: &str, width: usize, style: Style) {
+    for piece in crate::output_view::wrap_words(text, width.saturating_sub(2).max(8)) {
+        lines.push(Line::styled(format!(" {piece}"), style));
     }
 }
 
@@ -506,10 +513,13 @@ pub fn draw_picker(frame: &mut Frame, area: Rect, app: &mut App) {
     frame.render_widget(Paragraph::new(Line::from(vec![Span::styled(" › ", Style::new().fg(ACCENT)), Span::styled(picker.term().to_string(), Style::new().fg(TEXT)), Span::styled(blink, Style::new().fg(ACCENT))])), search_area);
 
     if let Some(e) = &picker.error {
-        let mut lines = vec![Line::styled(format!(" {e}"), Style::new().fg(ERR))];
+        // Wrapped by hand so every line keeps the same left margin.
+        let width = status_area.width as usize;
+        let mut lines = vec![];
+        push_wrapped_flat(&mut lines, e, width, Style::new().fg(ERR));
         if denied {
             lines.push(Line::from(""));
-            lines.push(Line::styled(" To fix it: press esc, then ← to the menu, 5 for Settings, enter, and paste a new token.", Style::new().fg(WARN)));
+            push_wrapped_flat(&mut lines, "To fix it: press esc, then ← to the menu, 5 for Settings, enter, and paste a new token.", width, Style::new().fg(WARN));
         }
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), status_area);
     } else {
