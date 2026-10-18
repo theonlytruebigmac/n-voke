@@ -37,6 +37,9 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      - name: Version files in sync
+        run: npm run version:check
+
       - name: Type-check and build frontend
         run: npm run build
 

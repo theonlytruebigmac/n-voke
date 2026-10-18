@@ -98,7 +98,7 @@ fn seal_with(cipher: &XChaCha20Poly1305, plaintext: &[u8]) -> Result<Vec<u8>, St
 
 fn open_with(cipher: &XChaCha20Poly1305, sealed: &[u8]) -> Result<Vec<u8>, String> {
     if sealed.len() < MAGIC.len() + NONCE_LEN || &sealed[..MAGIC.len()] != MAGIC {
-        return Err("Not an encrypted Script Runner file".into());
+        return Err("Not an encrypted N-voke file".into());
     }
     let nonce = XNonce::try_from(&sealed[MAGIC.len()..MAGIC.len() + NONCE_LEN]).map_err(|_| "Bad nonce".to_string())?;
     cipher

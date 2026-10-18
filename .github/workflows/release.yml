@@ -1,30 +1,138 @@
-name: Build and Release
+name: Release
 
-# Builds installers for Windows, macOS and Linux and attaches them to a draft
-# GitHub release. Push a tag like v0.1.0 to trigger it, or run it manually.
+# Pushing a version tag (v1.2.3) builds installers for Windows, macOS and Linux
+# and publishes them as a GitHub release with generated notes. If any step fails
+# the release stays a draft, so nothing half-built is ever public.
+#
+#   verify  -> tag matches the app version, tests pass
+#   draft   -> create (or reuse) a draft release
+#   build   -> one job per platform, each uploads its installers to the draft
+#   publish -> turn the draft into a public release
+#
+# See docs/RELEASING.md.
 on:
   push:
     tags:
-      - 'v*'
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+  # Re-run a release for an existing tag: choose the tag under "Use workflow from".
   workflow_dispatch:
+
+# One release run per tag at a time; a newer push for the same tag replaces the older run.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Require a tag
+        if: github.ref_type != 'tag'
+        run: |
+          echo "::error::Run this workflow from a version tag (v1.2.3), not from a branch."
+          exit 1
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check the tag matches the app version
+        run: node scripts/version.mjs --check --tag "$GITHUB_REF_NAME"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Type-check and build frontend
+        run: npm run build
+
+      - name: Frontend tests
+        run: npm test
+
+      - name: Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+  draft:
+    name: Draft release
+    needs: verify
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    outputs:
+      release_id: ${{ steps.release.outputs.release_id }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Create the draft release, or reuse it on a re-run
+        id: release
+        run: |
+          # Drafts are invisible to the tag lookup endpoint, so search the full list.
+          find_id() {
+            gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+              --jq ".[] | select(.tag_name == \"$TAG\") | .id" | head -n1
+          }
+
+          id=$(find_id)
+          if [ -z "$id" ]; then
+            # A tag with a hyphen (v1.2.3-1) is a pre-release.
+            flags=()
+            if [[ "$TAG" == *-* ]]; then flags+=(--prerelease); fi
+
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "N-voke $TAG" \
+              --generate-notes \
+              --verify-tag \
+              --draft \
+              "${flags[@]}"
+            id=$(find_id)
+          fi
+
+          echo "release_id=$id" >> "$GITHUB_OUTPUT"
+
   build:
+    name: Build (${{ matrix.name }})
+    needs: draft
     permissions:
       contents: write
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
-          - platform: windows-latest
+          - name: Windows
+            platform: windows-latest
             args: ''
-          - platform: macos-latest
+          - name: macOS
+            platform: macos-latest
             # One app that runs natively on both Apple Silicon and Intel Macs.
             args: '--target universal-apple-darwin'
-          - platform: ubuntu-22.04
+          - name: Linux
+            platform: ubuntu-22.04
             args: ''
     runs-on: ${{ matrix.platform }}
 
@@ -62,9 +170,30 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_type == 'tag' && github.ref_name || 'v__VERSION__' }}
-          releaseName: 'N-able Script Runner ${{ github.ref_type == ''tag'' && github.ref_name || ''v__VERSION__'' }}'
-          releaseBody: 'Download the installer for your platform below.'
-          releaseDraft: true
-          prerelease: false
+          releaseId: ${{ needs.draft.outputs.release_id }}
           args: ${{ matrix.args }}
+
+  publish:
+    name: Publish release
+    needs: [draft, build]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Publish the draft
+        env:
+          RELEASE_ID: ${{ needs.draft.outputs.release_id }}
+        run: |
+          # Pre-releases never become "Latest"; stable releases always do.
+          if [[ "$TAG" == *-* ]]; then
+            latest=false; prerelease=true
+          else
+            latest=true; prerelease=false
+          fi
+
+          url=$(gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            -F draft=false -F prerelease=$prerelease -f make_latest=$latest --jq .html_url)
+          echo "Published: $url" >> "$GITHUB_STEP_SUMMARY"

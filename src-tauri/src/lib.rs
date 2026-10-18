@@ -240,8 +240,8 @@ async fn send_graphql(app: &AppHandle, state: &State<'_, AppState>, query: &str,
         .ok_or("No API key is configured. Add one in Settings.")?;
     let url = load_config(app).api_url;
 
-    // Developer aid: SCRIPT_RUNNER_LOG_REQUESTS=1 prints one line per API request.
-    if std::env::var_os("SCRIPT_RUNNER_LOG_REQUESTS").is_some() {
+    // Developer aid: NVOKE_LOG_REQUESTS=1 prints one line per API request.
+    if std::env::var_os("NVOKE_LOG_REQUESTS").is_some() {
         let condensed = query.split_whitespace().collect::<Vec<_>>().join(" ");
         let op: String = condensed.chars().take(110).collect();
         eprintln!("[graphql] {op}");
@@ -382,7 +382,7 @@ pub fn run() {
 
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
-        .user_agent(concat!("nable-script-runner/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("n-voke/", env!("CARGO_PKG_VERSION")))
         .build()
         .expect("failed to build HTTP client");
 

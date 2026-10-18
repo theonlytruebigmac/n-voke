@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "N-able Script Runner",
+  "productName": "N-voke",
   "version": "0.1.0",
   "identifier": "com.fraziersystems.nable-script-runner",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "N-able Script Runner",
+        "title": "N-voke",
         "width": 1200,
         "height": 800,
         "minWidth": 900,

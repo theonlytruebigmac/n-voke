@@ -74,7 +74,7 @@ export function RunPage({
     setRunning(true);
     setError(null);
     try {
-      const name = (taskName.trim() || `Script Runner - ${new Date().toLocaleString()}`).slice(0, 128);
+      const name = (taskName.trim() || `N-voke - ${new Date().toLocaleString()}`).slice(0, 128);
       const runInputs = inputs
         .filter((d) => values[d.variable] !== undefined && values[d.variable] !== "")
         .map((d) => ({ name: d.name, variable: d.variable, type: d.type, value: toInputValue(d.type, values[d.variable]) }));

@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    n_able_scripting_demo_lib::run()
+    n_voke_lib::run()
 }

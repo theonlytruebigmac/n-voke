@@ -2419,7 +2419,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "n-able-scripting-demo"
+name = "n-voke"
 version = "0.1.0"
 dependencies = [
  "base64 0.23.1",

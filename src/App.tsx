@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { ListChecks, Play, ScrollText, Settings as SettingsIcon, Tags, TerminalSquare } from "lucide-react";
+import { ListChecks, Play, ScrollText, Settings as SettingsIcon, Tags } from "lucide-react";
 import { PersistQueryClientProvider } from "@tanstack/react-query-persist-client";
+import logo from "./assets/logo.png";
 import { getSettings, type Settings } from "./lib/api";
 import { orgsQuery, tagsQuery } from "./lib/collections";
 import { persistOptions, queryClient } from "./lib/queryClient";
@@ -79,8 +80,8 @@ export default function App() {
         <div className="flex h-full">
           <nav className="flex w-48 shrink-0 flex-col border-r border-border bg-sidebar px-2 pb-2">
             <div className="flex h-[52px] items-center gap-2 px-2.5">
-              <TerminalSquare className="size-4 text-accent" />
-              <span className="text-sm font-semibold">Script Runner</span>
+              <img src={logo} alt="" className="size-5 rounded-[5px]" />
+              <span className="text-sm font-semibold">N-voke</span>
             </div>
             <div className="space-y-0.5">
               <NavItem icon={<Play />} label="Run" active={page === "run"} onClick={() => setPage("run")} />

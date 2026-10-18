@@ -1,4 +1,4 @@
-# N-able Script Runner
+# N-voke
 
 A small desktop app for running N-able repository scripts on devices, or on whole groups of devices via tags, and following every run to the end. It runs on Windows, macOS and Linux.
 
@@ -33,6 +33,8 @@ npm test              # frontend unit tests
 cargo test --manifest-path src-tauri/Cargo.toml
 npm run tauri build   # build an installer for the current platform
 ```
+
+See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full guide: setup, debugging, local data, and how the pieces fit together.
 
 ### Layout
 
@@ -72,7 +74,7 @@ Reference data is cached with TanStack Query and saved to disk for 24 hours, so 
 | Device searches, tag members, tag details | Cached per query, shown immediately and refreshed in the background after a minute. |
 | Running tasks | Not cached; polled every 5 seconds until finished. |
 
-Changes made in the app (tags created, edited, deleted, devices added or removed) update the cache immediately. Replacing the API key or endpoint clears it. Set `SCRIPT_RUNNER_LOG_REQUESTS=1` when running `npm run tauri dev` to print every API request, which is handy for checking what the cache saves.
+Changes made in the app (tags created, edited, deleted, devices added or removed) update the cache immediately. Replacing the API key or endpoint clears it. Set `NVOKE_LOG_REQUESTS=1` when running `npm run tauri dev` to print every API request, which is handy for checking what the cache saves.
 
 ### Security
 
@@ -89,6 +91,19 @@ WebKitGTK's DMA-BUF renderer crashes on NVIDIA under Wayland. The app sets `WEBK
 
 ## Releases
 
-Push a tag such as `v0.1.0`. The **Build and Release** workflow builds the Windows (`.msi`, `.exe`), macOS (universal `.dmg`) and Linux (`.AppImage`, `.deb`, `.rpm`) installers and attaches them to a draft GitHub release.
+Releases are published automatically when a version tag is pushed:
 
-The builds are unsigned, so macOS Gatekeeper and Windows SmartScreen will warn on first launch. Signing needs an Apple Developer ID and a Windows code-signing certificate, configured as repository secrets for `tauri-action`.
+```sh
+npm run version:bump -- minor      # or patch, major, or an exact version
+git commit -am "chore: release v0.2.0"
+git tag v0.2.0
+git push origin main v0.2.0
+```
+
+The **Release** workflow checks the tag against the app version, runs the tests, builds the Windows (`.msi`, `.exe`), macOS (universal `.dmg`) and Linux (`.AppImage`, `.deb`, `.rpm`) installers, and publishes them with generated release notes. See [docs/RELEASING.md](docs/RELEASING.md) for the full process, pre-releases and troubleshooting.
+
+The builds are unsigned, so macOS Gatekeeper and Windows SmartScreen will warn on first launch.
+
+## License
+
+[MIT](LICENSE)
