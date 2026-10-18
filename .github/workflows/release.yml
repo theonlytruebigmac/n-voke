@@ -99,18 +99,24 @@ jobs:
 
           id=$(find_id)
           if [ -z "$id" ]; then
+            # Create through the API so the response carries the id; listing releases right
+            # after creating one can miss it. The tag already exists (this run was started by it).
             # A tag with a hyphen (v1.2.3-1) is a pre-release.
-            flags=()
-            if [[ "$TAG" == *-* ]]; then flags+=(--prerelease); fi
+            prerelease=false
+            if [[ "$TAG" == *-* ]]; then prerelease=true; fi
 
-            gh release create "$TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --title "N-voke $TAG" \
-              --generate-notes \
-              --verify-tag \
-              --draft \
-              "${flags[@]}"
-            id=$(find_id)
+            id=$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
+              -f tag_name="$TAG" \
+              -f name="N-voke $TAG" \
+              -F draft=true \
+              -F prerelease=$prerelease \
+              -F generate_release_notes=true \
+              --jq .id)
+          fi
+
+          if [ -z "$id" ]; then
+            echo "::error::Could not create or find the draft release for $TAG."
+            exit 1
           fi
 
           echo "release_id=$id" >> "$GITHUB_OUTPUT"
