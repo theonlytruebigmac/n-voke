@@ -207,10 +207,10 @@ impl JobStore {
             return;
         }
         let keep: Vec<Job> = retain(jobs, days, now_ms(), MAX_JOBS).iter().map(cap_output).collect();
-        if let Ok(json) = serde_json::to_string(&keep) {
-            if let Err(e) = self.core.store_set(STORE_NAME, json).await {
-                eprintln!("Couldn't save the run history: {e}");
-            }
+        if let Ok(json) = serde_json::to_string(&keep)
+            && let Err(e) = self.core.store_set(STORE_NAME, json).await
+        {
+            eprintln!("Couldn't save the run history: {e}");
         }
     }
 

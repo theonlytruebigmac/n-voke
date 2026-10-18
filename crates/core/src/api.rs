@@ -97,7 +97,8 @@ pub fn interpret(status: u16, body: &Value, tolerate_errors: bool) -> Result<Rep
         let detail = if errors.is_empty() { String::new() } else { format!(": {}", errors.join("; ")) };
         return Err(format!("Access denied (HTTP {status}){detail}. Check the API key in Settings."));
     }
-    if !errors.is_empty() && !(tolerate_errors && data.is_some()) {
+    let usable_despite_errors = tolerate_errors && data.is_some();
+    if !errors.is_empty() && !usable_despite_errors {
         return Err(errors.join("; "));
     }
     if status >= 400 {
