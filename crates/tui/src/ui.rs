@@ -153,7 +153,7 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
         .iter()
         .enumerate()
         .map(|(i, page)| {
-            let label = format!(" {} {} {}", i + 1, page.icon(), page.title());
+            let label = format!(" {} {}", i + 1, page.title());
             if *page == app.page {
                 // The selected page is a full-width bar; it is brighter while the sidebar has focus.
                 let style = Style::new().fg(ACCENT).add_modifier(Modifier::BOLD);

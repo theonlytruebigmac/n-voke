@@ -93,16 +93,6 @@ impl Page {
         }
     }
 
-    pub fn icon(self) -> &'static str {
-        match self {
-            Page::Run => "▶",
-            Page::Activity => "◉",
-            Page::Tags => "◆",
-            Page::Audit => "≡",
-            Page::Settings => "✦",
-        }
-    }
-
     /// Whether the page has anything to move around in (so focus can enter it).
     pub fn interactive(self) -> bool {
         matches!(self, Page::Run | Page::Activity | Page::Tags | Page::Audit | Page::Settings)
