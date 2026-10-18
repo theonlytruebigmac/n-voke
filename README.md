@@ -18,6 +18,8 @@ cargo run --release --manifest-path crates/tui/Cargo.toml
 
 Arrow keys move around: `↑`/`↓` choose a page, `→` steps into it, `←` steps back out. Press `?` for every key. The app paints its own background so text stays readable on any terminal theme; set `NVOKE_TRANSPARENT=1` to use the terminal's own instead. It needs a terminal with 24-bit colour.
 
+Run `nvoke --dry-run` (or set `NVOKE_DRY_RUN=1`) to try things without consequences: reads work as normal, but nothing that would change N-able is ever sent. Each change is held back instead, and `d` lists them with the exact request that would have gone out (passwords redacted). Nothing is written to the audit log or the shared run history either. The mode is chosen at launch and a banner shows it for the whole session. It only covers N-able: saving your own settings still works.
+
 Built so far: Activity (follow runs live, results grouped by outcome), Audit log and Settings. Run and Tags are next. If both apps are open at once, the one that saves last wins, so run history is best used from one at a time.
 
 ## Setup

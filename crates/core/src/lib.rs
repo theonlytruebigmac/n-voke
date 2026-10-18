@@ -20,7 +20,10 @@ pub mod vault;
 use std::{
     fs,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -72,6 +75,30 @@ pub struct GraphQlResponse {
     pub status: u16,
     pub body: Value,
 }
+
+/// What a mutation returns in dry-run mode, in place of being sent. Callers treat it as a
+/// failed change (nothing happened), and can tell it from a real failure with `is_dry_run_error`.
+pub const DRY_RUN_ERROR: &str = "Dry run: nothing was sent to N-able.";
+
+pub fn is_dry_run_error(error: &str) -> bool {
+    error == DRY_RUN_ERROR
+}
+
+/// A change that dry-run mode held back: what would have been sent.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct DryRunEntry {
+    pub timestamp: String,
+    pub action: String,
+    pub summary: String,
+    /// The GraphQL operation name, e.g. "RunScript".
+    pub operation: Option<String>,
+    /// The exact variables that would have been sent, with password inputs redacted.
+    pub variables: Value,
+}
+
+/// Most held-back changes kept; the oldest go first.
+const MAX_DRY_RUN_ENTRIES: usize = 200;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -137,12 +164,20 @@ pub struct Core {
     api_key: Mutex<Option<String>>,
     vault: Arc<Vault>,
     audit: AuditLog,
+    /// Dry run: reads work as normal, but nothing that changes N-able is sent.
+    dry_run: AtomicBool,
+    dry_run_log: Mutex<Vec<DryRunEntry>>,
 }
 
 impl Core {
-    /// `app_version` goes into the User-Agent header.
+    /// `app_version` goes into the User-Agent header. Dry-run mode starts on when
+    /// `NVOKE_DRY_RUN` is set to anything but empty or 0.
     pub fn new(app_version: &str) -> Result<Self, String> {
-        let paths = Paths::resolve()?;
+        Self::new_in(Paths::resolve()?, app_version)
+    }
+
+    /// Like `new`, with the config and data directories given (for tests).
+    pub fn new_in(paths: Paths, app_version: &str) -> Result<Self, String> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .user_agent(format!("n-voke/{app_version}"))
@@ -150,7 +185,45 @@ impl Core {
             .map_err(|e| format!("Could not build the HTTP client: {e}"))?;
         let vault = Arc::new(Vault::new());
         let audit = AuditLog::new(vault.clone(), paths.data_dir.clone());
-        Ok(Self { paths, http, api_key: Mutex::new(None), vault, audit })
+        let dry_run = std::env::var_os("NVOKE_DRY_RUN").is_some_and(|v| !v.is_empty() && v != "0");
+        Ok(Self { paths, http, api_key: Mutex::new(None), vault, audit, dry_run: AtomicBool::new(dry_run), dry_run_log: Mutex::new(vec![]) })
+    }
+
+    pub fn set_dry_run(&self, on: bool) {
+        self.dry_run.store(on, Ordering::SeqCst);
+    }
+
+    pub fn is_dry_run(&self) -> bool {
+        self.dry_run.load(Ordering::SeqCst)
+    }
+
+    /// Whether this operation must not be sent: any mutation, while dry run is on.
+    fn holds_back(&self, query: &str) -> bool {
+        self.is_dry_run() && audit::is_mutation(query)
+    }
+
+    /// The changes held back so far, oldest first.
+    pub fn dry_run_log(&self) -> Vec<DryRunEntry> {
+        self.dry_run_log.lock().unwrap().clone()
+    }
+
+    fn hold_back(&self, query: &str, variables: &Value, audit: Option<&AuditMeta>) {
+        let operation = audit::operation_name(query);
+        let (action, summary) = match audit {
+            Some(meta) => (meta.action.clone(), meta.summary.clone()),
+            None => ("mutation".to_string(), format!("Ran {}", operation.as_deref().unwrap_or("a mutation"))),
+        };
+        let mut log = self.dry_run_log.lock().unwrap();
+        log.push(DryRunEntry {
+            timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            action,
+            summary,
+            operation,
+            variables: audit::redact(variables),
+        });
+        if log.len() > MAX_DRY_RUN_ENTRIES {
+            log.remove(0);
+        }
     }
 
     /// Converts any plain-JSON audit lines from older versions. Call once at startup, off the UI thread.
@@ -259,6 +332,12 @@ impl Core {
     /// Every mutation is written to the audit log here, whether or not the caller
     /// supplied `audit` context, so nothing that changes N-able goes unrecorded.
     pub async fn graphql(&self, query: &str, variables: &Value, audit: Option<AuditMeta>) -> Result<GraphQlResponse, String> {
+        // Every mutation in the app passes through here, so this one check covers them all.
+        // Nothing is sent and nothing is audited: the audit log records changes that happened.
+        if self.holds_back(query) {
+            self.hold_back(query, variables, audit.as_ref());
+            return Err(DRY_RUN_ERROR.into());
+        }
         let result = self.send_graphql(query, variables).await;
 
         if audit::is_mutation(query) {
@@ -375,5 +454,114 @@ impl Core {
         };
         self.audit.append(&AuditEntry::new("data.clear", "Cleared run history and cached data", result.clone(), Value::Null));
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{inputs::InputType, model::InputValue};
+
+    /// A core that keeps its files in a throwaway directory, so tests never touch the real ones.
+    fn core(name: &str) -> (Core, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("nvoke-core-test-{name}-{}", std::process::id()));
+        let paths = Paths { config_dir: dir.join("config"), data_dir: dir.join("data") };
+        (Core::new_in(paths, "test").unwrap(), dir)
+    }
+
+    #[tokio::test]
+    async fn in_dry_run_a_mutation_is_held_back_before_anything_is_sent() {
+        let (core, dir) = core("held");
+        core.set_dry_run(true);
+        // There is no API key in this core: a real send would fail with "No API key", not with the dry-run error.
+        let result = core.graphql("mutation CreateTag($input: X!) { staticTagCreate(input: $input) { item { id } } }", &json!({ "input": { "name": "Servers" } }), None).await;
+        assert_eq!(result.err().as_deref(), Some(DRY_RUN_ERROR));
+        let log = core.dry_run_log();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].operation.as_deref(), Some("CreateTag"));
+        assert_eq!(log[0].variables["input"]["name"], "Servers");
+        // Nothing happened, so nothing is recorded as a change.
+        assert!(core.audit_log(None).unwrap().entries.is_empty(), "the audit log must not record a dry run");
+        assert!(!dir.join("data").join("audit.jsonl").exists());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn every_typed_mutation_is_covered_and_describes_itself() {
+        let (core, dir) = core("typed");
+        core.set_dry_run(true);
+        let ids = vec!["t1".to_string()];
+        let devices = vec!["a1".to_string(), "a2".to_string()];
+        let results = vec![
+            core.create_static_tag("o1", "Servers", "", "").await.err(),
+            core.update_static_tag("t1", "Servers", "desc").await.err(),
+            core.create_dynamic_tag("o1", "Win10", "", &json!({ "and": [] }), "").await.err(),
+            core.update_dynamic_tag("t1", "Win10", "", &json!({ "and": [] })).await.err(),
+            core.assign_static_tags(&ids, &devices, Some("Servers")).await.err(),
+            core.unassign_static_tags(&ids, &devices, None).await.err(),
+            core.delete_tags(&ids, None).await.err(),
+        ];
+        assert!(results.iter().all(|r| r.as_deref() == Some(DRY_RUN_ERROR)), "{results:?}");
+        let summaries: Vec<String> = core.dry_run_log().into_iter().map(|e| e.summary).collect();
+        assert_eq!(summaries.len(), 7);
+        assert!(summaries.contains(&"Added 2 devices to Servers".to_string()), "{summaries:?}");
+        assert!(summaries.contains(&"Deleted 1 tag".to_string()), "{summaries:?}");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_held_back_run_shows_what_would_be_sent_but_never_a_password() {
+        let (core, dir) = core("run");
+        core.set_dry_run(true);
+        let input = api::RunScriptInput {
+            script_id: "s1".into(),
+            script_name: "Cleanup".into(),
+            target_label: "PatchGroupTwo".into(),
+            asset_ids: vec!["a1".into(), "a2".into()],
+            name: "Run Cleanup".into(),
+            timeout_seconds: 120,
+            inputs: vec![
+                api::RunInput { name: "Mode".into(), variable: "mode".into(), kind: InputType::String, value: InputValue { string_value: Some("fast".into()), ..Default::default() } },
+                api::RunInput { name: "Pass".into(), variable: "pw".into(), kind: InputType::Password, value: InputValue { string_value: Some("s3cret-value".into()), ..Default::default() } },
+            ],
+        };
+        assert_eq!(core.run_script(&input).await.err().as_deref(), Some(DRY_RUN_ERROR));
+        let entry = &core.dry_run_log()[0];
+        assert_eq!(entry.action, "script.run");
+        assert_eq!(entry.summary, "Ran Cleanup on 2 devices (PatchGroupTwo)");
+        assert_eq!(entry.variables["input"]["assetIds"], json!(["a1", "a2"]));
+        assert_eq!(entry.variables["input"]["configuration"]["scriptId"], "s1");
+        let text = entry.variables.to_string();
+        assert!(text.contains("fast") && text.contains("[redacted]"));
+        assert!(!text.contains("s3cret-value"), "a password must never appear in the dry-run log: {text}");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn only_mutations_are_held_back_so_browsing_still_works() {
+        let (core, dir) = core("decision");
+        core.set_dry_run(true);
+        assert!(core.holds_back("mutation RunScript($input: X!) { a }"));
+        assert!(core.holds_back("\n # note\n mutation { a }"));
+        assert!(!core.holds_back("query FindScripts($orgIds: [ID!]!) { scriptSearch(inOrganizations: $orgIds) { nodes { id } } }"));
+        assert!(!core.holds_back("{ asset(id: \"x\") { name } }"));
+        core.set_dry_run(false);
+        assert!(!core.holds_back("mutation RunScript($input: X!) { a }"), "off means off");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_log_keeps_only_the_most_recent_entries_and_dry_run_can_be_switched() {
+        let (core, dir) = core("cap");
+        assert!(!core.is_dry_run() || std::env::var_os("NVOKE_DRY_RUN").is_some());
+        core.set_dry_run(true);
+        assert!(core.is_dry_run());
+        for i in 0..MAX_DRY_RUN_ENTRIES + 5 {
+            core.hold_back("mutation M { x }", &json!({ "i": i }), None);
+        }
+        let log = core.dry_run_log();
+        assert_eq!(log.len(), MAX_DRY_RUN_ENTRIES);
+        assert_eq!(log[0].variables["i"], 5, "the oldest entries go first");
+        let _ = fs::remove_dir_all(dir);
     }
 }

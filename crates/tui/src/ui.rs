@@ -67,6 +67,9 @@ fn draw_main(frame: &mut Frame, area: Rect, app: &mut App) {
         (Focus::Content, Page::Audit) => &[("↑↓", "move"), ("PgUp/PgDn", "jump"), ("r", "refresh"), ("←", "back"), ("?", "help")],
         (Focus::Content, _) => &[("enter", "edit"), ("←", "back"), ("?", "help"), ("q", "quit")],
     };
+    let dry_hint = [("d", "held-back changes")];
+    let hints: Vec<(&str, &str)> = if app.is_dry_run() { hints.iter().chain(dry_hint.iter()).copied().collect() } else { hints.to_vec() };
+    let hints = hints.as_slice();
     if matches!(app.confirm, Some(Confirm::RemoveJob(_))) {
         let prompt = Line::from(vec![
             Span::styled(" Remove this run from your history? ", Style::new().fg(WARN).add_modifier(Modifier::BOLD)),
@@ -78,7 +81,9 @@ fn draw_main(frame: &mut Frame, area: Rect, app: &mut App) {
         frame.render_widget(Paragraph::new(theme::key_hints(hints)), footer);
     }
 
-    if app.show_help {
+    if app.show_dry_log {
+        draw_dry_log(frame, area, app);
+    } else if app.show_help {
         draw_help(frame, area);
     }
 }
@@ -98,6 +103,11 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     let mut left = vec![Span::styled(" ◢◤ ", Style::new().fg(ACCENT))];
     left.extend("N-voke".chars().enumerate().map(|(i, c)| Span::styled(c.to_string(), Style::new().fg(theme::shimmer(i, app.tick)).add_modifier(Modifier::BOLD))));
     left.push(Span::styled(format!("  /  {}", app.page.title()), Style::new().fg(DIM)));
+    if app.is_dry_run() {
+        // Loud on purpose: it must be obvious at a glance that nothing is being sent.
+        left.push(Span::raw("   "));
+        left.push(Span::styled(" DRY RUN · nothing is sent ", Style::new().fg(theme::BG).bg(WARN).add_modifier(Modifier::BOLD)));
+    }
     frame.render_widget(Paragraph::new(Line::from(left)), left_area);
     frame.render_widget(Paragraph::new(right).style(Style::new().fg(DIM)).alignment(Alignment::Right), right_area);
 }
@@ -663,8 +673,14 @@ fn draw_settings(frame: &mut Frame, area: Rect, app: &App, focused: bool) {
     let yes_no = |b: bool| if b { Span::styled("● yes", Style::new().fg(OK)) } else { Span::styled("○ no", Style::new().fg(ERR)) };
     let label = |text: &str| Span::styled(format!(" {text:<20}"), Style::new().fg(DIM));
     let history = if s.history_days == 0 { "not saved".to_string() } else { format!("{} days", s.history_days) };
+    let mode = if app.is_dry_run() {
+        Span::styled("DRY RUN: changes are held back, not sent", Style::new().fg(WARN).add_modifier(Modifier::BOLD))
+    } else {
+        Span::styled("live", Style::new().fg(TEXT))
+    };
     let mut lines = vec![
         Line::from(""),
+        Line::from(vec![label("Mode"), mode]),
         Line::from(vec![label("API endpoint"), Span::styled(s.api_url.clone(), Style::new().fg(TEXT))]),
         Line::from(vec![label("API key saved"), yes_no(s.has_api_key)]),
         Line::from(vec![label("Keep run history"), Span::styled(history, Style::new().fg(TEXT))]),
@@ -734,6 +750,51 @@ fn draw_field(frame: &mut Frame, area: Rect, label: &str, input: &TextInput, foc
 }
 
 // ---- overlays and helpers ----------------------------------------------------
+
+fn draw_dry_log(frame: &mut Frame, area: Rect, app: &mut App) {
+    let popup = centered(area, area.width.saturating_sub(6).min(130), area.height.saturating_sub(4));
+    clear(frame, popup);
+    let entries = app.dry_run_entries();
+    let outer = panel("held back · not sent", true).title_bottom(Line::styled(" ↑↓ choose · PgUp/PgDn scroll · esc close ", Style::new().fg(DIM)));
+    let inner = outer.inner(popup);
+    frame.render_widget(outer, popup);
+
+    if entries.is_empty() {
+        let text = vec![
+            Line::from(""),
+            Line::styled("Nothing held back yet.", Style::new().fg(TEXT).add_modifier(Modifier::BOLD)),
+            Line::from(""),
+            Line::styled("Changes you try to make appear here, with the exact request, instead of being sent.", Style::new().fg(DIM)),
+        ];
+        frame.render_widget(Paragraph::new(text).alignment(Alignment::Center), inner);
+        return;
+    }
+
+    let [list_area, detail_area] = Layout::horizontal([Constraint::Percentage(40), Constraint::Fill(1)]).areas(inner);
+    let rows = entries.iter().map(|e| {
+        let time = e.timestamp.split('T').nth(1).unwrap_or("").trim_end_matches('Z').to_string();
+        Row::new(vec![Cell::from(time).style(Style::new().fg(DIM)), Cell::from(truncate(&e.summary, (list_area.width as usize).saturating_sub(14))).style(Style::new().fg(TEXT))])
+    });
+    let table = Table::new(rows, [Constraint::Length(8), Constraint::Fill(1)])
+        .column_spacing(2)
+        .row_highlight_style(Style::new().bg(SELECTED_BG).add_modifier(Modifier::BOLD))
+        .highlight_symbol("▌ ");
+    frame.render_stateful_widget(table, list_area, &mut app.dry_table);
+
+    let selected = app.dry_table.selected().and_then(|i| entries.get(i));
+    let mut lines = vec![];
+    if let Some(e) = selected {
+        let label = |text: &str| Span::styled(format!("{text:<10}"), Style::new().fg(DIM));
+        lines.push(Line::from(vec![label("Would do"), Span::styled(e.summary.clone(), Style::new().fg(TEXT).add_modifier(Modifier::BOLD))]));
+        lines.push(Line::from(vec![label("Action"), Span::styled(e.action.clone(), Style::new().fg(action_color(&e.action)))]));
+        lines.push(Line::from(vec![label("Operation"), Span::styled(e.operation.clone().unwrap_or_default(), Style::new().fg(TEXT))]));
+        lines.push(Line::from(vec![label("Sent"), Span::styled("no: held back by dry run", Style::new().fg(WARN))]));
+        lines.push(Line::from(""));
+        lines.push(Line::styled("variables (passwords redacted)", Style::new().fg(DIM).add_modifier(Modifier::BOLD)));
+        lines.extend(serde_json::to_string_pretty(&e.variables).unwrap_or_default().lines().map(|l| Line::styled(l.to_string(), Style::new().fg(TEXT))));
+    }
+    frame.render_widget(Paragraph::new(lines).scroll((app.dry_scroll, 0)).block(Block::new().borders(ratatui::widgets::Borders::LEFT).border_style(Style::new().fg(BORDER))), detail_area);
+}
 
 fn draw_help(frame: &mut Frame, area: Rect) {
     let popup = centered(area, 60, 21);
@@ -1107,5 +1168,89 @@ mod tests {
         assert_eq!(glyphs.len(), phases.len(), "outcomes must be tellable apart without colour");
         assert_ne!(phase_color(TaskPhase::Succeeded), phase_color(TaskPhase::Failed));
         assert_ne!(phase_color(TaskPhase::Failed), phase_color(TaskPhase::NonZero));
+    }
+
+    // ---- dry run ------------------------------------------------------------
+
+    use nvoke_core::{api::{RunInput, RunScriptInput}, inputs::InputType, model::InputValue};
+
+    fn dry_app() -> (tokio::runtime::Runtime, App) {
+        let (rt, mut app) = app();
+        app.core().set_dry_run(true);
+        app.settings = Some(settings(true));
+        app.screen = Screen::Main;
+        (rt, app)
+    }
+
+    #[test]
+    fn the_banner_shows_in_dry_run_and_only_then() {
+        let (_rt, mut app) = dry_app();
+        let dry = text_of(&draw_at(&mut app, 120, 30));
+        assert!(dry.contains("DRY RUN · nothing is sent") && dry.contains("held-back changes"), "{dry}");
+        app.core().set_dry_run(false);
+        let live = text_of(&draw_at(&mut app, 120, 30));
+        assert!(!live.contains("DRY RUN") && !live.contains("held-back"), "{live}");
+    }
+
+    #[test]
+    fn the_banner_survives_a_narrow_window_and_settings_names_the_mode() {
+        let (_rt, mut app) = dry_app();
+        assert!(text_of(&draw_at(&mut app, 60, 20)).contains("DRY RUN"));
+        app.page = Page::Settings;
+        assert!(text_of(&draw_at(&mut app, 120, 30)).contains("DRY RUN: changes are held back, not sent"));
+    }
+
+    #[test]
+    fn a_held_back_run_is_listed_with_its_request_and_never_its_password() {
+        let (rt, mut app) = dry_app();
+        let input = RunScriptInput {
+            script_id: "s1".into(),
+            script_name: "Cleanup".into(),
+            target_label: "PatchGroupTwo".into(),
+            asset_ids: vec!["a1".into(), "a2".into()],
+            name: "Run Cleanup".into(),
+            timeout_seconds: 120,
+            inputs: vec![RunInput { name: "Pass".into(), variable: "pw".into(), kind: InputType::Password, value: InputValue { string_value: Some("hunter2-secret".into()), ..Default::default() } }],
+        };
+        let result = rt.block_on(app.core().run_script(&input));
+        assert_eq!(result.err().as_deref(), Some(nvoke_core::DRY_RUN_ERROR));
+
+        app.show_dry_log = true;
+        app.dry_table.select(Some(0));
+        let screen = text_of(&draw_at(&mut app, 130, 40));
+        for expected in ["held back · not sent", "Ran Cleanup on 2 devices (PatchGroupTwo)", "script.run", "no: held back by dry run", "\"assetIds\"", "[redacted]"] {
+            assert!(screen.contains(expected), "missing {expected:?}:\n{screen}");
+        }
+        assert!(!screen.contains("hunter2-secret"), "a password must never be drawn:\n{screen}");
+    }
+
+    #[test]
+    fn the_held_back_list_explains_itself_when_empty() {
+        let (_rt, mut app) = dry_app();
+        app.show_dry_log = true;
+        let screen = text_of(&draw_at(&mut app, 120, 30));
+        assert!(screen.contains("Nothing held back yet.") && screen.contains("instead of being sent"), "{screen}");
+    }
+
+    #[test]
+    fn the_held_back_list_paints_a_solid_background_at_every_size() {
+        for (width, height) in [(130, 40), (80, 24), (50, 16)] {
+            for entries in [0, 2] {
+                let (rt, mut app) = dry_app();
+                rt.block_on(async {
+                    for i in 0..entries {
+                        let _ = app.core().create_static_tag("o", &format!("Tag{i}"), "", "").await;
+                    }
+                });
+                app.show_dry_log = true;
+                app.dry_table.select((entries > 0).then_some(0));
+                let buffer = draw_at(&mut app, width, height);
+                for y in 0..height {
+                    for x in 0..width {
+                        assert!(matches!(buffer[(x, y)].bg, Color::Rgb(..)), "{width}x{height} with {entries} entries: cell ({x},{y}) is not painted");
+                    }
+                }
+            }
+        }
     }
 }

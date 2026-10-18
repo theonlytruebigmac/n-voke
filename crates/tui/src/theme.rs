@@ -119,6 +119,12 @@ mod tests {
     }
 
     #[test]
+    fn the_dry_run_banner_is_readable() {
+        // Dark text on the warning colour.
+        assert!(contrast(BG, WARN) >= 4.5, "{:.1}:1", contrast(BG, WARN));
+    }
+
+    #[test]
     fn lines_and_bars_stand_out_from_the_background() {
         assert!(contrast(BORDER, BG) >= 3.0, "borders are {:.1}:1", contrast(BORDER, BG));
         for t in [0.0, 0.5, 1.0] {

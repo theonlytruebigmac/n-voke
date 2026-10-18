@@ -8,7 +8,7 @@
 use std::{io, sync::{Arc, mpsc}, thread, time::Duration};
 
 use nvoke_core::{
-    AuditLogView, Core, Settings,
+    AuditLogView, Core, DryRunEntry, Settings,
     job_store::JobStore,
     jobs::Job,
     task_state::{PhaseCounts, ResultGroup, count_phases, group_results},
@@ -188,6 +188,10 @@ pub struct App {
     pub pane: Pane,
     pub output_scroll: u16,
     pub confirm: Option<Confirm>,
+    /// The list of changes dry-run mode held back.
+    pub show_dry_log: bool,
+    pub dry_table: TableState,
+    pub dry_scroll: u16,
     pub focus: Focus,
     pub show_help: bool,
     /// Counts ticks since start; animations are a function of it.
@@ -221,6 +225,9 @@ impl App {
             pane: Pane::Jobs,
             output_scroll: 0,
             confirm: None,
+            show_dry_log: false,
+            dry_table: TableState::default(),
+            dry_scroll: 0,
             focus: Focus::Sidebar,
             show_help: false,
             tick: 0,
@@ -403,6 +410,9 @@ impl App {
             }
             return; // any other key cancels
         }
+        if self.show_dry_log {
+            return self.on_dry_log_key(key);
+        }
         if self.show_help {
             // Any key closes the help overlay.
             self.show_help = false;
@@ -411,6 +421,11 @@ impl App {
         match key.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('?') | KeyCode::F(1) => self.show_help = true,
+            KeyCode::Char('d') if self.core.is_dry_run() => {
+                self.show_dry_log = true;
+                self.dry_table.select((!self.core.dry_run_log().is_empty()).then_some(0));
+                self.dry_scroll = 0;
+            }
             KeyCode::Char(c @ '1'..='5') => self.go(Page::ALL[c as usize - '1' as usize]),
             KeyCode::Tab => self.go(Page::ALL[(self.page.index() + 1) % Page::ALL.len()]),
             KeyCode::BackTab => self.go(Page::ALL[(self.page.index() + Page::ALL.len() - 1) % Page::ALL.len()]),
@@ -502,6 +517,39 @@ impl App {
         };
         let selected = self.group_table.selected().filter(|&i| i < self.groups.len()).or((!self.groups.is_empty()).then_some(0));
         self.group_table.select(selected);
+    }
+
+    pub fn core(&self) -> &Arc<Core> {
+        &self.core
+    }
+
+    pub fn is_dry_run(&self) -> bool {
+        self.core.is_dry_run()
+    }
+
+    /// The changes held back so far, newest first.
+    pub fn dry_run_entries(&self) -> Vec<DryRunEntry> {
+        let mut entries = self.core.dry_run_log();
+        entries.reverse();
+        entries
+    }
+
+    fn on_dry_log_key(&mut self, key: KeyEvent) {
+        let count = self.core.dry_run_log().len();
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('d' | 'q') => self.show_dry_log = false,
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.dry_table.select(Some((self.dry_table.selected().unwrap_or(0) + 1).min(count.saturating_sub(1))));
+                self.dry_scroll = 0;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.dry_table.select(Some(self.dry_table.selected().unwrap_or(0).saturating_sub(1)));
+                self.dry_scroll = 0;
+            }
+            KeyCode::PageDown => self.dry_scroll = self.dry_scroll.saturating_add(8),
+            KeyCode::PageUp => self.dry_scroll = self.dry_scroll.saturating_sub(8),
+            _ => {}
+        }
     }
 
     pub fn jobs_loaded(&self) -> bool {
@@ -826,5 +874,54 @@ mod tests {
             press(&mut app, key);
         }
         assert!(app.confirm.is_none() && app.selected_job.is_none() && app.pane == Pane::Jobs);
+    }
+
+    // ---- dry run ------------------------------------------------------------
+
+    #[test]
+    fn d_opens_the_held_back_list_only_in_dry_run_and_esc_closes_it() {
+        let (_rt, mut app) = app();
+        app.core().set_dry_run(false);
+        press(&mut app, KeyCode::Char('d'));
+        assert!(!app.show_dry_log, "there is no list to open in a live session");
+
+        app.core().set_dry_run(true);
+        press(&mut app, KeyCode::Char('d'));
+        assert!(app.show_dry_log);
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.show_dry_log);
+    }
+
+    #[test]
+    fn keys_inside_the_held_back_list_do_not_leak_to_the_app_behind_it() {
+        let (_rt, mut app) = app();
+        app.core().set_dry_run(true);
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Char('2')); // would switch page
+        press(&mut app, KeyCode::Char('x')); // would ask to remove a run
+        assert!(app.page == Page::Run && app.confirm.is_none());
+        press(&mut app, KeyCode::Char('q'));
+        assert!(!app.quit, "q closes the list; it must not quit the app");
+        assert!(!app.show_dry_log);
+    }
+
+    #[test]
+    fn arrows_choose_between_held_back_changes() {
+        let (rt, mut app) = app();
+        app.core().set_dry_run(true);
+        rt.block_on(async {
+            for name in ["One", "Two", "Three"] {
+                let _ = app.core().create_static_tag("o", name, "", "").await;
+            }
+        });
+        press(&mut app, KeyCode::Char('d'));
+        assert_eq!(app.dry_table.selected(), Some(0), "newest first");
+        assert!(app.dry_run_entries()[0].summary.contains("Three"));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.dry_table.selected(), Some(2), "stops at the last entry");
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.dry_table.selected(), Some(1));
     }
 }
