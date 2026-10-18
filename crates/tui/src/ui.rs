@@ -1,29 +1,38 @@
 //! Drawing. These functions only read the app state; they never change it
-//! (apart from list scroll positions, which ratatui updates while rendering).
+//! (apart from table scroll positions, which ratatui updates while rendering).
 
+use chrono::{DateTime, Local, Utc};
 use nvoke_core::audit::AuditEntry;
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
+    layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
+    symbols,
     text::{Line, Span},
-    widgets::{Block, BorderType, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{
+        Block, BorderType, Cell, Clear, LineGauge, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Sparkline, SparklineBar, Table, Wrap,
+    },
 };
 
 use crate::{
-    app::{App, Field, Load, Page, Screen, SettingsForm},
+    app::{App, Field, Focus, Load, Page, Screen, SettingsForm},
     input::TextInput,
+    theme::{self, ACCENT, BORDER, DIM, ERR, OK, SELECTED_BG, TEXT, WARN, panel},
 };
 
-const ACCENT: Color = Color::Cyan;
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+fn spinner(tick: u64) -> &'static str {
+    SPINNER[(tick % SPINNER.len() as u64) as usize]
+}
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     match &app.screen {
-        Screen::Loading => centered_message(frame, area, "Loading…", Color::Gray),
+        Screen::Loading => centered_message(frame, area, &format!("{} Loading…", spinner(app.tick)), ACCENT),
         Screen::Fatal(error) => {
             let text = format!("N-voke can't start:\n\n{error}\n\nPress q to quit.");
-            centered_message(frame, area, &text, Color::Red);
+            centered_message(frame, area, &text, ERR);
         }
         Screen::Form(form) => draw_form(frame, area, form),
         Screen::Main => draw_main(frame, area, app),
@@ -31,110 +40,291 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 }
 
 fn draw_main(frame: &mut Frame, area: Rect, app: &mut App) {
-    let [body, footer] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area);
-    let [sidebar, content] = Layout::horizontal([Constraint::Length(18), Constraint::Fill(1)]).areas(body);
+    let [header, body, footer] = Layout::vertical([Constraint::Length(1), Constraint::Fill(1), Constraint::Length(1)]).areas(area);
+    let [sidebar, content] = Layout::horizontal([Constraint::Length(22), Constraint::Fill(1)]).areas(body);
 
-    let items = Page::ALL.iter().enumerate().map(|(i, page)| {
-        let style = if *page == app.page { Style::new().fg(ACCENT).bold() } else { Style::new() };
-        ListItem::new(format!(" {} {}", i + 1, page.title())).style(style)
-    });
-    frame.render_widget(List::new(items).block(Block::bordered().title(" N-voke ")), sidebar);
+    draw_header(frame, header, app);
+    draw_sidebar(frame, sidebar, app);
 
+    let focused = app.focus == Focus::Content;
     match app.page {
-        Page::Audit => draw_audit(frame, content, app),
-        Page::Settings => draw_settings(frame, content, app),
-        page => {
-            let text = format!("{} isn't built yet.", page.title());
-            frame.render_widget(Paragraph::new(text).block(Block::bordered().title(format!(" {} ", page.title()))), content);
-        }
+        Page::Audit => draw_audit(frame, content, app, focused),
+        Page::Settings => draw_settings(frame, content, app, focused),
+        page => draw_placeholder(frame, content, page),
     }
 
-    let hints = match app.page {
-        Page::Audit => "j/k move · g/G first/last · r refresh · tab next page · q quit",
-        Page::Settings => "e edit · tab next page · q quit",
-        _ => "1-5 or tab switch page · q quit",
+    let hints: &[(&str, &str)] = match (app.focus, app.page) {
+        (Focus::Sidebar, p) if p.interactive() => &[("↑↓", "page"), ("→", "open"), ("?", "help"), ("q", "quit")],
+        (Focus::Sidebar, _) => &[("↑↓", "page"), ("?", "help"), ("q", "quit")],
+        (Focus::Content, Page::Audit) => &[("↑↓", "move"), ("PgUp/PgDn", "jump"), ("r", "refresh"), ("←", "back"), ("?", "help")],
+        (Focus::Content, _) => &[("enter", "edit"), ("←", "back"), ("?", "help"), ("q", "quit")],
     };
-    frame.render_widget(Paragraph::new(hints).style(Style::new().fg(Color::DarkGray)), footer);
+    frame.render_widget(Paragraph::new(theme::key_hints(hints)), footer);
+
+    if app.show_help {
+        draw_help(frame, area);
+    }
 }
 
-fn draw_audit(frame: &mut Frame, area: Rect, app: &mut App) {
-    let block = Block::bordered().title(" Audit log ");
+fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
+    let host = app
+        .settings
+        .as_ref()
+        .map(|s| s.api_url.trim_start_matches("https://").split('/').next().unwrap_or("").to_string())
+        .unwrap_or_default();
+    let clock = Local::now().format("%H:%M:%S").to_string();
+    let right = format!("{host}  {clock} ");
+
+    let [left_area, right_area] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(right.chars().count() as u16)]).areas(area);
+
+    // The logo's colours drift along the letters as the ticks advance.
+    let mut left = vec![Span::styled(" ◢◤ ", Style::new().fg(ACCENT))];
+    left.extend("N-voke".chars().enumerate().map(|(i, c)| Span::styled(c.to_string(), Style::new().fg(theme::shimmer(i, app.tick)).add_modifier(Modifier::BOLD))));
+    left.push(Span::styled(format!("  /  {}", app.page.title()), Style::new().fg(DIM)));
+    frame.render_widget(Paragraph::new(Line::from(left)), left_area);
+    frame.render_widget(Paragraph::new(right).style(Style::new().fg(DIM)).alignment(Alignment::Right), right_area);
+}
+
+fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
+    let [nav, status] = Layout::vertical([Constraint::Length(Page::ALL.len() as u16 + 2), Constraint::Fill(1)]).areas(area);
+
+    let focused = app.focus == Focus::Sidebar;
+    let lines: Vec<Line> = Page::ALL
+        .iter()
+        .enumerate()
+        .map(|(i, page)| {
+            let label = format!(" {} {} {}", i + 1, page.icon(), page.title());
+            if *page == app.page {
+                // The selected page is a full-width bar; it is brighter while the sidebar has focus.
+                let bg = if focused { SELECTED_BG } else { Color::Reset };
+                Line::styled(format!("{label:<width$}", width = nav.width.saturating_sub(2) as usize), Style::new().fg(ACCENT).bg(bg).add_modifier(Modifier::BOLD))
+            } else {
+                Line::styled(label, Style::new().fg(TEXT))
+            }
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines).block(panel("menu", focused)), nav);
+
+    let mark = |on: bool| if on { Span::styled("●", Style::new().fg(OK)) } else { Span::styled("○", Style::new().fg(ERR)) };
+    let mut lines = vec![];
+    if let Some(s) = &app.settings {
+        lines.push(Line::from(vec![Span::raw(" "), mark(s.has_api_key), Span::styled(" API key", Style::new().fg(TEXT))]));
+        lines.push(Line::from(vec![Span::raw(" "), mark(s.encryption_available), Span::styled(" encrypted", Style::new().fg(TEXT))]));
+        let history = if s.history_days == 0 { "no history".to_string() } else { format!("history {}d", s.history_days) };
+        lines.push(Line::styled(format!("   {history}"), Style::new().fg(DIM)));
+    }
+    lines.push(Line::from(""));
+    lines.push(if app.busy() {
+        Line::from(vec![Span::styled(format!(" {} ", spinner(app.tick)), Style::new().fg(ACCENT)), Span::styled("working", Style::new().fg(ACCENT))])
+    } else {
+        Line::styled(" ● idle", Style::new().fg(DIM))
+    });
+    frame.render_widget(Paragraph::new(lines).block(panel("status", false)), status);
+}
+
+fn draw_placeholder(frame: &mut Frame, area: Rect, page: Page) {
+    let lines = vec![
+        Line::from(""),
+        Line::styled(format!("{} isn't built yet.", page.title()), Style::new().fg(WARN).add_modifier(Modifier::BOLD)),
+        Line::from(""),
+        Line::styled(page.blurb(), Style::new().fg(DIM)),
+    ];
+    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center).block(panel(page.title(), false)), area);
+}
+
+// ---- audit log ---------------------------------------------------------------
+
+/// How far back the activity chart reaches.
+const CHART_DAYS: i64 = 14;
+
+fn parse_time(text: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(text).ok().map(|t| t.with_timezone(&Utc))
+}
+
+/// Counts entries per time slice across the last `CHART_DAYS` days, oldest first:
+/// every change, and the failed ones.
+fn bucket(entries: &[AuditEntry], slots: usize, now: DateTime<Utc>) -> (Vec<u64>, Vec<u64>) {
+    let (mut all, mut failed) = (vec![0u64; slots], vec![0u64; slots]);
+    let span = CHART_DAYS * 86_400;
+    for entry in entries {
+        let Some(at) = parse_time(&entry.timestamp) else { continue };
+        let age = (now - at).num_seconds().max(0);
+        if age >= span {
+            continue;
+        }
+        let slot = slots - 1 - (age as usize * slots / span as usize).min(slots - 1);
+        all[slot] += 1;
+        if entry.outcome != "ok" {
+            failed[slot] += 1;
+        }
+    }
+    (all, failed)
+}
+
+fn ago(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let secs = (now - at).num_seconds().max(0);
+    match secs {
+        0..=59 => "just now".into(),
+        60..=3599 => format!("{}m ago", secs / 60),
+        3600..=86399 => format!("{}h ago", secs / 3600),
+        _ => format!("{}d ago", secs / 86400),
+    }
+}
+
+fn action_color(action: &str) -> Color {
+    match action.split('.').next().unwrap_or("") {
+        "script" => Color::Rgb(190, 140, 255),
+        "tag" => ACCENT,
+        "settings" => WARN,
+        _ => DIM,
+    }
+}
+
+fn draw_audit(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
     let log = match &app.audit {
         Load::Ready(log) => log,
         Load::Failed(error) => {
-            frame.render_widget(Paragraph::new(error.as_str()).style(Style::new().fg(Color::Red)).wrap(Wrap { trim: true }).block(block), area);
+            frame.render_widget(Paragraph::new(error.as_str()).style(Style::new().fg(ERR)).wrap(Wrap { trim: true }).block(panel("audit log", focused)), area);
             return;
         }
         Load::NotLoaded | Load::Loading => {
-            frame.render_widget(Paragraph::new("Loading…").block(block), area);
+            let text = format!("{} Loading…", spinner(app.tick));
+            frame.render_widget(Paragraph::new(text).style(Style::new().fg(ACCENT)).block(panel("audit log", focused)), area);
             return;
         }
     };
     if log.entries.is_empty() {
-        frame.render_widget(Paragraph::new("Nothing has been recorded yet.").block(block), area);
+        frame.render_widget(Paragraph::new("Nothing has been recorded yet.").style(Style::new().fg(DIM)).block(panel("audit log", focused)), area);
         return;
     }
 
-    let [list_area, detail_area] = Layout::vertical([Constraint::Fill(1), Constraint::Length(7)]).areas(area);
+    let now = Utc::now();
+    let [top, table_area, detail_area] = Layout::vertical([Constraint::Length(8), Constraint::Fill(1), Constraint::Length(7)]).areas(area);
+    let [chart_area, stats_area] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(34)]).areas(top);
 
-    let items: Vec<ListItem> = log.entries.iter().map(entry_row).collect();
-    let list = List::new(items)
-        .block(block.title_bottom(format!(" {} entries ", log.entries.len())))
-        .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
-    frame.render_stateful_widget(list, list_area, &mut app.audit_list);
+    // Activity over time: one bar per slice, taller and hotter where more happened.
+    let chart_block = panel(&format!("activity · last {CHART_DAYS} days"), false);
+    let inner = chart_block.inner(chart_area);
+    frame.render_widget(chart_block, chart_area);
+    let [changes_area, failures_area] = Layout::vertical([Constraint::Fill(1), Constraint::Length(2)]).areas(inner);
+    let (all, failed) = bucket(&log.entries, inner.width.max(1) as usize, now);
+    let max = all.iter().copied().max().unwrap_or(1).max(1);
+    // Empty slices are "absent": drawn as a dim baseline rather than left blank.
+    let bars = all.iter().map(|&n| match n {
+        0 => SparklineBar::from(None),
+        n => SparklineBar::from(n).style(Some(Style::new().fg(theme::heat(n as f32 / max as f32)))),
+    });
+    frame.render_widget(Sparkline::default().data(bars).max(max).absent_value_symbol(symbols::bar::ONE_EIGHTH).absent_value_style(Style::new().fg(BORDER)), changes_area);
+    let fmax = failed.iter().copied().max().unwrap_or(1).max(1);
+    frame.render_widget(Sparkline::default().data(failed.iter().copied()).max(fmax).style(Style::new().fg(ERR)), failures_area);
 
-    let selected = app.audit_list.selected().and_then(|i| log.entries.get(i));
+    // Totals.
+    let total = log.entries.len();
+    let errors = log.entries.iter().filter(|e| e.outcome != "ok").count();
+    let ratio = (total - errors) as f64 / total as f64;
+    let last = log.entries.first().and_then(|e| parse_time(&e.timestamp)).map(|t| ago(t, now)).unwrap_or_default();
+    let stats_block = panel("totals", false);
+    let stats_inner = stats_block.inner(stats_area);
+    frame.render_widget(stats_block, stats_area);
+    let [numbers, gauge] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(stats_inner);
+    let number = |label: &str, value: String, color: Color| Line::from(vec![Span::styled(format!(" {label:<10}"), Style::new().fg(DIM)), Span::styled(value, Style::new().fg(color).add_modifier(Modifier::BOLD))]);
+    frame.render_widget(
+        Paragraph::new(vec![
+            number("changes", total.to_string(), TEXT),
+            number("succeeded", (total - errors).to_string(), OK),
+            number("failed", errors.to_string(), if errors > 0 { ERR } else { DIM }),
+            number("latest", last, TEXT),
+        ]),
+        numbers,
+    );
+    frame.render_widget(
+        LineGauge::default()
+            .ratio(ratio)
+            .label(format!(" {:>3.0}% ok ", ratio * 100.0))
+            .filled_symbol(symbols::line::THICK_HORIZONTAL)
+            .unfilled_symbol(symbols::line::THICK_HORIZONTAL)
+            .filled_style(Style::new().fg(theme::heat(1.0 - ratio as f32)))
+            .unfilled_style(Style::new().fg(BORDER)),
+        gauge,
+    );
+
+    // The entries, newest first.
+    let rows = log.entries.iter().map(|e| {
+        let (mark, color) = if e.outcome == "ok" { ("✓", OK) } else { ("✗", ERR) };
+        Row::new(vec![
+            Cell::from(e.timestamp.replace('T', " ").trim_end_matches('Z').to_string()).style(Style::new().fg(DIM)),
+            Cell::from(mark).style(Style::new().fg(color)),
+            Cell::from(e.action.clone()).style(Style::new().fg(action_color(&e.action))),
+            Cell::from(e.summary.clone()).style(Style::new().fg(if e.outcome == "ok" { TEXT } else { ERR })),
+        ])
+    });
+    let table = Table::new(rows, [Constraint::Length(19), Constraint::Length(1), Constraint::Length(16), Constraint::Fill(1)])
+        .column_spacing(2)
+        .header(Row::new(["When", "", "Action", "Summary"]).style(Style::new().fg(DIM).add_modifier(Modifier::BOLD)))
+        .row_highlight_style(Style::new().bg(SELECTED_BG).add_modifier(Modifier::BOLD))
+        .highlight_symbol("▌ ")
+        .block(panel("audit log", focused).title_bottom(Line::styled(format!(" {total} entries "), Style::new().fg(DIM))));
+    frame.render_stateful_widget(table, table_area, &mut app.audit_table);
+
+    let mut scroll = ScrollbarState::new(total).position(app.audit_table.selected().unwrap_or(0));
+    frame.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight).begin_symbol(None).end_symbol(None).track_symbol(None).style(Style::new().fg(BORDER)),
+        table_area.inner(ratatui::layout::Margin { vertical: 1, horizontal: 0 }),
+        &mut scroll,
+    );
+
+    // Details of the selected entry.
+    let label = |text: &str| Span::styled(format!("{text:<9}"), Style::new().fg(DIM));
     let mut lines = vec![];
-    if let Some(entry) = selected {
-        lines.push(Line::from(vec![Span::styled("When     ", Style::new().dim()), Span::raw(entry.timestamp.clone())]));
-        lines.push(Line::from(vec![Span::styled("User     ", Style::new().dim()), Span::raw(entry.user.clone())]));
-        lines.push(Line::from(vec![Span::styled("Action   ", Style::new().dim()), Span::raw(entry.action.clone())]));
-        lines.push(Line::from(vec![Span::styled("Summary  ", Style::new().dim()), Span::raw(entry.summary.clone())]));
+    if let Some(entry) = app.audit_table.selected().and_then(|i| log.entries.get(i)) {
+        lines.push(Line::from(vec![label("When"), Span::raw(entry.timestamp.clone())]));
+        lines.push(Line::from(vec![label("User"), Span::raw(entry.user.clone())]));
+        lines.push(Line::from(vec![label("Action"), Span::styled(entry.action.clone(), Style::new().fg(action_color(&entry.action)))]));
+        lines.push(Line::from(vec![label("Summary"), Span::raw(entry.summary.clone())]));
         if let Some(error) = &entry.error {
-            lines.push(Line::from(vec![Span::styled("Error    ", Style::new().dim()), Span::styled(error.clone(), Style::new().fg(Color::Red))]));
+            lines.push(Line::from(vec![label("Error"), Span::styled(error.clone(), Style::new().fg(ERR))]));
         }
     }
-    let detail = Paragraph::new(lines).wrap(Wrap { trim: true }).block(Block::bordered().title(" Details ").title_bottom(format!(" {} ", log.path)));
+    let detail = Paragraph::new(lines).style(Style::new().fg(TEXT)).wrap(Wrap { trim: true }).block(panel("details", false).title_bottom(Line::styled(format!(" {} ", log.path), Style::new().fg(DIM))));
     frame.render_widget(detail, detail_area);
 }
 
-fn entry_row(entry: &AuditEntry) -> ListItem<'static> {
-    let (mark, color) = if entry.outcome == "ok" { ("✓", Color::Green) } else { ("✗", Color::Red) };
-    // "2026-10-18T17:02:23Z" -> "2026-10-18 17:02:23"
-    let when = entry.timestamp.replace('T', " ").trim_end_matches('Z').to_string();
-    ListItem::new(Line::from(vec![
-        Span::styled(format!(" {mark} "), Style::new().fg(color)),
-        Span::styled(format!("{when}  "), Style::new().dim()),
-        Span::raw(entry.summary.clone()),
-    ]))
-}
+// ---- settings ----------------------------------------------------------------
 
-fn draw_settings(frame: &mut Frame, area: Rect, app: &App) {
-    let block = Block::bordered().title(" Settings ");
+fn draw_settings(frame: &mut Frame, area: Rect, app: &App, focused: bool) {
+    let block = panel("settings", focused);
     let Some(s) = &app.settings else {
         frame.render_widget(Paragraph::new("Loading…").block(block), area);
         return;
     };
-    let yes_no = |b: bool| if b { Span::styled("yes", Style::new().fg(Color::Green)) } else { Span::styled("no", Style::new().fg(Color::Red)) };
+    let yes_no = |b: bool| if b { Span::styled("● yes", Style::new().fg(OK)) } else { Span::styled("○ no", Style::new().fg(ERR)) };
+    let label = |text: &str| Span::styled(format!(" {text:<20}"), Style::new().fg(DIM));
     let history = if s.history_days == 0 { "not saved".to_string() } else { format!("{} days", s.history_days) };
     let mut lines = vec![
-        Line::from(vec![Span::styled("API endpoint      ", Style::new().dim()), Span::raw(s.api_url.clone())]),
-        Line::from(vec![Span::styled("API key saved     ", Style::new().dim()), yes_no(s.has_api_key)]),
-        Line::from(vec![Span::styled("Keep run history  ", Style::new().dim()), Span::raw(history)]),
-        Line::from(vec![Span::styled("Encrypted at rest ", Style::new().dim()), yes_no(s.encryption_available)]),
+        Line::from(""),
+        Line::from(vec![label("API endpoint"), Span::styled(s.api_url.clone(), Style::new().fg(TEXT))]),
+        Line::from(vec![label("API key saved"), yes_no(s.has_api_key)]),
+        Line::from(vec![label("Keep run history"), Span::styled(history, Style::new().fg(TEXT))]),
+        Line::from(vec![label("Encrypted at rest"), yes_no(s.encryption_available)]),
     ];
     if let Some(error) = &s.encryption_error {
         lines.push(Line::from(""));
-        lines.push(Line::styled(error.clone(), Style::new().fg(Color::Yellow)));
+        lines.push(Line::styled(format!(" {error}"), Style::new().fg(WARN)));
+    }
+    if focused {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![Span::raw(" Press "), Span::styled("enter", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)), Span::raw(" to edit.")]).style(Style::new().fg(DIM)));
     }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }).block(block), area);
 }
 
+// ---- first launch / edit form ------------------------------------------------
+
 fn draw_form(frame: &mut Frame, area: Rect, form: &SettingsForm) {
-    let title = if form.first_run { " Welcome to N-voke " } else { " Edit settings " };
+    let title = if form.first_run { "Welcome to N-voke" } else { "Edit settings" };
     let popup = centered(area, 72, 14);
     frame.render_widget(Clear, popup);
-    let outer = Block::bordered().border_type(BorderType::Rounded).title(title);
+    let outer = panel(title, true);
     let inner = outer.inner(popup);
     frame.render_widget(outer, popup);
 
@@ -146,7 +336,7 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &SettingsForm) {
     } else {
         "Leave the token empty to keep the saved one."
     };
-    frame.render_widget(Paragraph::new(intro_text).wrap(Wrap { trim: true }), intro);
+    frame.render_widget(Paragraph::new(intro_text).style(Style::new().fg(TEXT)).wrap(Wrap { trim: true }), intro);
 
     let cursor = draw_field(frame, endpoint, "API endpoint", &form.endpoint, form.focus == Field::Endpoint);
     let token_cursor = draw_field(frame, token, "API token", &form.token, form.focus == Field::Token);
@@ -155,20 +345,20 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &SettingsForm) {
     }
 
     let (text, color) = match (&form.error, form.busy) {
-        (_, true) => ("Saving…".to_string(), Color::Gray),
-        (Some(error), _) => (error.clone(), Color::Red),
-        _ => (String::new(), Color::Gray),
+        (_, true) => ("Saving…".to_string(), ACCENT),
+        (Some(error), _) => (error.clone(), ERR),
+        _ => (String::new(), DIM),
     };
     frame.render_widget(Paragraph::new(text).style(Style::new().fg(color)).wrap(Wrap { trim: true }), message);
 
-    let esc = if form.first_run { "esc quit" } else { "esc cancel" };
-    frame.render_widget(Paragraph::new(format!("tab switch field · enter save · {esc}")).style(Style::new().fg(Color::DarkGray)), hints);
+    let esc = if form.first_run { "quit" } else { "cancel" };
+    frame.render_widget(Paragraph::new(theme::key_hints(&[("↑↓/tab", "switch field"), ("enter", "save"), ("esc", esc)])), hints);
 }
 
 /// Draws a labelled text field and returns where the cursor goes if it has focus.
 fn draw_field(frame: &mut Frame, area: Rect, label: &str, input: &TextInput, focused: bool) -> (u16, u16) {
-    let border = if focused { Style::new().fg(ACCENT) } else { Style::new().fg(Color::DarkGray) };
-    let block = Block::bordered().title(format!(" {label} ")).border_style(border);
+    let border = Style::new().fg(if focused { ACCENT } else { BORDER });
+    let block = Block::bordered().border_type(BorderType::Rounded).title(format!(" {label} ")).border_style(border);
     let inner = block.inner(area);
     let shown = input.shown();
     // Show the end of a value that is wider than the box.
@@ -176,13 +366,40 @@ fn draw_field(frame: &mut Frame, area: Rect, label: &str, input: &TextInput, foc
     let count = shown.chars().count();
     let visible: String = shown.chars().skip(count.saturating_sub(width)).collect();
     let cursor_x = inner.x + visible.chars().count() as u16;
-    frame.render_widget(Paragraph::new(visible).block(block), area);
+    frame.render_widget(Paragraph::new(visible).style(Style::new().fg(TEXT)).block(block), area);
     (cursor_x, inner.y)
+}
+
+// ---- overlays and helpers ----------------------------------------------------
+
+fn draw_help(frame: &mut Frame, area: Rect) {
+    let popup = centered(area, 56, 17);
+    frame.render_widget(Clear, popup);
+    let key = |k: &str, what: &str| Line::from(vec![Span::styled(format!(" {k:<14}"), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)), Span::styled(what.to_string(), Style::new().fg(TEXT))]);
+    let heading = |text: &str| Line::styled(format!(" {text}"), Style::new().fg(DIM).add_modifier(Modifier::BOLD));
+    let lines = vec![
+        heading("Anywhere"),
+        key("1-5, tab", "switch page"),
+        key("?", "this help"),
+        key("q, ctrl-c", "quit"),
+        Line::from(""),
+        heading("Menu"),
+        key("↑ ↓", "choose a page"),
+        key("→ enter", "step into the page"),
+        Line::from(""),
+        heading("Inside a page"),
+        key("↑ ↓", "move (j/k work too)"),
+        key("PgUp PgDn", "jump ten rows"),
+        key("home end", "first / last (g/G)"),
+        key("← esc", "back to the menu"),
+        key("r", "refresh"),
+    ];
+    frame.render_widget(Paragraph::new(lines).block(panel("keys", true).title_bottom(Line::styled(" any key closes ", Style::new().fg(DIM)))), popup);
 }
 
 fn centered_message(frame: &mut Frame, area: Rect, text: &str, color: Color) {
     let popup = centered(area, 70, text.lines().count() as u16 + 2);
-    frame.render_widget(Paragraph::new(text).style(Style::new().fg(color)).wrap(Wrap { trim: true }).block(Block::bordered()), popup);
+    frame.render_widget(Paragraph::new(text).style(Style::new().fg(color)).alignment(Alignment::Center).wrap(Wrap { trim: true }).block(panel("N-voke", false)), popup);
 }
 
 /// A `width` x `height` rectangle in the middle of `area` (clamped to fit).
@@ -255,12 +472,33 @@ mod tests {
             AuditEntry::new("script.run", "Ran Cleanup on 3 devices", Err("HTTP 500".into()), Value::Null),
         ];
         app.audit = Load::Ready(AuditLogView { path: "/tmp/audit.jsonl".into(), entries });
-        app.audit_list.select(Some(1));
+        app.audit_table.select(Some(1));
         let screen = render(&mut app);
         assert!(screen.contains("Audit log"), "{screen}");
         assert!(screen.contains("Created static tag Servers"), "{screen}");
         assert!(screen.contains("Error    HTTP 500"), "{screen}");
         assert!(screen.contains("/tmp/audit.jsonl"), "{screen}");
+    }
+
+    #[test]
+    fn buckets_count_recent_entries_newest_last_and_ignore_old_ones() {
+        let now = Utc::now();
+        let at = |ago: chrono::Duration, outcome: Result<(), String>| {
+            let mut e = AuditEntry::new("tag.create", "x", outcome, Value::Null);
+            e.timestamp = (now - ago).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            e
+        };
+        let entries = vec![
+            at(chrono::Duration::minutes(5), Ok(())),
+            at(chrono::Duration::minutes(10), Err("boom".into())),
+            at(chrono::Duration::days(7), Ok(())),
+            at(chrono::Duration::days(30), Ok(())), // beyond the chart: ignored
+        ];
+        let (all, failed) = bucket(&entries, 14, now);
+        assert_eq!(all.iter().sum::<u64>(), 3);
+        assert_eq!(all[13], 2, "recent entries land in the last slot");
+        assert_eq!(failed[13], 1);
+        assert_eq!(all[6], 1, "a week-old entry lands mid-chart");
     }
 
     #[test]
@@ -272,3 +510,4 @@ mod tests {
         assert!(render(&mut app).contains("Tags isn't built yet."));
     }
 }
+

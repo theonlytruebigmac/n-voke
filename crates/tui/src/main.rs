@@ -3,6 +3,7 @@
 
 mod app;
 mod input;
+mod theme;
 mod ui;
 
 use std::{error::Error, sync::Arc};

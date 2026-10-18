@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 nvoke-core = { path = "../core" }
 ratatui = "0.30"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 
 [dev-dependencies]
