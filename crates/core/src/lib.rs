@@ -5,6 +5,13 @@
 //! started in one shows up in the other.
 
 pub mod audit;
+pub mod inputs;
+pub mod jobs;
+pub mod model;
+pub mod rules;
+pub mod sync;
+pub mod targets;
+pub mod task_state;
 pub mod vault;
 
 use std::{
