@@ -22,9 +22,17 @@ use ratatui::{
 };
 use tokio::runtime::Handle;
 
-use crate::{input::TextInput, output_view::Viewer, picker::PickItem, ui};
+use crate::{
+    input::TextInput,
+    output_view::Viewer,
+    picker::{PickItem, Picker},
+    ui,
+};
 
 pub(crate) mod run;
+pub(crate) mod tags;
+use tags::{TagConfirm, TagDetail, TagDone};
+pub use tags::{TagsPane, TagsState};
 pub(crate) mod viewer;
 pub use viewer::TOAST_TICKS;
 pub use run::{NoticeKind, RunField, RunPane, RunState};
@@ -49,6 +57,9 @@ pub enum Msg {
     /// The devices the Run page's targets resolve to.
     Resolved { seq: u64, result: Result<(Vec<Resolved>, bool), String> },
     RunFinished(Result<Box<nvoke_core::jobs::Job>, String>),
+    TagList { seq: u64, result: Result<Vec<nvoke_core::model::Tag>, String> },
+    TagDetailLoaded { seq: u64, tag_id: String, result: Result<TagDetail, String> },
+    TagDone(Result<TagDone, String>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -83,20 +94,9 @@ impl Page {
         }
     }
 
-    /// What the page will do, shown until it is built.
-    pub fn blurb(self) -> &'static str {
-        match self {
-            Page::Run => "Pick an organization and a script, then devices and tags, and run it.",
-            Page::Activity => "Follow every run to the end, with results grouped by outcome.",
-            Page::Tags => "Browse, create and edit static and dynamic tags.",
-            Page::Audit => "Everything this app has changed in N-able.",
-            Page::Settings => "API endpoint, key and history retention.",
-        }
-    }
-
     /// Whether the page has anything to move around in (so focus can enter it).
     pub fn interactive(self) -> bool {
-        matches!(self, Page::Run | Page::Activity | Page::Audit | Page::Settings)
+        matches!(self, Page::Run | Page::Activity | Page::Tags | Page::Audit | Page::Settings)
     }
 
     pub fn index(self) -> usize {
@@ -158,6 +158,17 @@ pub enum Pane {
 /// A question waiting for y or n.
 pub enum Confirm {
     RemoveJob(String),
+    Tag(TagConfirm),
+}
+
+impl Confirm {
+    /// The question shown in the footer.
+    pub fn prompt(&self) -> String {
+        match self {
+            Confirm::RemoveJob(_) => "Remove this run from your history?".into(),
+            Confirm::Tag(t) => t.prompt(),
+        }
+    }
 }
 
 pub enum Screen {
@@ -180,6 +191,9 @@ pub struct App {
     core: Arc<Core>,
     collections: Arc<Collections>,
     pub run: RunState,
+    pub tags: TagsState,
+    /// The open search popup, whichever page opened it.
+    pub picker: Option<Picker>,
     /// The full-screen output reader.
     pub viewer: Option<Viewer>,
     /// Raw terminal sequences to send before the next draw (for the clipboard).
@@ -230,6 +244,8 @@ impl App {
             core,
             collections,
             run: RunState::default(),
+            tags: TagsState::default(),
+            picker: None,
             viewer: None,
             outbox: vec![],
             export_dir: viewer::export_dir(),
@@ -337,6 +353,7 @@ impl App {
                 self.tick = self.tick.wrapping_add(1);
                 self.sync_jobs();
                 self.tick_picker();
+                self.tick_tags();
             }
             Event::Msg(msg) => self.on_msg(*msg),
         }
@@ -381,11 +398,17 @@ impl App {
             Msg::PickResults { seq, result } => self.on_pick_results(seq, result),
             Msg::Resolved { seq, result } => self.on_resolved(seq, result),
             Msg::RunFinished(result) => self.on_run_finished(result),
+            Msg::TagList { seq, result } => self.on_tag_list(seq, result),
+            Msg::TagDetailLoaded { seq, tag_id, result } => self.on_tag_detail(seq, tag_id, result),
+            Msg::TagDone(result) => self.on_tag_done(result),
         }
     }
 
     /// Starts whatever the current page needs that it doesn't have yet.
     fn enter_page(&mut self) {
+        if self.page == Page::Tags {
+            self.enter_tags();
+        }
         if self.page == Page::Audit && matches!(self.audit, Load::NotLoaded) {
             self.reload_audit();
         }
@@ -454,10 +477,15 @@ impl App {
     }
 
     fn on_main_key(&mut self, key: KeyEvent) {
-        if let Some(Confirm::RemoveJob(id)) = self.confirm.take() {
+        if let Some(confirm) = self.confirm.take() {
             if matches!(key.code, KeyCode::Char('y' | 'Y')) {
-                self.jobs.remove(&id);
-                self.sync_jobs();
+                match confirm {
+                    Confirm::RemoveJob(id) => {
+                        self.jobs.remove(&id);
+                        self.sync_jobs();
+                    }
+                    Confirm::Tag(tag) => self.run_tag_confirmed(tag),
+                }
             }
             return; // any other key cancels
         }
@@ -513,6 +541,9 @@ impl App {
         }
         if self.page == Page::Run {
             return self.on_run_key(key);
+        }
+        if self.page == Page::Tags {
+            return self.on_tags_key(key);
         }
         if matches!(key.code, KeyCode::Left | KeyCode::Char('h') | KeyCode::Esc) {
             self.focus = Focus::Sidebar;
@@ -775,9 +806,8 @@ mod tests {
     #[test]
     fn right_enters_a_page_and_left_leaves_it() {
         let (_rt, mut app) = app();
-        app.go(Page::Tags);
-        press(&mut app, KeyCode::Right);
-        assert!(app.focus == Focus::Sidebar, "Tags isn't built yet, so focus stays in the menu");
+        // Every page can be entered now, so Right always steps into the page.
+        assert!(Page::ALL.iter().all(|p| p.interactive()));
         app.go(Page::Run);
 
         app.go(Page::Audit);

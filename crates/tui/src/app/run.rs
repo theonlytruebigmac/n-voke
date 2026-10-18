@@ -19,7 +19,7 @@ use ratatui::{
 use super::{App, Focus, Load, Msg, Page};
 use crate::{
     input::TextInput,
-    picker::{PickItem, PickKind, Picker},
+    picker::{PickItem, PickKind, Picker, Purpose},
 };
 
 /// A row of the form that can take focus.
@@ -76,7 +76,6 @@ pub struct RunState {
     pub confirming: bool,
     pub running: bool,
     pub notice: Option<Notice>,
-    pub picker: Option<Picker>,
     resolve_seq: u64,
 }
 
@@ -100,7 +99,6 @@ impl Default for RunState {
             confirming: false,
             running: false,
             notice: None,
-            picker: None,
             resolve_seq: 0,
         }
     }
@@ -211,12 +209,15 @@ impl App {
 
     /// Whether the Run page currently owns every key (a popup or a text field is open).
     pub(super) fn run_captures_keys(&self) -> bool {
-        self.page == Page::Run && self.focus == Focus::Content && (self.run.picker.is_some() || self.run.editing)
+        let in_content = self.focus == Focus::Content;
+        self.picker.is_some() || (in_content && ((self.page == Page::Run && self.run.editing) || (self.page == Page::Tags && self.tags.searching)))
     }
 
     pub(super) fn on_run_modal_key(&mut self, key: KeyEvent) {
-        if self.run.picker.is_some() {
+        if self.picker.is_some() {
             self.on_picker_key(key);
+        } else if self.page == Page::Tags {
+            self.on_tags_key(key);
         } else {
             self.on_run_edit_key(key);
         }
@@ -366,21 +367,28 @@ impl App {
 
     // ---- pickers -------------------------------------------------------------
 
+    /// Opens a picker for one of the Run page's fields.
     fn open_picker(&mut self, kind: PickKind) {
-        let title = match kind {
-            PickKind::Org => "Choose an organization",
-            PickKind::Script => "Choose a script",
-            PickKind::Targets => "Run on",
+        let (title, purpose) = match kind {
+            PickKind::Org => ("Choose an organization", Purpose::RunOrg),
+            PickKind::Script => ("Choose a script", Purpose::RunScript),
+            _ => ("Run on", Purpose::RunTargets),
         };
-        self.run.picker = Some(Picker::new(kind, title));
+        let org_id = self.run.org.as_ref().map(|o| o.id.clone());
         self.run.touch_notice();
+        self.open_picker_with(Picker::new(kind, purpose, title, org_id));
+    }
+
+    /// Opens any picker and starts listing its first results.
+    pub(crate) fn open_picker_with(&mut self, picker: Picker) {
+        self.picker = Some(picker);
         self.picker_search();
     }
 
     fn on_picker_key(&mut self, key: KeyEvent) {
-        let Some(picker) = self.run.picker.as_mut() else { return };
+        let Some(picker) = self.picker.as_mut() else { return };
         match key.code {
-            KeyCode::Esc => self.run.picker = None,
+            KeyCode::Esc => self.close_picker(),
             KeyCode::Down => picker.move_by(1),
             KeyCode::Up => picker.move_by(-1),
             KeyCode::PageDown => picker.move_by(10),
@@ -406,12 +414,48 @@ impl App {
         }
     }
 
-    /// Enter in a picker: choose and close, or (for targets) toggle and stay open.
+    /// Closes the picker. Devices picked for a tag turn into a question about adding them.
+    fn close_picker(&mut self) {
+        let purpose = self.picker.take().map(|p| p.purpose);
+        if purpose == Some(Purpose::TagMembers) {
+            self.finish_adding_devices();
+        }
+    }
+
+    /// The items already chosen in the open picker (they lead its list and carry a tick).
+    fn picker_chosen_items(&self) -> Vec<PickItem> {
+        match self.picker.as_ref().map(|p| p.purpose) {
+            Some(Purpose::RunTargets) => self.run.targets.iter().map(|t| match t {
+                Target::Device(a) => PickItem::Asset(a.clone()),
+                Target::Tag(t) => PickItem::Tag(t.clone()),
+            }).collect(),
+            Some(Purpose::TagMembers) => self.tags.adding.iter().cloned().map(PickItem::Asset).collect(),
+            _ => vec![],
+        }
+    }
+
+    pub(crate) fn picker_chosen(&self) -> HashSet<String> {
+        self.picker_chosen_items().iter().map(PickItem::key).collect()
+    }
+
+    /// Enter in a picker: choose and close, or (for several-at-a-time pickers) toggle and stay open.
     fn choose_picked(&mut self) {
-        let Some(item) = self.run.picker.as_ref().and_then(|p| p.selected_item().cloned()) else { return };
+        let Some(item) = self.picker.as_ref().and_then(|p| p.selected_item().cloned()) else { return };
+        if self.picker.as_ref().is_some_and(|p| p.purpose == Purpose::TagMembers) {
+            if let PickItem::Asset(asset) = item {
+                match self.tags.adding.iter().position(|a| a.id == asset.id) {
+                    Some(at) => {
+                        self.tags.adding.remove(at);
+                    }
+                    None => self.tags.adding.push(asset),
+                }
+                self.refresh_picker_marks();
+            }
+            return;
+        }
         match item {
             PickItem::Org(org) => {
-                self.run.picker = None;
+                self.picker = None;
                 if self.run.org.as_ref().map(|o| &o.id) != Some(&org.id) {
                     self.run.org = Some(org);
                     self.run.script = None;
@@ -426,7 +470,7 @@ impl App {
                 self.open_picker(PickKind::Script); // the next thing to fill in
             }
             PickItem::Script(script) => {
-                self.run.picker = None;
+                self.picker = None;
                 self.run.script = Some(script);
                 self.run.values.clear();
                 self.run.show_errors = false;
@@ -453,25 +497,24 @@ impl App {
         self.run.tidy_focus();
     }
 
-    /// Re-sorts the open targets picker so chosen items lead and the highlight stays put.
+    /// Re-sorts the open picker so chosen items lead and the highlight stays put.
     fn refresh_picker_marks(&mut self) {
-        let targets = self.run.targets.clone();
-        if let Some(p) = self.run.picker.as_mut() {
+        let chosen = self.picker_chosen_items();
+        if let Some(p) = self.picker.as_mut() {
             let selected = p.selected_item().map(PickItem::key);
-            p.items = lead_with_chosen(std::mem::take(&mut p.items), &targets, "");
+            p.items = lead_with_chosen(std::mem::take(&mut p.items), &chosen, "");
             p.table.select(selected.and_then(|k| p.items.iter().position(|i| i.key() == k)).or((!p.items.is_empty()).then_some(0)));
         }
     }
 
     /// Starts a search for the open picker's current term.
     pub(super) fn picker_search(&mut self) {
-        let Some(p) = self.run.picker.as_mut() else { return };
+        let Some(p) = self.picker.as_mut() else { return };
         p.seq += 1;
         p.loading = true;
         p.error = None;
         p.typed_at = None;
-        let (seq, kind, term, tags_mode) = (p.seq, p.kind, p.input.value.clone(), p.tags_mode);
-        let org_id = self.run.org.as_ref().map(|o| o.id.clone());
+        let (seq, kind, term, tags_mode, org_id, exclude) = (p.seq, p.kind, p.input.value.clone(), p.tags_mode, p.org_id.clone(), p.exclude.clone());
         let collections = self.collections.clone();
         self.spawn(move |_| async move {
             let result: Result<Vec<PickItem>, String> = async {
@@ -480,6 +523,8 @@ impl App {
                     (PickKind::Script, Some(org)) => collections.scripts(&org, &term).await?.into_iter().map(PickItem::Script).collect(),
                     (PickKind::Targets, Some(org)) if tags_mode => collections.tags(&term, Some(&org)).await?.into_iter().map(PickItem::Tag).collect(),
                     (PickKind::Targets, Some(org)) => collections.assets(&org, &term).await?.into_iter().map(PickItem::Asset).collect(),
+                    (PickKind::Devices, Some(org)) => collections.assets(&org, &term).await?.into_iter().filter(|a| !exclude.contains(&a.id)).map(PickItem::Asset).collect(),
+                    (PickKind::StaticTags, Some(org)) => collections.tags(&term, Some(&org)).await?.into_iter().filter(|t| !t.is_dynamic()).map(PickItem::Tag).collect(),
                     (_, None) => vec![],
                 })
             }
@@ -490,7 +535,7 @@ impl App {
 
     /// Called every tick: starts a device search once typing has paused.
     pub(super) fn tick_picker(&mut self) {
-        let due = self.run.picker.as_ref().is_some_and(|p| p.debounces() && p.typed_at.is_some_and(|at| self.tick.saturating_sub(at) >= 3));
+        let due = self.picker.as_ref().is_some_and(|p| p.debounces() && p.typed_at.is_some_and(|at| self.tick.saturating_sub(at) >= 3));
         if due {
             self.picker_search();
         }
@@ -500,15 +545,15 @@ impl App {
         if let Err(e) = &result {
             self.note_error(e);
         }
-        let targets = self.run.targets.clone();
-        let Some(p) = self.run.picker.as_mut() else { return };
+        let chosen = self.picker_chosen_items();
+        let Some(p) = self.picker.as_mut() else { return };
         if seq != p.seq {
             return; // an answer to an older search
         }
         p.loading = false;
         match result {
             Ok(items) => {
-                let items = if p.kind == PickKind::Targets { lead_with_chosen(items, &targets, p.input.value.trim()) } else { items };
+                let items = if matches!(p.kind, PickKind::Targets | PickKind::Devices) { lead_with_chosen(items, &chosen, p.input.value.trim()) } else { items };
                 p.set_items(items);
             }
             Err(e) => {
@@ -665,25 +710,23 @@ impl RunState {
     }
 }
 
-/// Puts the targets already chosen (that match the term) first, followed by the other results.
-pub fn lead_with_chosen(items: Vec<PickItem>, chosen: &[Target], term: &str) -> Vec<PickItem> {
-    let chosen_keys: HashSet<String> = chosen.iter().map(Target::key).collect();
+/// Puts the items already chosen (that match the term) first, followed by the other results.
+pub fn lead_with_chosen(items: Vec<PickItem>, chosen: &[PickItem], term: &str) -> Vec<PickItem> {
+    let chosen_keys: HashSet<String> = chosen.iter().map(PickItem::key).collect();
     let term = term.to_lowercase();
+    // Chosen devices lead a list of devices and chosen tags lead a list of tags, never the other way round.
     let is_tag = items.first().is_some_and(|i| matches!(i, PickItem::Tag(_)));
     let mut lead: Vec<PickItem> = chosen
         .iter()
-        .filter(|t| matches!(t, Target::Tag(_)) == is_tag || items.is_empty())
-        .filter(|t| match t {
-            Target::Device(a) => a.name.to_lowercase().contains(&term),
-            Target::Tag(t) => t.name.to_lowercase().contains(&term),
+        .filter(|c| matches!(c, PickItem::Tag(_)) == is_tag || items.is_empty())
+        .filter(|c| match c {
+            PickItem::Asset(a) => a.name.to_lowercase().contains(&term),
+            PickItem::Tag(t) => t.name.to_lowercase().contains(&term),
+            _ => false,
         })
-        .map(|t| match t {
-            Target::Device(a) => PickItem::Asset(a.clone()),
-            Target::Tag(t) => PickItem::Tag(t.clone()),
-        })
+        .cloned()
         .collect();
-    let rest = items.into_iter().filter(|i| !chosen_keys.contains(&i.key()));
-    lead.extend(rest);
+    lead.extend(items.into_iter().filter(|i| !chosen_keys.contains(&i.key())));
     // A chosen item that appears among the results must not be listed twice.
     let mut seen = HashSet::new();
     lead.retain(|i| seen.insert(i.key()));
@@ -822,7 +865,7 @@ pub(crate) mod tests {
         assert_eq!(app.run.targets.len(), 1);
         assert_eq!(names(&app), ["PC-1", "PC-3"]);
         assert_eq!(app.run.blocker(), None);
-        assert!(app.run.picker.is_none());
+        assert!(app.picker.is_none());
     }
 
     #[test]
@@ -830,10 +873,10 @@ pub(crate) mod tests {
         let (_rt, mut app) = run_app();
         press(&mut app, KeyCode::Enter);
         pump(&mut app);
-        assert_eq!(app.run.picker.as_ref().unwrap().items.len(), 2);
+        assert_eq!(app.picker.as_ref().unwrap().items.len(), 2);
         type_text(&mut app, "be");
         pump(&mut app);
-        let keys: Vec<String> = app.run.picker.as_ref().unwrap().items.iter().map(PickItem::key).collect();
+        let keys: Vec<String> = app.picker.as_ref().unwrap().items.iter().map(PickItem::key).collect();
         assert_eq!(keys, ["o:o2"], "only Beta Ltd matches");
         press(&mut app, KeyCode::Enter);
         assert_eq!(app.run.org.as_ref().unwrap().name, "Beta Ltd");
@@ -848,23 +891,23 @@ pub(crate) mod tests {
             press(&mut app, KeyCode::Char(c));
         }
         assert!(!app.quit && !app.show_help && app.page == Page::Run);
-        assert_eq!(app.run.picker.as_ref().unwrap().term(), "q?1dxj");
+        assert_eq!(app.picker.as_ref().unwrap().term(), "q?1dxj");
         press(&mut app, KeyCode::Esc);
-        assert!(app.run.picker.is_none() && app.run.org.is_none(), "esc cancels without choosing");
+        assert!(app.picker.is_none() && app.run.org.is_none(), "esc cancels without choosing");
     }
 
     #[test]
     fn an_answer_to_an_old_search_is_ignored() {
         let (_rt, mut app) = run_app();
         press(&mut app, KeyCode::Enter);
-        let stale = app.run.picker.as_ref().unwrap().seq;
+        let stale = app.picker.as_ref().unwrap().seq;
         pump(&mut app);
         type_text(&mut app, "acme");
         pump(&mut app);
-        assert_eq!(app.run.picker.as_ref().unwrap().items.len(), 1);
+        assert_eq!(app.picker.as_ref().unwrap().items.len(), 1);
         // A late answer to the very first search (all organizations) arrives now.
         app.on_pick_results(stale, Ok(vec![PickItem::Org(org("o2", "Beta Ltd")), PickItem::Org(org("o1", "Acme Corp"))]));
-        assert_eq!(app.run.picker.as_ref().unwrap().items.len(), 1, "the newer search's results stay");
+        assert_eq!(app.picker.as_ref().unwrap().items.len(), 1, "the newer search's results stay");
     }
 
     #[test]
@@ -908,7 +951,7 @@ pub(crate) mod tests {
         assert_eq!(app.run.targets.len(), 2);
         assert_eq!(names(&app), ["PC-1", "PC-2", "PC-3"], "the tag's devices and the picked one, once each");
         // The chosen device now leads the device list, so it can be toggled off again.
-        let first = app.run.picker.as_ref().unwrap().items[0].key();
+        let first = app.picker.as_ref().unwrap().items[0].key();
         assert_eq!(first, "d:a2");
         press(&mut app, KeyCode::Up);
         press(&mut app, KeyCode::Enter);
@@ -926,7 +969,7 @@ pub(crate) mod tests {
         press(&mut app, KeyCode::Enter);
         pump(&mut app);
         // Pick PC-1 directly as well: it is already in the tag.
-        for item in app.run.picker.as_ref().unwrap().items.clone() {
+        for item in app.picker.as_ref().unwrap().items.clone() {
             if item.key() == "d:a1" {
                 app.run.targets.push(item.as_target().unwrap());
             }
@@ -1263,22 +1306,22 @@ pub(crate) mod tests {
         app.run.field = RunField::Targets;
         press(&mut app, KeyCode::Enter);
         pump(&mut app);
-        let seq = app.run.picker.as_ref().unwrap().seq;
+        let seq = app.picker.as_ref().unwrap().seq;
         // Seed what is about to be searched, so nothing goes anywhere near the network.
         app.collections.seed_assets("o1", "pc", vec![device("a1", "PC-1", "CONNECTED", "Windows 11")]);
         type_text(&mut app, "pc");
-        assert_eq!(app.run.picker.as_ref().unwrap().seq, seq, "no search per keystroke for devices");
+        assert_eq!(app.picker.as_ref().unwrap().seq, seq, "no search per keystroke for devices");
         for _ in 0..3 {
             app.update(Event::Tick);
         }
-        assert!(app.run.picker.as_ref().unwrap().seq > seq, "searches once typing pauses");
+        assert!(app.picker.as_ref().unwrap().seq > seq, "searches once typing pauses");
         pump(&mut app);
-        assert_eq!(app.run.picker.as_ref().unwrap().items.iter().filter(|i| matches!(i, PickItem::Asset(_))).count(), 1);
+        assert_eq!(app.picker.as_ref().unwrap().items.iter().filter(|i| matches!(i, PickItem::Asset(_))).count(), 1);
     }
 
     #[test]
     fn lead_with_chosen_never_lists_an_item_twice() {
-        let chosen = vec![Target::Device(device("a1", "PC-1", "CONNECTED", "Windows 11"))];
+        let chosen = vec![PickItem::Asset(device("a1", "PC-1", "CONNECTED", "Windows 11"))];
         let results = vec![PickItem::Asset(device("a1", "PC-1", "CONNECTED", "Windows 11")), PickItem::Asset(device("a2", "PC-2", "CONNECTED", "Windows 11"))];
         let keys: Vec<String> = lead_with_chosen(results, &chosen, "").iter().map(PickItem::key).collect();
         assert_eq!(keys, ["d:a1", "d:a2"]);
@@ -1294,12 +1337,12 @@ pub(crate) mod tests {
     fn a_refused_search_marks_the_key_as_rejected_but_other_errors_do_not() {
         let (_rt, mut app) = run_app();
         press(&mut app, KeyCode::Enter);
-        let seq = app.run.picker.as_ref().unwrap().seq;
+        let seq = app.picker.as_ref().unwrap().seq;
         app.on_pick_results(seq, Err("Request to https://api.n-able.com/graphql failed: timed out".into()));
         assert!(!app.key_rejected, "a timeout says nothing about the key");
         app.on_pick_results(seq, Err(DENIED.into()));
         assert!(app.key_rejected);
-        assert_eq!(app.run.picker.as_ref().unwrap().error.as_deref(), Some(DENIED), "the picker shows the reason in full");
+        assert_eq!(app.picker.as_ref().unwrap().error.as_deref(), Some(DENIED), "the picker shows the reason in full");
     }
 
     #[test]

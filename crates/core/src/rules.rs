@@ -96,6 +96,11 @@ pub fn empty_rule() -> Rule {
     Rule { r#match: Match::All, conditions: vec![RuleCondition { field: RuleField::Name, op: RuleOp::Contains, value: String::new() }] }
 }
 
+/// How many conditions have a value (blank rows are ignored).
+pub fn active_condition_count(rule: &Rule) -> usize {
+    active_conditions(rule).len()
+}
+
 /// Conditions with a value; blank rows are ignored.
 pub fn active_conditions(rule: &Rule) -> Vec<&RuleCondition> {
     rule.conditions.iter().filter(|c| !c.value.trim().is_empty()).collect()

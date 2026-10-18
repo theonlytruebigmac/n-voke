@@ -15,6 +15,7 @@ pub mod model;
 pub mod run;
 pub mod rules;
 pub mod sync;
+pub mod tags;
 pub mod targets;
 pub mod task_state;
 pub mod vault;

@@ -19,7 +19,7 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, Confirm, Field, Focus, Load, Page, Pane, Screen, SettingsForm},
+    app::{App, Field, Focus, Load, Page, Pane, Screen, SettingsForm},
     input::TextInput,
     theme::{self, ACCENT, BORDER, DIM, ERR, OK, SCRIPT, SELECTED_BG, TEXT, WARN, panel, panel_padded},
 };
@@ -54,16 +54,20 @@ fn draw_main(frame: &mut Frame, area: Rect, app: &mut App) {
     let focused = app.focus == Focus::Content;
     match app.page {
         Page::Run => crate::run_ui::draw_run(frame, content, app, focused),
+        Page::Tags => crate::tags_ui::draw_tags(frame, content, app, focused),
         Page::Activity => draw_activity(frame, content, app, focused),
         Page::Audit => draw_audit(frame, content, app, focused),
         Page::Settings => draw_settings(frame, content, app, focused),
-        page => draw_placeholder(frame, content, page),
     }
 
     let hints: &[(&str, &str)] = match (app.focus, app.page) {
         (Focus::Sidebar, p) if p.interactive() => &[("↑↓", "page"), ("→", "open"), ("?", "help"), ("q", "quit")],
         (Focus::Sidebar, _) => &[("↑↓", "page"), ("?", "help"), ("q", "quit")],
-        (Focus::Content, Page::Run) if app.run.picker.is_some() => &[("type", "search"), ("↑↓", "move"), ("enter", "choose"), ("esc", "close")],
+        (Focus::Content, Page::Tags) if app.picker.is_some() => &[("type", "search"), ("↑↓", "move"), ("enter", "add/remove"), ("esc", "done")],
+        (Focus::Content, Page::Tags) if app.tags.searching => &[("type", "filter"), ("enter", "done"), ("esc", "clear")],
+        (Focus::Content, Page::Tags) if app.tags.pane == crate::app::TagsPane::Devices => &[("↑↓", "device"), ("space", "tick"), ("a", "all"), ("x", "remove"), ("+", "add"), ("R", "run script"), ("←", "back")],
+        (Focus::Content, Page::Tags) => &[("↑↓", "tag"), ("/", "search"), ("→", "devices"), ("+", "add devices"), ("x", "delete"), ("R", "run script"), ("←", "back")],
+        (Focus::Content, Page::Run) if app.picker.is_some() => &[("type", "search"), ("↑↓", "move"), ("enter", "choose"), ("esc", "close")],
         (Focus::Content, Page::Run) if app.run.editing => &[("type", "edit"), ("enter", "done"), ("esc", "done"), ("tab", "next field")],
         (Focus::Content, Page::Run) if app.run.pane == crate::app::RunPane::Devices => &[("↑↓", "device"), ("space", "include/leave out"), ("a", "all/none"), ("←", "back to form")],
         (Focus::Content, Page::Run) => &[("↑↓", "field"), ("enter", "choose/edit"), ("→", "devices"), ("←", "back"), ("?", "help")],
@@ -89,9 +93,9 @@ fn draw_main(frame: &mut Frame, area: Rect, app: &mut App) {
     let dry_hint = [("d", "held-back changes")];
     let hints: Vec<(&str, &str)> = if app.is_dry_run() { hints.iter().chain(dry_hint.iter()).copied().collect() } else { hints.to_vec() };
     let hints = hints.as_slice();
-    if matches!(app.confirm, Some(Confirm::RemoveJob(_))) {
+    if let Some(confirm) = &app.confirm {
         let prompt = Line::from(vec![
-            Span::styled(" Remove this run from your history? ", Style::new().fg(WARN).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" {} ", confirm.prompt()), Style::new().fg(WARN).add_modifier(Modifier::BOLD)),
             Span::styled("y", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)),
             Span::styled(" to confirm, any other key cancels", Style::new().fg(DIM)),
         ]);
@@ -102,7 +106,7 @@ fn draw_main(frame: &mut Frame, area: Rect, app: &mut App) {
 
     if app.viewer.is_some() {
         crate::viewer_ui::draw_viewer(frame, area, app);
-    } else if app.run.picker.is_some() {
+    } else if app.picker.is_some() {
         crate::run_ui::draw_picker(frame, area, app);
     } else if app.show_dry_log {
         draw_dry_log(frame, area, app);
@@ -193,16 +197,6 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
         Line::styled(" ● idle", Style::new().fg(DIM))
     });
     frame.render_widget(Paragraph::new(lines).block(panel("status", false)), status);
-}
-
-fn draw_placeholder(frame: &mut Frame, area: Rect, page: Page) {
-    let lines = vec![
-        Line::from(""),
-        Line::styled(format!("{} isn't built yet.", page.title()), Style::new().fg(WARN).add_modifier(Modifier::BOLD)),
-        Line::from(""),
-        Line::styled(page.blurb(), Style::new().fg(DIM)),
-    ];
-    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center).block(panel(page.title(), false)), area);
 }
 
 // ---- activity ----------------------------------------------------------------
@@ -1049,15 +1043,6 @@ mod tests {
         assert_eq!(all[6], 1, "a week-old entry lands mid-chart");
     }
 
-    #[test]
-    fn unbuilt_pages_say_so() {
-        let (_rt, mut app) = app();
-        app.settings = Some(settings(true));
-        app.screen = Screen::Main;
-        app.page = Page::Tags;
-        assert!(render(&mut app).contains("Tags isn't built yet."));
-    }
-
     /// Draws at the given size and returns the buffer.
     fn draw_at(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -1251,7 +1236,7 @@ mod tests {
     #[test]
     fn the_remove_prompt_replaces_the_key_hints() {
         let (_rt, mut app) = activity_app();
-        app.confirm = Some(Confirm::RemoveJob("1".into()));
+        app.confirm = Some(crate::app::Confirm::RemoveJob("1".into()));
         let screen = text_of(&draw_at(&mut app, 130, 34));
         assert!(screen.contains("Remove this run from your history?"), "{screen}");
     }
@@ -1569,10 +1554,10 @@ mod tests {
         run_tests::type_text(&mut app, "zzz");
         run_tests::pump(&mut app);
         assert!(text_of(&draw_at(&mut app, 130, 32)).contains("Nothing matches."));
-        let picker = app.run.picker.as_mut().unwrap();
+        let picker = app.picker.as_mut().unwrap();
         picker.error = Some("Access denied (HTTP 401)".into());
         assert!(text_of(&draw_at(&mut app, 130, 32)).contains("Access denied (HTTP 401)"));
-        let picker = app.run.picker.as_mut().unwrap();
+        let picker = app.picker.as_mut().unwrap();
         picker.error = None;
         picker.loading = true;
         assert!(text_of(&draw_at(&mut app, 130, 32)).contains("searching…"));
@@ -1584,7 +1569,7 @@ mod tests {
         app.run.field = RunField::Targets;
         run_tests::press(&mut app, KeyCode::Enter);
         run_tests::pump(&mut app);
-        let picker = app.run.picker.as_mut().unwrap();
+        let picker = app.picker.as_mut().unwrap();
         picker.items.clear();
         picker.loading = false;
         assert!(text_of(&draw_at(&mut app, 130, 32)).contains("Type to search devices, or press tab to pick a tag."));
@@ -1662,7 +1647,7 @@ mod tests {
     fn a_refused_search_shows_the_whole_reason_and_how_to_fix_it() {
         let (_rt, mut app) = run_tests::run_app();
         run_tests::press(&mut app, KeyCode::Enter);
-        let seq = app.run.picker.as_ref().unwrap().seq;
+        let seq = app.picker.as_ref().unwrap().seq;
         run_tests::deliver(&mut app, crate::app::Msg::PickResults { seq, result: Err(DENIED.into()) });
         let screen = text_of(&draw_at(&mut app, 130, 30));
         // The message wraps across lines, so check pieces that each sit on one.
@@ -1681,7 +1666,7 @@ mod tests {
             let (_rt, mut app) = run_tests::run_app();
             app.key_rejected = true;
             run_tests::press(&mut app, KeyCode::Enter);
-            let seq = app.run.picker.as_ref().unwrap().seq;
+            let seq = app.picker.as_ref().unwrap().seq;
             run_tests::deliver(&mut app, crate::app::Msg::PickResults { seq, result: Err(DENIED.into()) });
             let buffer = draw_at(&mut app, width, height);
             for y in 0..height {
@@ -1958,5 +1943,160 @@ mod tests {
         let next: Vec<char> = lines[at + 1].chars().collect();
         assert!(next[..value_col].iter().all(|c| matches!(c, ' ' | '│')), "continuation must not start at the label's edge: {:?}", lines[at + 1]);
         assert!(next[value_col] != ' ', "continuation text starts under the value: {:?}", lines[at + 1]);
+    }
+
+    // ---- the tags page --------------------------------------------------------------------
+
+    use crate::app::tags::tests as tags_tests;
+
+    #[test]
+    fn the_tag_list_shows_names_organizations_counts_and_which_kind_each_is() {
+        let (_rt, mut app) = tags_tests::tags_app();
+        tags_tests::settle(&mut app);
+        let screen = text_of(&draw_at(&mut app, 130, 30));
+        for expected in ["Servers", "Windows10", "Zed", "Acme", "◆", "↻", "┤ 3 tags ├", "/ to search"] {
+            assert!(screen.contains(expected), "missing {expected:?}:\n{screen}");
+        }
+    }
+
+    #[test]
+    fn a_static_tag_shows_its_description_and_devices_with_tick_boxes() {
+        let (_rt, mut app) = tags_tests::tags_app();
+        tags_tests::settle(&mut app);
+        let screen = text_of(&draw_at(&mut app, 130, 30));
+        for expected in ["Static · Acme · 2 devices", "Production servers", "PC-1", "PC-3", "[ ]", "Windows 11", "┤ 2 devices ├"] {
+            assert!(screen.contains(expected), "missing {expected:?}:\n{screen}");
+        }
+        run_tests::press(&mut app, KeyCode::Right);
+        run_tests::press(&mut app, KeyCode::Char(' '));
+        let ticked = text_of(&draw_at(&mut app, 130, 30));
+        assert!(ticked.contains("[x]") && ticked.contains("┤ 1 selected ├"), "{ticked}");
+    }
+
+    #[test]
+    fn a_dynamic_tag_shows_its_rule_in_words_and_no_tick_boxes() {
+        let (_rt, mut app) = tags_tests::tags_app();
+        tags_tests::settle(&mut app);
+        run_tests::press(&mut app, KeyCode::Down);
+        tags_tests::settle(&mut app);
+        let screen = text_of(&draw_at(&mut app, 130, 30));
+        for expected in ["Dynamic · Acme · 3 devices", "Rule  Operating system contains “Windows 10”", "Membership updates by itself", "PC-4", "PC-5"] {
+            assert!(screen.contains(expected), "missing {expected:?}:\n{screen}");
+        }
+        assert!(!screen.contains("[ ]") && !screen.contains("[x]"), "devices of a dynamic tag are not ticked by hand:\n{screen}");
+    }
+
+    #[test]
+    fn the_search_box_shows_what_is_typed_and_how_to_clear_it() {
+        let (_rt, mut app) = tags_tests::tags_app();
+        tags_tests::settle(&mut app);
+        run_tests::press(&mut app, KeyCode::Char('/'));
+        run_tests::type_text(&mut app, "win");
+        tags_tests::settle(&mut app);
+        let typing = text_of(&draw_at(&mut app, 130, 30));
+        assert!(typing.contains("/ win") && typing.contains("┤ 1 tag ├") && !typing.contains("Zed"), "{typing}");
+        assert!(typing.contains("filter") && typing.contains("clear"), "the hints change while typing:\n{typing}");
+        run_tests::press(&mut app, KeyCode::Enter);
+        assert!(text_of(&draw_at(&mut app, 130, 30)).contains("esc clears"));
+    }
+
+    #[test]
+    fn the_list_explains_an_empty_search_a_wait_and_a_refused_key() {
+        let (_rt, mut app) = tags_tests::tags_app();
+        tags_tests::settle(&mut app);
+        run_tests::press(&mut app, KeyCode::Char('/'));
+        run_tests::type_text(&mut app, "zzzz");
+        tags_tests::settle(&mut app);
+        assert!(text_of(&draw_at(&mut app, 130, 30)).contains("No matching tags."));
+        assert!(text_of(&draw_at(&mut app, 130, 30)).contains("Select a tag"), "and nothing is shown on the right");
+
+        let (_rt, mut loading) = tags_tests::tags_app();
+        assert!(text_of(&draw_at(&mut loading, 130, 30)).contains("Loading tags…"), "before anything has arrived");
+
+        let (_rt, mut denied) = tags_tests::tags_app();
+        tags_tests::settle(&mut denied);
+        tags_tests::fail_list(&mut denied, "Access denied (HTTP 403): your API key is no longer active.");
+        let screen = text_of(&draw_at(&mut denied, 130, 30));
+        assert!(screen.contains("Access denied") && screen.contains("Replace your key in Settings"), "{screen}");
+    }
+
+    #[test]
+    fn a_tag_with_no_devices_says_so_and_how_to_add_them() {
+        let (_rt, mut app) = tags_tests::tags_app();
+        tags_tests::settle(&mut app);
+        run_tests::press(&mut app, KeyCode::End);
+        tags_tests::settle(&mut app);
+        let screen = text_of(&draw_at(&mut app, 130, 30));
+        assert!(screen.contains("No devices yet. Press + to add some."), "{screen}");
+    }
+
+    #[test]
+    fn the_footer_asks_what_a_delete_or_removal_will_do_before_it_happens() {
+        let (_rt, mut app) = tags_tests::tags_app();
+        tags_tests::settle(&mut app);
+        run_tests::press(&mut app, KeyCode::Char('x'));
+        let screen = text_of(&draw_at(&mut app, 140, 30));
+        assert!(screen.contains("Delete tag Servers? It is removed from 2 devices; the devices are not affected.") && screen.contains("y to confirm"), "{screen}");
+    }
+
+    #[test]
+    fn the_add_devices_picker_marks_chosen_devices_and_says_enter_adds_or_removes() {
+        let (_rt, mut app) = tags_tests::tags_app();
+        tags_tests::seed_assets(&app, "o1", "", vec![run_tests::device("a2", "PC-2", "CONNECTED", "Windows 11"), run_tests::device("a9", "LNX-1", "CONNECTED", "Ubuntu 22.04")]);
+        tags_tests::settle(&mut app);
+        run_tests::press(&mut app, KeyCode::Char('+'));
+        run_tests::pump(&mut app);
+        run_tests::press(&mut app, KeyCode::Enter);
+        let screen = text_of(&draw_at(&mut app, 130, 30));
+        for expected in ["Add devices to Servers", "PC-2", "LNX-1", "✓", "enter add or remove", "esc done"] {
+            assert!(screen.contains(expected), "missing {expected:?}:\n{screen}");
+        }
+    }
+
+    #[test]
+    fn the_tags_page_has_one_focus_chip_and_it_follows_the_pane() {
+        let (_rt, mut app) = tags_tests::tags_app();
+        tags_tests::settle(&mut app);
+        assert_eq!(chips(&draw_at(&mut app, 130, 30)), ["tags"]);
+        run_tests::press(&mut app, KeyCode::Right);
+        assert_eq!(chips(&draw_at(&mut app, 130, 30)), ["Servers"], "the devices panel is titled with the tag");
+    }
+
+    #[test]
+    fn the_tags_page_paints_a_solid_background_at_every_size_and_never_panics() {
+        let (_rt, mut app) = tags_tests::tags_app();
+        tags_tests::settle(&mut app);
+        for step in 0..3 {
+            for (w, h) in [(130, 34), (100, 28), (80, 24), (60, 18), (40, 10), (24, 6)] {
+                let buffer = draw_at(&mut app, w, h);
+                for y in 0..h {
+                    for x in 0..w {
+                        assert!(matches!(buffer[(x, y)].bg, Color::Rgb(..)), "tags page (step {step}) at {w}x{h}: cell ({x},{y}) is not painted");
+                    }
+                }
+            }
+            match step {
+                0 => run_tests::press(&mut app, KeyCode::Right),
+                _ => {
+                    run_tests::press(&mut app, KeyCode::Left);
+                    run_tests::press(&mut app, KeyCode::Char('x'));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn only_the_focused_tag_panel_shows_a_row_highlight() {
+        let (_rt, mut app) = tags_tests::tags_app();
+        tags_tests::settle(&mut app);
+        let count = |b: &ratatui::buffer::Buffer| (0..b.area.height).map(|y| (0..b.area.width).filter(|&x| b[(x, y)].bg == SELECTED_BG).count()).filter(|&n| n > 0).count();
+        // List focused: the selected tag (two rows) is highlighted, the device table is not.
+        let list = draw_at(&mut app, 130, 30);
+        let devices_side = (60..130).any(|x| (0..30).any(|y| list[(x, y)].bg == SELECTED_BG));
+        assert!(!devices_side, "an unfocused table must not look focused");
+        assert!(count(&list) >= 1);
+        run_tests::press(&mut app, KeyCode::Right);
+        let devices = draw_at(&mut app, 130, 30);
+        assert!((60..130).any(|x| (0..30).any(|y| devices[(x, y)].bg == SELECTED_BG)), "the focused device row is highlighted");
     }
 }

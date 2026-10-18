@@ -141,6 +141,7 @@ pub struct Collections {
     scripts: Mutex<HashMap<String, Fresh<Collection<Script>>>>,
     assets: Mutex<HashMap<(String, String), Fresh<Vec<Asset>>>>,
     members: Mutex<HashMap<(String, String), Fresh<Devices>>>,
+    tag_details: Mutex<HashMap<String, Fresh<Option<Tag>>>>,
 }
 
 impl Collections {
@@ -152,6 +153,7 @@ impl Collections {
             scripts: Mutex::new(HashMap::new()),
             assets: Mutex::new(HashMap::new()),
             members: Mutex::new(HashMap::new()),
+            tag_details: Mutex::new(HashMap::new()),
         })
     }
 
@@ -219,6 +221,58 @@ impl Collections {
         let devices = self.core.find_all_assets(org_id, &serde_json::json!({ "tags": { "id": { "in": [tag_id] } } })).await?;
         self.members.lock().unwrap().insert(key, Fresh { value: devices.clone(), checked_at: now });
         Ok(devices)
+    }
+
+    /// Every organization (for the places that browse them all, such as choosing where a tag can be used).
+    pub async fn all_organizations(&self) -> Result<Vec<Organization>, String> {
+        self.organizations("").await.and_then(|_| Ok(self.orgs.lock().unwrap().as_ref().map(|f| f.value.items.clone()).unwrap_or_default()))
+    }
+
+    /// Every tag matching `term`, not just the first page of results (for the Tags page).
+    pub async fn all_tags(&self, term: &str) -> Result<Vec<Tag>, String> {
+        self.tags("", None).await?; // makes sure the full list is loaded and fresh
+        let items = self.tags.lock().unwrap().as_ref().map(|f| f.value.items.clone()).unwrap_or_default();
+        Ok(items.into_iter().filter(|t| matches(term, &[Some(&t.name)])).collect())
+    }
+
+    /// One tag in full (a dynamic tag's rule is only on the full record).
+    pub async fn tag(&self, id: &str) -> Result<Option<Tag>, String> {
+        let now = now_ms();
+        if let Some(hit) = self.tag_details.lock().unwrap().get(id).filter(|f| f.is_fresh(QUERY_STALE, now)) {
+            return Ok(hit.value.clone());
+        }
+        let tag = self.core.get_tag(id).await?;
+        self.tag_details.lock().unwrap().insert(id.to_string(), Fresh { value: tag.clone(), checked_at: now });
+        Ok(tag)
+    }
+
+    /// A tag was created or edited: put the fresh copy in the list straight away.
+    pub fn cache_tag(&self, tag: Tag) {
+        let now = now_ms();
+        if let Some(fresh) = self.tags.lock().unwrap().as_mut() {
+            let items = &mut fresh.value.items;
+            items.retain(|t| t.id != tag.id);
+            items.push(tag.clone());
+            items.sort_by(by_name);
+        }
+        self.tag_details.lock().unwrap().insert(tag.id.clone(), Fresh { value: Some(tag), checked_at: now });
+    }
+
+    pub fn uncache_tag(&self, tag_id: &str) {
+        if let Some(fresh) = self.tags.lock().unwrap().as_mut() {
+            fresh.value.items.retain(|t| t.id != tag_id);
+        }
+        self.tag_details.lock().unwrap().remove(tag_id);
+        self.members.lock().unwrap().retain(|(_, id), _| id != tag_id);
+    }
+
+    /// Membership changed: forget the member lists and refetch the tag (for its device count).
+    pub async fn refresh_membership(&self, tag_id: &str) {
+        self.members.lock().unwrap().retain(|(_, id), _| id != tag_id);
+        self.tag_details.lock().unwrap().remove(tag_id);
+        if let Ok(Some(fresh)) = self.tag(tag_id).await {
+            self.cache_tag(fresh);
+        }
     }
 
     /// Pre-fills the cache, as if it had just been loaded. For tests of code built on it.
@@ -376,6 +430,48 @@ mod tests {
 
     fn script(id: &str, name: &str, description: Option<&str>) -> Script {
         Script { id: id.into(), name: name.into(), updated_at: None, language: "POWERSHELL".into(), description: description.map(String::from), timeout_seconds: None, inputs: None }
+    }
+
+    fn tag_named(id: &str, name: &str) -> Tag {
+        Tag { id: id.into(), name: name.into(), typename: "StaticTag".into(), asset_count: Some(0), updated_at: None, description: None, organization: None, filter: None }
+    }
+
+    fn collections() -> Arc<Collections> {
+        Collections::new(Core::for_tests("collections"))
+    }
+
+    #[tokio::test]
+    async fn the_tags_page_lists_every_tag_not_just_a_pickers_first_fifty() {
+        let c = collections();
+        c.seed(vec![], (0..80).map(|i| tag_named(&format!("t{i}"), &format!("Tag {i:02}"))).collect(), vec![]);
+        assert_eq!(c.all_tags("").await.unwrap().len(), 80);
+        assert_eq!(c.tags("", None).await.unwrap().len(), RESULTS, "a picker is still limited");
+        assert_eq!(c.all_tags("tag 7").await.unwrap().len(), 10);
+    }
+
+    #[tokio::test]
+    async fn a_created_or_edited_tag_appears_in_the_list_at_once_in_name_order() {
+        let c = collections();
+        c.seed(vec![], vec![tag_named("1", "Alpha"), tag_named("3", "Charlie")], vec![]);
+        c.cache_tag(tag_named("2", "bravo"));
+        let names = |v: Vec<Tag>| v.into_iter().map(|t| t.name).collect::<Vec<_>>();
+        assert_eq!(names(c.all_tags("").await.unwrap()), ["Alpha", "bravo", "Charlie"]);
+        c.cache_tag(Tag { name: "Zulu".into(), ..tag_named("1", "x") });
+        assert_eq!(names(c.all_tags("").await.unwrap()), ["bravo", "Charlie", "Zulu"], "the same tag replaced, not duplicated");
+        // And its full record is cached, so opening it needs no request.
+        assert_eq!(c.tag("1").await.unwrap().unwrap().name, "Zulu");
+    }
+
+    #[tokio::test]
+    async fn a_deleted_tag_leaves_the_list_and_forgets_its_members() {
+        let c = collections();
+        c.seed(vec![], vec![tag_named("1", "Alpha"), tag_named("2", "Bravo")], vec![]);
+        c.seed_members("o1", "1", vec![Asset::stub("a", "PC")], 1);
+        c.cache_tag(tag_named("1", "Alpha"));
+        c.uncache_tag("1");
+        assert_eq!(c.all_tags("").await.unwrap().len(), 1);
+        assert!(c.members.lock().unwrap().is_empty());
+        assert!(c.tag_details.lock().unwrap().get("1").is_none());
     }
 
     #[test]

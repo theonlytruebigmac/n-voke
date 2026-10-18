@@ -63,7 +63,7 @@ pub fn language_name(language: &str) -> String {
     }
 }
 
-fn agent_glyph(asset: &Asset) -> (&'static str, ratatui::style::Color) {
+pub fn agent_glyph(asset: &Asset) -> (&'static str, ratatui::style::Color) {
     match asset.agent_connection.as_ref().map(|c| c.status.as_str()) {
         Some("CONNECTED") => ("●", OK),
         Some(_) => ("○", WARN),
@@ -417,7 +417,8 @@ fn draw_devices(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
 
 pub fn draw_picker(frame: &mut Frame, area: Rect, app: &mut App) {
     let tick = app.tick;
-    let Some(picker) = app.run.picker.as_mut() else { return };
+    let chosen = app.picker_chosen();
+    let Some(picker) = app.picker.as_mut() else { return };
     // Tall enough for what is listed (plus the search line, status line and borders), never more than fits.
     let wanted = (picker.items.len().max(3) + 6).clamp(10, 25) as u16;
     let popup = centered(area, area.width.saturating_sub(6).min(86), area.height.saturating_sub(2).min(wanted));
@@ -425,6 +426,7 @@ pub fn draw_picker(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let hints = match picker.kind {
         PickKind::Targets => " ↑↓ move · enter add or remove · tab devices ⇄ tags · esc done ",
+        PickKind::Devices => " ↑↓ move · enter add or remove · esc done ",
         _ => " ↑↓ move · enter choose · esc cancel ",
     };
     let mut title = vec![Span::styled(picker.title.clone(), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))];
@@ -480,7 +482,6 @@ pub fn draw_picker(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    let chosen: std::collections::HashSet<String> = app.run.targets.iter().map(nvoke_core::targets::Target::key).collect();
     let wide = list_area.width as usize;
     let rows: Vec<Row> = picker.items.iter().map(|item| pick_row(item, &chosen, wide)).collect();
     let table = Table::new(rows, [Constraint::Length(2), Constraint::Fill(3), Constraint::Fill(2)])

@@ -16,6 +16,24 @@ pub enum PickKind {
     Script,
     /// Devices and tags to run on: several can be picked.
     Targets,
+    /// Devices to put in a tag: several can be picked, and ones already in it are left out.
+    Devices,
+    /// One static tag.
+    StaticTags,
+}
+
+/// What choosing in the picker does, so one picker serves every page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Purpose {
+    RunOrg,
+    RunScript,
+    RunTargets,
+    /// Where a new tag can be used.
+    TagAccess,
+    /// Devices to add to the tag being viewed.
+    TagMembers,
+    /// Devices from a run result, to be put in a tag.
+    AssignTag,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -48,6 +66,11 @@ impl PickItem {
 
 pub struct Picker {
     pub kind: PickKind,
+    pub purpose: Purpose,
+    /// The organization that scripts, devices and tags are looked up in.
+    pub org_id: Option<String>,
+    /// Ids that are never listed (devices already in the tag).
+    pub exclude: std::collections::HashSet<String>,
     pub title: String,
     pub input: TextInput,
     pub items: Vec<PickItem>,
@@ -64,8 +87,8 @@ pub struct Picker {
 }
 
 impl Picker {
-    pub fn new(kind: PickKind, title: &str) -> Self {
-        Self { kind, title: title.into(), input: TextInput::default(), items: vec![], table: TableState::default(), tags_mode: false, loading: true, error: None, seq: 0, typed_at: None }
+    pub fn new(kind: PickKind, purpose: Purpose, title: &str, org_id: Option<String>) -> Self {
+        Self { kind, purpose, org_id, exclude: Default::default(), title: title.into(), input: TextInput::default(), items: vec![], table: TableState::default(), tags_mode: false, loading: true, error: None, seq: 0, typed_at: None }
     }
 
     pub fn term(&self) -> &str {
@@ -74,7 +97,7 @@ impl Picker {
 
     /// Whether searches wait for a pause in typing: device searches go to the server, the rest are local.
     pub fn debounces(&self) -> bool {
-        self.kind == PickKind::Targets && !self.tags_mode
+        matches!(self.kind, PickKind::Targets | PickKind::Devices) && !self.tags_mode
     }
 
     pub fn set_items(&mut self, items: Vec<PickItem>) {
@@ -120,7 +143,7 @@ mod tests {
 
     #[test]
     fn the_highlight_follows_an_item_when_the_list_is_refreshed() {
-        let mut p = Picker::new(PickKind::Org, "Organization");
+        let mut p = Picker::new(PickKind::Org, Purpose::RunOrg, "Organization", None);
         p.set_items(vec![org("a"), org("b"), org("c")]);
         assert_eq!(p.table.selected(), Some(0));
         p.move_by(2);
@@ -135,7 +158,7 @@ mod tests {
 
     #[test]
     fn moving_stops_at_the_ends_and_is_safe_on_an_empty_list() {
-        let mut p = Picker::new(PickKind::Org, "Organization");
+        let mut p = Picker::new(PickKind::Org, Purpose::RunOrg, "Organization", None);
         p.move_by(5);
         assert_eq!(p.table.selected(), None);
         p.set_items(vec![org("a"), org("b")]);
@@ -147,10 +170,10 @@ mod tests {
 
     #[test]
     fn only_device_searches_wait_for_a_pause_in_typing() {
-        let mut p = Picker::new(PickKind::Targets, "Run on");
+        let mut p = Picker::new(PickKind::Targets, Purpose::RunTargets, "Run on", None);
         assert!(p.debounces(), "devices are searched on the server");
         p.tags_mode = true;
         assert!(!p.debounces(), "tags are searched locally");
-        assert!(!Picker::new(PickKind::Org, "Organization").debounces());
+        assert!(!Picker::new(PickKind::Org, Purpose::RunOrg, "Organization", None).debounces());
     }
 }
