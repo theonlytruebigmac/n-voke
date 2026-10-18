@@ -154,6 +154,11 @@ mod tests {
     }
 
     #[test]
+    fn the_rejected_key_badge_is_readable() {
+        assert!(contrast(BG, ERR) >= 4.5, "{:.1}:1", contrast(BG, ERR));
+    }
+
+    #[test]
     fn the_dry_run_banner_is_readable() {
         // Dark text on the warning colour.
         assert!(contrast(BG, WARN) >= 4.5, "{:.1}:1", contrast(BG, WARN));

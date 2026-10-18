@@ -78,6 +78,20 @@ pub struct GraphQlResponse {
     pub body: Value,
 }
 
+/// Parses a response body. The gateway in front of the API refuses a bad or expired token with a
+/// plain-text 401/403 ("denied by external authz, unauthorized: token is not active"), not with
+/// GraphQL, so that is presented as an ordinary access-denied error instead of a parse failure.
+pub(crate) fn response_body(status: u16, text: &str) -> Result<Value, String> {
+    if let Ok(body) = serde_json::from_str(text) {
+        return Ok(body);
+    }
+    let snippet: String = text.trim().chars().take(200).collect();
+    if status == 401 || status == 403 {
+        return Ok(json!({ "errors": [{ "message": snippet }] }));
+    }
+    Err(format!("HTTP {status}: the API returned a non-JSON response: {snippet}"))
+}
+
 /// What a mutation returns in dry-run mode, in place of being sent. Callers treat it as a
 /// failed change (nothing happened), and can tell it from a real failure with `is_dry_run_error`.
 pub const DRY_RUN_ERROR: &str = "Dry run: nothing was sent to N-able.";
@@ -401,10 +415,7 @@ impl Core {
 
         let status = response.status().as_u16();
         let text = response.text().await.map_err(|e| format!("Could not read the response: {e}"))?;
-        let body = serde_json::from_str(&text).map_err(|_| {
-            let snippet: String = text.chars().take(200).collect();
-            format!("HTTP {status}: the API returned a non-JSON response: {snippet}")
-        })?;
+        let body = response_body(status, &text)?;
         Ok(GraphQlResponse { status, body })
     }
 
@@ -485,6 +496,29 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nvoke-core-test-{name}-{}", std::process::id()));
         let paths = Paths { config_dir: dir.join("config"), data_dir: dir.join("data") };
         (Core::new_in(paths, "test").unwrap(), dir)
+    }
+
+    #[test]
+    fn json_bodies_are_parsed_whatever_the_status() {
+        assert_eq!(response_body(200, r#"{"data":{"x":1}}"#).unwrap(), json!({ "data": { "x": 1 } }));
+        assert_eq!(response_body(400, r#"{"errors":[{"message":"bad"}]}"#).unwrap()["errors"][0]["message"], "bad");
+    }
+
+    #[test]
+    fn the_gateways_plain_text_refusal_becomes_an_access_denied_error() {
+        let body = response_body(403, "denied by external authz, unauthorized: token is not active\n").unwrap();
+        assert_eq!(body["errors"][0]["message"], "denied by external authz, unauthorized: token is not active");
+        assert_eq!(response_body(401, "Unauthorized").unwrap()["errors"][0]["message"], "Unauthorized");
+        // Through the usual interpretation it reads as access denied, not as a parse failure.
+        let error = api::interpret(403, &body, false).unwrap_err();
+        assert!(api::is_access_denied(&error), "{error}");
+    }
+
+    #[test]
+    fn other_non_json_responses_are_still_reported_as_such() {
+        let error = response_body(502, "<html>Bad gateway</html>").unwrap_err();
+        assert!(error.starts_with("HTTP 502: the API returned a non-JSON response"), "{error}");
+        assert!(response_body(200, "").is_err());
     }
 
     #[tokio::test]

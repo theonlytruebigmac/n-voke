@@ -497,6 +497,9 @@ impl App {
     }
 
     pub(super) fn on_pick_results(&mut self, seq: u64, result: Result<Vec<PickItem>, String>) {
+        if let Err(e) = &result {
+            self.note_error(e);
+        }
         let targets = self.run.targets.clone();
         let Some(p) = self.run.picker.as_mut() else { return };
         if seq != p.seq {
@@ -534,6 +537,9 @@ impl App {
     }
 
     pub(super) fn on_resolved(&mut self, seq: u64, result: Result<(Vec<Resolved>, bool), String>) {
+        if let Err(e) = &result {
+            self.note_error(e);
+        }
         if seq != self.run.resolve_seq {
             return;
         }
@@ -625,7 +631,10 @@ impl App {
                 debug_assert_eq!(e, DRY_RUN_ERROR);
                 self.run.notice = Some(Notice { kind: NoticeKind::Info, text: "Dry run: nothing was sent. Press d to see the request that was held back.".into() });
             }
-            Err(e) => self.run.notice = Some(Notice { kind: NoticeKind::Error, text: e }),
+            Err(e) => {
+                self.note_error(&e);
+                self.run.notice = Some(Notice { kind: NoticeKind::Error, text: e });
+            }
         }
     }
 
@@ -757,6 +766,15 @@ pub(crate) mod tests {
         for c in text.chars() {
             press(app, KeyCode::Char(c));
         }
+    }
+
+    /// Delivers a result to the app, as if an async task had just finished.
+    pub fn deliver(app: &mut App, msg: Msg) {
+        app.update(Event::Msg(Box::new(msg)));
+    }
+
+    pub fn go_to(app: &mut App, page: Page) {
+        app.go(page);
     }
 
     /// Handles every result that arrives until things go quiet.
@@ -1266,5 +1284,65 @@ pub(crate) mod tests {
         assert_eq!(keys, ["d:a1", "d:a2"]);
         let none: Vec<String> = lead_with_chosen(vec![PickItem::Asset(device("a2", "PC-2", "CONNECTED", "Windows 11"))], &chosen, "zzz").iter().map(PickItem::key).collect();
         assert_eq!(none, ["d:a2"], "a chosen device that doesn't match the term is not forced in");
+    }
+
+    // ---- an expired key -----------------------------------------------------------
+
+    const DENIED: &str = "Access denied (HTTP 403): your API key is no longer active. It has expired or been revoked: create a new one in the N-able dashboard and replace it in Settings.";
+
+    #[test]
+    fn a_refused_search_marks_the_key_as_rejected_but_other_errors_do_not() {
+        let (_rt, mut app) = run_app();
+        press(&mut app, KeyCode::Enter);
+        let seq = app.run.picker.as_ref().unwrap().seq;
+        app.on_pick_results(seq, Err("Request to https://api.n-able.com/graphql failed: timed out".into()));
+        assert!(!app.key_rejected, "a timeout says nothing about the key");
+        app.on_pick_results(seq, Err(DENIED.into()));
+        assert!(app.key_rejected);
+        assert_eq!(app.run.picker.as_ref().unwrap().error.as_deref(), Some(DENIED), "the picker shows the reason in full");
+    }
+
+    #[test]
+    fn a_refused_device_lookup_or_run_marks_the_key_as_rejected_too() {
+        let (_rt, mut app) = run_app();
+        choose_everything(&mut app);
+        app.on_resolved(app.run.resolve_seq, Err(DENIED.into()));
+        assert!(app.key_rejected);
+        app.key_rejected = false;
+        app.run.running = true;
+        app.on_run_finished(Err(DENIED.into()));
+        assert!(app.key_rejected);
+        assert_eq!(app.run.notice.as_ref().unwrap().kind, NoticeKind::Error);
+    }
+
+    #[test]
+    fn background_polling_that_is_refused_is_noticed_without_visiting_any_page() {
+        let (_rt, mut app) = run_app();
+        let mut job = started_job();
+        job.tasks[0].watching = true;
+        job.tasks[0].last_error = Some(DENIED.into());
+        app.jobs.seed(vec![job]);
+        app.sync_jobs();
+        assert!(app.key_rejected);
+    }
+
+    #[test]
+    fn a_polling_error_that_is_not_about_the_key_does_not_raise_the_alarm() {
+        let (_rt, mut app) = run_app();
+        let mut job = started_job();
+        job.tasks[0].watching = true;
+        job.tasks[0].last_error = Some("The task wasn't found.".into());
+        app.jobs.seed(vec![job]);
+        app.sync_jobs();
+        assert!(!app.key_rejected);
+    }
+
+    #[test]
+    fn saving_a_new_key_clears_the_warning() {
+        let (_rt, mut app) = run_app();
+        app.key_rejected = true;
+        let settings = nvoke_core::Settings { api_url: "https://x/graphql".into(), has_api_key: true, history_days: 30, encryption_available: true, encryption_error: None };
+        app.on_msg(Msg::Saved(Ok(settings)));
+        assert!(!app.key_rejected);
     }
 }

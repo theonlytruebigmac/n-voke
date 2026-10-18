@@ -178,6 +178,8 @@ pub struct App {
     core: Arc<Core>,
     collections: Arc<Collections>,
     pub run: RunState,
+    /// N-able has refused the saved API key (expired or revoked), as far as we have seen.
+    pub key_rejected: bool,
     runtime: Handle,
     tx: mpsc::Sender<Event>,
     rx: mpsc::Receiver<Event>,
@@ -220,6 +222,7 @@ impl App {
             core,
             collections,
             run: RunState::default(),
+            key_rejected: false,
             runtime,
             tx,
             rx,
@@ -328,6 +331,8 @@ impl App {
             }
             Msg::Settings(Err(e)) => self.screen = Screen::Fatal(e),
             Msg::Saved(Ok(settings)) => {
+                // A fresh key gets a fresh start; if N-able refuses it too, the next request says so.
+                self.key_rejected = false;
                 self.jobs.set_history_days(settings.history_days);
                 self.settings = Some(settings);
                 self.start_jobs();
@@ -510,6 +515,13 @@ impl App {
         });
     }
 
+    /// Remembers that N-able refused the API key, if that is what this error is.
+    pub(crate) fn note_error(&mut self, error: &str) {
+        if nvoke_core::api::is_access_denied(error) {
+            self.key_rejected = true;
+        }
+    }
+
     /// Picks up changes the store made (polling, saved history arriving) so the screen shows them.
     pub fn sync_jobs(&mut self) {
         let version = self.jobs.version();
@@ -518,6 +530,11 @@ impl App {
         }
         self.jobs_version = version;
         self.job_list = self.jobs.jobs();
+        // Polling a run in the background is often the first thing to notice an expired key.
+        let denied = self.job_list.iter().flat_map(|j| &j.tasks).filter(|t| t.watching).filter_map(|t| t.last_error.as_deref()).any(nvoke_core::api::is_access_denied);
+        if denied {
+            self.key_rejected = true;
+        }
         self.reselect_job();
     }
 

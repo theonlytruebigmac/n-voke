@@ -420,19 +420,29 @@ pub fn draw_picker(frame: &mut Frame, area: Rect, app: &mut App) {
     let inner = outer.inner(popup);
     frame.render_widget(outer, popup);
 
-    let [search_area, status_area, rule_area, list_area] = Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Length(1), Constraint::Fill(1)]).areas(inner);
+    // A failure gets room to be read in full, with what to do about it.
+    let denied = picker.error.as_deref().is_some_and(nvoke_core::api::is_access_denied);
+    let status_rows = if picker.error.is_some() { if denied { 5 } else { 3 } } else { 1 };
+    let [search_area, status_area, rule_area, list_area] = Layout::vertical([Constraint::Length(1), Constraint::Length(status_rows), Constraint::Length(1), Constraint::Fill(1)]).areas(inner);
     let blink = if theme::cursor_visible(tick) { "▏" } else { " " };
     frame.render_widget(Paragraph::new(Line::from(vec![Span::styled(" › ", Style::new().fg(ACCENT)), Span::styled(picker.term().to_string(), Style::new().fg(TEXT)), Span::styled(blink, Style::new().fg(ACCENT))])), search_area);
 
-    let status = if let Some(e) = &picker.error {
-        Span::styled(format!(" {e}"), Style::new().fg(ERR))
-    } else if picker.loading {
-        Span::styled(format!(" {} searching…", spinner(tick)), Style::new().fg(ACCENT))
+    if let Some(e) = &picker.error {
+        let mut lines = vec![Line::styled(format!(" {e}"), Style::new().fg(ERR))];
+        if denied {
+            lines.push(Line::from(""));
+            lines.push(Line::styled(" To fix it: press esc, then ← to the menu, 5 for Settings, enter, and paste a new token.", Style::new().fg(WARN)));
+        }
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), status_area);
     } else {
-        let n = picker.items.len();
-        Span::styled(format!(" {n} {}", if n == 1 { "match" } else { "matches" }), Style::new().fg(DIM))
-    };
-    frame.render_widget(Paragraph::new(Line::from(status)), status_area);
+        let status = if picker.loading {
+            Span::styled(format!(" {} searching…", spinner(tick)), Style::new().fg(ACCENT))
+        } else {
+            let n = picker.items.len();
+            Span::styled(format!(" {n} {}", if n == 1 { "match" } else { "matches" }), Style::new().fg(DIM))
+        };
+        frame.render_widget(Paragraph::new(Line::from(status)), status_area);
+    }
     frame.render_widget(Block::new().borders(Borders::TOP).border_style(Style::new().fg(BORDER)), rule_area);
 
     if picker.items.is_empty() {

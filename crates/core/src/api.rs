@@ -62,6 +62,11 @@ fn plural(n: usize, word: &str) -> String {
     format!("{n} {word}{}", if n == 1 { "" } else { "s" })
 }
 
+/// Whether an error is N-able refusing the API key (as opposed to anything else going wrong).
+pub fn is_access_denied(error: &str) -> bool {
+    error.starts_with("Access denied")
+}
+
 // ---- interpreting responses (no network) -------------------------------------
 
 /// What came back from one operation: the data and any (tolerated) errors.
@@ -85,6 +90,10 @@ pub fn interpret(status: u16, body: &Value, tolerate_errors: bool) -> Result<Rep
     let data = body.get("data").filter(|d| !d.is_null());
 
     if status == 401 || status == 403 {
+        // The most common cause by far: the key was rotated, revoked or has expired.
+        if errors.iter().any(|e| e.to_lowercase().contains("token is not active")) {
+            return Err(format!("Access denied (HTTP {status}): your API key is no longer active. It has expired or been revoked: create a new one in the N-able dashboard and replace it in Settings."));
+        }
         let detail = if errors.is_empty() { String::new() } else { format!(": {}", errors.join("; ")) };
         return Err(format!("Access denied (HTTP {status}){detail}. Check the API key in Settings."));
     }
@@ -587,6 +596,16 @@ mod tests {
         assert!(interpret(500, &json!({ "data": { "x": 1 } }), false).unwrap_err().contains("HTTP 500"));
         assert!(interpret(200, &json!({}), false).unwrap_err().contains("no data"));
         assert!(interpret(200, &json!({ "data": null }), false).unwrap_err().contains("no data"));
+    }
+
+    #[test]
+    fn an_inactive_token_says_what_happened_and_what_to_do() {
+        let body = json!({ "errors": [{ "message": "denied by external authz, unauthorized: token is not active" }] });
+        let error = interpret(403, &body, false).unwrap_err();
+        assert!(error.contains("no longer active") && error.contains("expired or been revoked") && error.contains("new one") && error.contains("Settings"), "{error}");
+        assert!(is_access_denied(&error));
+        assert!(!is_access_denied("The task wasn't found."));
+        assert!(!is_access_denied("HTTP 502: the API returned a non-JSON response: x"));
     }
 
     #[test]

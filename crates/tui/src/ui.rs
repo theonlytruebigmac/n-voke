@@ -126,6 +126,10 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
         left.push(Span::raw("   "));
         left.push(Span::styled(" DRY RUN · nothing is sent ", Style::new().fg(theme::BG).bg(WARN).add_modifier(Modifier::BOLD)));
     }
+    if app.key_rejected {
+        left.push(Span::raw("   "));
+        left.push(Span::styled(" API KEY REJECTED · replace it in Settings ", Style::new().fg(theme::BG).bg(ERR).add_modifier(Modifier::BOLD)));
+    }
     frame.render_widget(Paragraph::new(Line::from(left)).style(bar), left_area);
     frame.render_widget(Paragraph::new(right).style(bar.fg(DIM)).alignment(Alignment::Right), right_area);
 }
@@ -154,7 +158,11 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
     let mark = |on: bool| if on { Span::styled("●", Style::new().fg(OK)) } else { Span::styled("○", Style::new().fg(ERR)) };
     let mut lines = vec![];
     if let Some(s) = &app.settings {
-        lines.push(Line::from(vec![Span::raw(" "), mark(s.has_api_key), Span::styled(" API key", Style::new().fg(TEXT))]));
+        if app.key_rejected {
+            lines.push(Line::from(vec![Span::raw(" "), Span::styled("✗", Style::new().fg(ERR).add_modifier(Modifier::BOLD)), Span::styled(" API key rejected", Style::new().fg(ERR))]));
+        } else {
+            lines.push(Line::from(vec![Span::raw(" "), mark(s.has_api_key), Span::styled(" API key", Style::new().fg(TEXT))]));
+        }
         lines.push(Line::from(vec![Span::raw(" "), mark(s.encryption_available), Span::styled(" encrypted", Style::new().fg(TEXT))]));
         let history = if s.history_days == 0 { "no history".to_string() } else { format!("history {}d", s.history_days) };
         lines.push(Line::styled(format!("   {history}"), Style::new().fg(DIM)));
@@ -705,12 +713,20 @@ fn draw_settings(frame: &mut Frame, area: Rect, app: &App, focused: bool) {
         Line::from(vec![label("Mode"), mode]),
         Line::from(vec![label("API endpoint"), Span::styled(s.api_url.clone(), Style::new().fg(TEXT))]),
         Line::from(vec![label("API key saved"), yes_no(s.has_api_key)]),
+        Line::from(vec![
+            label("API key status"),
+            if app.key_rejected { Span::styled("✗ rejected by N-able: expired or revoked", Style::new().fg(ERR).add_modifier(Modifier::BOLD)) } else { Span::styled("no problems seen", Style::new().fg(DIM)) },
+        ]),
         Line::from(vec![label("Keep run history"), Span::styled(history, Style::new().fg(TEXT))]),
         Line::from(vec![label("Encrypted at rest"), yes_no(s.encryption_available)]),
     ];
     if let Some(error) = &s.encryption_error {
         lines.push(Line::from(""));
         lines.push(Line::styled(format!(" {error}"), Style::new().fg(WARN)));
+    }
+    if app.key_rejected {
+        lines.push(Line::from(""));
+        lines.push(Line::styled(" Create a new API-Access token in the N-able dashboard, then press enter here and paste it in.", Style::new().fg(WARN)));
     }
     if focused {
         lines.push(Line::from(""));
@@ -1548,5 +1564,60 @@ mod tests {
         app.run.resolved = Load::Ready(vec![resolved(run_tests::device("a1", "AN-EXTREMELY-LONG-DEVICE-HOSTNAME-THAT-WILL-NOT-FIT", "CONNECTED", "Windows 11"), &[], true)]);
         let screen = text_of(&draw_at(&mut app, 100, 28));
         assert!(screen.matches('…').count() >= 2, "{screen}");
+    }
+
+    // ---- an expired key -------------------------------------------------------------
+
+    const DENIED: &str = "Access denied (HTTP 403): your API key is no longer active. It has expired or been revoked: create a new one in the N-able dashboard and replace it in Settings.";
+
+    #[test]
+    fn a_rejected_key_is_flagged_in_the_header_the_sidebar_and_settings() {
+        let (_rt, mut app) = run_tests::run_app();
+        app.run.field = RunField::Org;
+        let calm = text_of(&draw_at(&mut app, 130, 30));
+        assert!(!calm.contains("REJECTED") && !calm.contains("rejected"), "no alarm without a refusal:\n{calm}");
+
+        app.key_rejected = true;
+        let screen = text_of(&draw_at(&mut app, 130, 30));
+        assert!(screen.contains("API KEY REJECTED · replace it in Settings"), "{screen}");
+        assert!(screen.contains("✗ API key rejected"), "the sidebar must not keep saying the key is fine:\n{screen}");
+
+        run_tests::go_to(&mut app, Page::Settings);
+        let settings = text_of(&draw_at(&mut app, 130, 30));
+        assert!(settings.contains("rejected by N-able: expired or revoked") && settings.contains("Create a new API-Access token"), "{settings}");
+    }
+
+    #[test]
+    fn a_refused_search_shows_the_whole_reason_and_how_to_fix_it() {
+        let (_rt, mut app) = run_tests::run_app();
+        run_tests::press(&mut app, KeyCode::Enter);
+        let seq = app.run.picker.as_ref().unwrap().seq;
+        run_tests::deliver(&mut app, crate::app::Msg::PickResults { seq, result: Err(DENIED.into()) });
+        let screen = text_of(&draw_at(&mut app, 130, 30));
+        // The message wraps across lines, so check pieces that each sit on one.
+        for expected in ["Access denied (HTTP 403)", "no longer active", "revoked: create a new one in the N-able dashboard", "replace it in Settings.", "To fix it: press esc", "5 for Settings"] {
+            assert!(screen.contains(expected), "missing {expected:?} (it must not be cut off):\n{screen}");
+        }
+        // Another kind of failure shows its message but not instructions about the key.
+        run_tests::deliver(&mut app, crate::app::Msg::PickResults { seq, result: Err("Request to https://x failed: timed out".into()) });
+        let other = text_of(&draw_at(&mut app, 130, 30));
+        assert!(other.contains("timed out") && !other.contains("To fix it"), "{other}");
+    }
+
+    #[test]
+    fn the_rejected_key_states_paint_a_solid_background_at_every_size() {
+        for (width, height) in [(130, 34), (80, 24), (50, 16)] {
+            let (_rt, mut app) = run_tests::run_app();
+            app.key_rejected = true;
+            run_tests::press(&mut app, KeyCode::Enter);
+            let seq = app.run.picker.as_ref().unwrap().seq;
+            run_tests::deliver(&mut app, crate::app::Msg::PickResults { seq, result: Err(DENIED.into()) });
+            let buffer = draw_at(&mut app, width, height);
+            for y in 0..height {
+                for x in 0..width {
+                    assert!(matches!(buffer[(x, y)].bg, Color::Rgb(..)), "{width}x{height}: cell ({x},{y}) is not painted");
+                }
+            }
+        }
     }
 }
