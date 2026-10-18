@@ -1,6 +1,6 @@
 [package]
 name = "n-voke"
-version = "0.1.0"
+version = "0.1.2"
 license = "MIT"
 description = "Run N-able repository scripts on devices and watch the results"
 authors = ["theonlytruebigmac"]

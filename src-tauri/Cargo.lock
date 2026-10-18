@@ -2429,7 +2429,7 @@ dependencies = [
 
 [[package]]
 name = "n-voke"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "nvoke-core",
  "serde_json",
@@ -2575,7 +2575,7 @@ dependencies = [
 
 [[package]]
 name = "nvoke-core"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "base64 0.23.1",
  "chacha20poly1305",
