@@ -2,7 +2,11 @@
 //! (apart from table scroll positions, which ratatui updates while rendering).
 
 use chrono::{DateTime, Local, Utc};
-use nvoke_core::audit::AuditEntry;
+use nvoke_core::{
+    audit::AuditEntry,
+    jobs::Job,
+    task_state::{PhaseCounts, ResultGroup, TaskPhase, group_headline, outcome_label, task_outcome},
+};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
@@ -15,7 +19,7 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, Field, Focus, Load, Page, Screen, SettingsForm},
+    app::{App, Confirm, Field, Focus, Load, Page, Pane, Screen, SettingsForm},
     input::TextInput,
     theme::{self, ACCENT, BORDER, DIM, ERR, OK, SCRIPT, SELECTED_BG, TEXT, WARN, panel},
 };
@@ -49,6 +53,7 @@ fn draw_main(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let focused = app.focus == Focus::Content;
     match app.page {
+        Page::Activity => draw_activity(frame, content, app, focused),
         Page::Audit => draw_audit(frame, content, app, focused),
         Page::Settings => draw_settings(frame, content, app, focused),
         page => draw_placeholder(frame, content, page),
@@ -57,10 +62,21 @@ fn draw_main(frame: &mut Frame, area: Rect, app: &mut App) {
     let hints: &[(&str, &str)] = match (app.focus, app.page) {
         (Focus::Sidebar, p) if p.interactive() => &[("↑↓", "page"), ("→", "open"), ("?", "help"), ("q", "quit")],
         (Focus::Sidebar, _) => &[("↑↓", "page"), ("?", "help"), ("q", "quit")],
+        (Focus::Content, Page::Activity) if app.pane == Pane::Results => &[("↑↓", "group"), ("PgUp/PgDn", "scroll output"), ("←", "back"), ("?", "help")],
+        (Focus::Content, Page::Activity) => &[("↑↓", "run"), ("→", "results"), ("s", "stop"), ("w", "watch"), ("x", "remove"), ("r", "refresh"), ("←", "back"), ("?", "help")],
         (Focus::Content, Page::Audit) => &[("↑↓", "move"), ("PgUp/PgDn", "jump"), ("r", "refresh"), ("←", "back"), ("?", "help")],
         (Focus::Content, _) => &[("enter", "edit"), ("←", "back"), ("?", "help"), ("q", "quit")],
     };
-    frame.render_widget(Paragraph::new(theme::key_hints(hints)), footer);
+    if matches!(app.confirm, Some(Confirm::RemoveJob(_))) {
+        let prompt = Line::from(vec![
+            Span::styled(" Remove this run from your history? ", Style::new().fg(WARN).add_modifier(Modifier::BOLD)),
+            Span::styled("y", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(" to confirm, any other key cancels", Style::new().fg(DIM)),
+        ]);
+        frame.render_widget(Paragraph::new(prompt), footer);
+    } else {
+        frame.render_widget(Paragraph::new(theme::key_hints(hints)), footer);
+    }
 
     if app.show_help {
         draw_help(frame, area);
@@ -116,7 +132,10 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::styled(format!("   {history}"), Style::new().fg(DIM)));
     }
     lines.push(Line::from(""));
-    lines.push(if app.busy() {
+    let watching = app.job_list.iter().filter(|j| j.is_active()).count();
+    lines.push(if watching > 0 {
+        Line::from(vec![Span::styled(format!(" {} ", spinner(app.tick)), Style::new().fg(ACCENT)), Span::styled(format!("watching {watching} run{}", if watching == 1 { "" } else { "s" }), Style::new().fg(ACCENT))])
+    } else if app.busy() {
         Line::from(vec![Span::styled(format!(" {} ", spinner(app.tick)), Style::new().fg(ACCENT)), Span::styled("working", Style::new().fg(ACCENT))])
     } else {
         Line::styled(" ● idle", Style::new().fg(DIM))
@@ -132,6 +151,281 @@ fn draw_placeholder(frame: &mut Frame, area: Rect, page: Page) {
         Line::styled(page.blurb(), Style::new().fg(DIM)),
     ];
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center).block(panel(page.title(), false)), area);
+}
+
+// ---- activity ----------------------------------------------------------------
+
+pub fn phase_color(phase: TaskPhase) -> Color {
+    match phase {
+        TaskPhase::Succeeded => OK,
+        TaskPhase::NonZero => WARN,
+        TaskPhase::Failed => ERR,
+        TaskPhase::Running | TaskPhase::Queued => ACCENT,
+        TaskPhase::Stopped => DIM,
+    }
+}
+
+/// A symbol for each phase, so the state never rests on colour alone.
+fn phase_glyph(phase: TaskPhase, tick: u64) -> &'static str {
+    match phase {
+        TaskPhase::Succeeded => "✓",
+        TaskPhase::NonZero => "!",
+        TaskPhase::Failed => "✗",
+        TaskPhase::Running => spinner(tick),
+        TaskPhase::Queued => "…",
+        TaskPhase::Stopped => "○",
+    }
+}
+
+/// How a whole job looks in the list: still going, or how it ended.
+fn job_glyph(job: &Job, counts: &PhaseCounts, tick: u64) -> (&'static str, Color) {
+    if job.is_active() {
+        (spinner(tick), ACCENT)
+    } else if counts.failed > 0 {
+        ("✗", ERR)
+    } else if counts.non_zero > 0 {
+        ("!", WARN)
+    } else if counts.succeeded > 0 && counts.succeeded == counts.total() {
+        ("✓", OK)
+    } else {
+        ("○", DIM)
+    }
+}
+
+/// A bar `width` cells wide split by outcome: heavy line for done, a light
+/// dashed line for waiting, and a moving texture for what is running now.
+pub fn progress_cells(counts: &PhaseCounts, width: usize, tick: u64) -> Vec<(char, Color)> {
+    let total = counts.total();
+    if total == 0 || width == 0 {
+        return vec![('╌', BORDER); width];
+    }
+    let parts = [
+        (counts.succeeded, TaskPhase::Succeeded),
+        (counts.non_zero, TaskPhase::NonZero),
+        (counts.failed, TaskPhase::Failed),
+        (counts.running, TaskPhase::Running),
+        (counts.queued, TaskPhase::Queued),
+        (counts.stopped, TaskPhase::Stopped),
+    ];
+    // Largest-remainder rounding, so the cells always add up to `width` and any non-empty part shows.
+    let mut cells: Vec<usize> = parts.iter().map(|(n, _)| n * width / total).collect();
+    for (i, (n, _)) in parts.iter().enumerate() {
+        if *n > 0 && cells[i] == 0 {
+            cells[i] = 1;
+        }
+    }
+    while cells.iter().sum::<usize>() > width {
+        let i = (0..cells.len()).max_by_key(|&i| cells[i]).unwrap();
+        cells[i] -= 1;
+    }
+    while cells.iter().sum::<usize>() < width {
+        let i = (0..parts.len()).filter(|&i| parts[i].0 > 0).max_by_key(|&i| parts[i].0 * width % total).unwrap();
+        cells[i] += 1;
+    }
+    let mut out = vec![];
+    for ((_, phase), n) in parts.iter().zip(cells) {
+        for k in 0..n {
+            let glyph = match phase {
+                TaskPhase::Succeeded | TaskPhase::NonZero | TaskPhase::Failed => '━',
+                TaskPhase::Running => if (k as u64 + tick / 3).is_multiple_of(2) { '━' } else { '╸' },
+                TaskPhase::Queued | TaskPhase::Stopped => '╌',
+            };
+            out.push((glyph, phase_color(*phase)));
+        }
+    }
+    out
+}
+
+fn bar_spans(counts: &PhaseCounts, width: usize, tick: u64) -> Line<'static> {
+    Line::from(progress_cells(counts, width, tick).into_iter().map(|(c, color)| Span::styled(c.to_string(), Style::new().fg(color))).collect::<Vec<_>>())
+}
+
+fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
+    if app.job_list.is_empty() {
+        let text = if app.jobs_loaded() {
+            vec![
+                Line::from(""),
+                Line::styled("No runs yet.", Style::new().fg(TEXT).add_modifier(Modifier::BOLD)),
+                Line::from(""),
+                Line::styled("Runs started in the desktop app show up here too: both share one history.", Style::new().fg(DIM)),
+            ]
+        } else {
+            vec![Line::from(""), Line::styled(format!("{} Loading run history…", spinner(app.tick)), Style::new().fg(ACCENT))]
+        };
+        frame.render_widget(Paragraph::new(text).alignment(Alignment::Center).block(panel("activity", focused)), area);
+        return;
+    }
+
+    // Side by side when there is room, stacked otherwise.
+    let [jobs_area, detail_area] = if area.width >= 100 {
+        Layout::horizontal([Constraint::Fill(3), Constraint::Fill(2)]).areas(area)
+    } else {
+        Layout::vertical([Constraint::Percentage(40), Constraint::Fill(1)]).areas(area)
+    };
+    draw_job_list(frame, jobs_area, app, focused && app.pane == Pane::Jobs);
+    draw_job_detail(frame, detail_area, app, focused && app.pane == Pane::Results);
+}
+
+fn draw_job_list(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let show_targets = inner_width >= 80;
+    let bar_width = if inner_width >= 60 { 16 } else { 10 };
+    let now = Utc::now();
+    let tick = app.tick;
+
+    let mut widths = vec![Constraint::Length(1), Constraint::Fill(2)];
+    let mut headers = vec!["", "Script"];
+    if show_targets {
+        widths.push(Constraint::Fill(2));
+        headers.push("Targets");
+    }
+    widths.extend([Constraint::Length(bar_width as u16), Constraint::Length(7), Constraint::Length(8)]);
+    headers.extend(["Progress", "Done", "Started"]);
+
+    // The two flexible columns split what the fixed ones leave over (2 for the marker, 2 between columns).
+    let columns = if show_targets { 6 } else { 5 };
+    let fixed = 2 + 1 + bar_width + 7 + 8 + 2 * (columns - 1);
+    let flexible = inner_width.saturating_sub(fixed);
+    let (script_width, target_width) = if show_targets { (flexible / 2, flexible - flexible / 2) } else { (flexible, 0) };
+
+    let rows: Vec<Row> = app
+        .job_list
+        .iter()
+        .map(|job| {
+            let counts = nvoke_core::task_state::count_phases(&job.tasks);
+            let (glyph, color) = job_glyph(job, &counts, tick);
+            let done = counts.succeeded + counts.non_zero + counts.failed;
+            let mut cells = vec![Cell::from(glyph).style(Style::new().fg(color)), Cell::from(truncate(&job.script_name, script_width)).style(Style::new().fg(TEXT))];
+            if show_targets {
+                cells.push(Cell::from(truncate(&job.target_label, target_width)).style(Style::new().fg(DIM)));
+            }
+            cells.push(Cell::from(bar_spans(&counts, bar_width, tick)));
+            cells.push(Cell::from(format!("{done}/{}", counts.total())).style(Style::new().fg(TEXT)));
+            cells.push(Cell::from(parse_time(&job.created_at).map(|t| ago(t, now)).unwrap_or_default()).style(Style::new().fg(DIM)));
+            Row::new(cells)
+        })
+        .collect();
+
+    let running = app.job_list.iter().filter(|j| j.is_active()).count();
+    let footer = format!(" {} runs · {running} running ", app.job_list.len());
+    let table = Table::new(rows, widths)
+        .column_spacing(2)
+        .header(Row::new(headers).style(Style::new().fg(DIM).add_modifier(Modifier::BOLD)))
+        .row_highlight_style(Style::new().bg(SELECTED_BG).add_modifier(Modifier::BOLD))
+        .highlight_symbol("▌ ")
+        .block(panel("activity", focused).title_bottom(Line::styled(footer, Style::new().fg(DIM))));
+    frame.render_stateful_widget(table, area, &mut app.job_table);
+}
+
+fn count_spans(counts: &PhaseCounts) -> Vec<Span<'static>> {
+    let parts = [
+        (counts.succeeded, TaskPhase::Succeeded, "passed"),
+        (counts.non_zero, TaskPhase::NonZero, "non-zero"),
+        (counts.failed, TaskPhase::Failed, "didn't run"),
+        (counts.running, TaskPhase::Running, "running"),
+        (counts.queued, TaskPhase::Queued, "waiting"),
+        (counts.stopped, TaskPhase::Stopped, "not watched"),
+    ];
+    parts
+        .iter()
+        .filter(|(n, _, _)| *n > 0)
+        .flat_map(|(n, phase, label)| {
+            // A still dot for "running": the summary doesn't animate, the list does.
+            let glyph = if *phase == TaskPhase::Running { "●" } else { phase_glyph(*phase, 0) };
+            [Span::styled(format!("{glyph} {n} {label}"), Style::new().fg(phase_color(*phase))), Span::raw("   ")]
+        })
+        .collect()
+}
+
+fn draw_job_detail(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
+    let Some(job) = app.current_job().cloned() else { return };
+    let now = Utc::now();
+
+    let group_rows = (app.groups.len() as u16 + 3).clamp(4, 9);
+    let [summary_area, results_area, output_area] = Layout::vertical([Constraint::Length(5), Constraint::Length(group_rows), Constraint::Fill(1)]).areas(area);
+
+    // Which run this is, and how it stands.
+    let started = parse_time(&job.created_at).map(|t| ago(t, now)).unwrap_or_default();
+    let org = job.org_name.clone().map(|o| format!("{o} · ")).unwrap_or_default();
+    let mut lines = vec![
+        Line::from(vec![Span::styled(job.script_name.clone(), Style::new().fg(TEXT).add_modifier(Modifier::BOLD)), Span::styled(format!("  →  {}", job.target_label), Style::new().fg(DIM))]),
+        Line::styled(format!("{org}started {started}"), Style::new().fg(DIM)),
+        Line::from(count_spans(&app.counts)),
+    ];
+    if job.warnings.as_ref().is_some_and(|w| !w.is_empty()) {
+        lines.truncate(2);
+        lines.push(Line::styled(format!("{} warning(s) when it was created", job.warnings.as_ref().map_or(0, Vec::len)), Style::new().fg(WARN)));
+    }
+    frame.render_widget(Paragraph::new(lines).block(panel("run", false)), summary_area);
+
+    // The groups: devices with the same result read as one line.
+    let tasks = job.tasks.clone();
+    let tick = app.tick;
+    // What the count and label columns (and the gaps and marker) leave for the headline.
+    let headline_width = (results_area.width as usize).saturating_sub(2 + 2 + 5 + 16 + 4);
+    let rows: Vec<Row> = app
+        .groups
+        .iter()
+        .map(|g| {
+            let color = phase_color(g.phase);
+            let label = group_label(g, &tasks);
+            Row::new(vec![
+                Cell::from(format!("{:>3} ×", g.tasks.len())).style(Style::new().fg(TEXT)),
+                Cell::from(format!("{} {label}", phase_glyph(g.phase, tick))).style(Style::new().fg(color)),
+                Cell::from(if g.phase.is_finished() { truncate(&group_headline(g, &tasks), headline_width) } else { String::new() }).style(Style::new().fg(DIM)),
+            ])
+        })
+        .collect();
+    let table = Table::new(rows, [Constraint::Length(5), Constraint::Length(16), Constraint::Fill(1)])
+        .column_spacing(2)
+        .row_highlight_style(Style::new().bg(SELECTED_BG).add_modifier(Modifier::BOLD))
+        .highlight_symbol(if focused { "▌ " } else { "  " })
+        .block(panel("results", focused));
+    frame.render_stateful_widget(table, results_area, &mut app.group_table);
+
+    // Which devices, and what they printed.
+    let mut out: Vec<Line> = vec![];
+    if let Some(g) = app.current_group() {
+        let names: Vec<&str> = g.tasks.iter().map(|&i| tasks[i].device_name.as_str()).collect();
+        let shown = names.iter().take(30).copied().collect::<Vec<_>>().join(", ");
+        let more = if names.len() > 30 { format!(" … +{} more", names.len() - 30) } else { String::new() };
+        out.push(Line::from(vec![Span::styled(format!("{} ", plural_devices(names.len())), Style::new().fg(DIM)), Span::styled(format!("{shown}{more}"), Style::new().fg(TEXT))]));
+        if g.phase.is_finished() {
+            let section = |out: &mut Vec<Line<'static>>, title: &str, text: &str, color: Color| {
+                if !text.is_empty() {
+                    out.push(Line::from(""));
+                    out.push(Line::styled(title.to_string(), Style::new().fg(DIM).add_modifier(Modifier::BOLD)));
+                    out.extend(text.lines().map(|l| Line::styled(l.to_string(), Style::new().fg(color))));
+                }
+            };
+            section(&mut out, "output", &g.stdout, TEXT);
+            section(&mut out, "errors", &g.stderr, ERR);
+            section(&mut out, "N-able says", &g.error_message, WARN);
+            if g.stdout.is_empty() && g.stderr.is_empty() && g.error_message.is_empty() {
+                out.push(Line::from(""));
+                out.push(Line::styled("No output.", Style::new().fg(DIM)));
+            }
+        } else {
+            out.push(Line::from(""));
+            out.push(Line::styled(format!("{} Waiting for results…", spinner(tick)), Style::new().fg(ACCENT)));
+        }
+    }
+    let output = Paragraph::new(out).wrap(Wrap { trim: false }).scroll((app.output_scroll, 0)).block(panel("devices & output", false));
+    frame.render_widget(output, output_area);
+}
+
+fn plural_devices(n: usize) -> String {
+    format!("{n} device{}:", if n == 1 { "" } else { "s" })
+}
+
+/// "Passed", "Exit 1001", "Waiting for device"...
+fn group_label(g: &ResultGroup, tasks: &[nvoke_core::task_state::JobTask]) -> String {
+    match (g.phase, g.tasks.first().and_then(|&i| task_outcome(&tasks[i]))) {
+        (TaskPhase::NonZero | TaskPhase::Failed, Some(o)) => outcome_label(&o),
+        (TaskPhase::Succeeded, _) => "Passed".into(),
+        (TaskPhase::Queued, _) => "Waiting".into(),
+        (phase, _) => phase.label().into(),
+    }
 }
 
 // ---- audit log ---------------------------------------------------------------
@@ -442,7 +736,7 @@ fn draw_field(frame: &mut Frame, area: Rect, label: &str, input: &TextInput, foc
 // ---- overlays and helpers ----------------------------------------------------
 
 fn draw_help(frame: &mut Frame, area: Rect) {
-    let popup = centered(area, 56, 17);
+    let popup = centered(area, 60, 21);
     clear(frame, popup);
     let key = |k: &str, what: &str| Line::from(vec![Span::styled(format!(" {k:<14}"), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)), Span::styled(what.to_string(), Style::new().fg(TEXT))]);
     let heading = |text: &str| Line::styled(format!(" {text}"), Style::new().fg(DIM).add_modifier(Modifier::BOLD));
@@ -455,6 +749,10 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         heading("Menu"),
         key("↑ ↓", "choose a page"),
         key("→ enter", "step into the page"),
+        Line::from(""),
+        heading("Activity"),
+        key("→ / ←", "runs ⇄ results ⇄ menu"),
+        key("s  w  x", "stop watching / watch / remove"),
         Line::from(""),
         heading("Inside a page"),
         key("↑ ↓", "move (j/k work too)"),
@@ -625,9 +923,14 @@ mod tests {
                 ("placeholder", |a| a.page = Page::Run),
                 ("form", |a| a.screen = Screen::Form(SettingsForm::new(&settings(false)))),
                 ("loading", |a| a.screen = Screen::Loading),
+                ("activity", |a| a.page = Page::Activity),
+                ("activity results", |a| {
+                    a.page = Page::Activity;
+                    a.pane = Pane::Results;
+                }),
                 ("fatal", |a| a.screen = Screen::Fatal("No keychain".into())),
             ] {
-                let (_rt, mut app) = audit_app();
+                let (_rt, mut app) = if name.starts_with("activity") { activity_app() } else { audit_app() };
                 setup(&mut app);
                 let buffer = draw_at(&mut app, width, height);
                 for y in 0..height {
@@ -672,5 +975,137 @@ mod tests {
         let screen = text_of(&draw_at(&mut app, 120, 36));
         assert!(screen.contains('✓') && screen.contains('✗'), "success and failure need different glyphs:\n{screen}");
         assert!(screen.contains("% ok"), "the gauge needs a number:\n{screen}");
+    }
+
+    // ---- activity -----------------------------------------------------------
+
+    use nvoke_core::{
+        jobs::Job,
+        model::{Execution, ExecutionOutput},
+        task_state::{JobTask, PhaseCounts},
+    };
+
+    fn finished_task(name: &str, status: &str, out: &str, err: Option<&str>) -> JobTask {
+        let mut t = JobTask::new(&format!("t-{name}"), None, name, 0);
+        t.task_status = Some(status.into());
+        t.watching = false;
+        t.execution = Some(Execution {
+            id: "e".into(),
+            status: status.into(),
+            exit_code: None,
+            error_message: err.map(String::from),
+            started_at: None,
+            updated_at: None,
+            duration_milliseconds: Some(900.0),
+            output: Some(ExecutionOutput { run_as: None, std_output: Some(out.into()), std_error: None, outputs: None }),
+        });
+        t
+    }
+
+    fn job(id: &str, script: &str, minutes_ago: i64, tasks: Vec<JobTask>) -> Job {
+        Job {
+            id: id.into(),
+            name: script.into(),
+            script_id: None,
+            script: None,
+            script_name: script.into(),
+            org_id: None,
+            org_name: Some("Acme Corp".into()),
+            target_label: "PatchGroupTwo".into(),
+            created_at: (Utc::now() - chrono::Duration::minutes(minutes_ago)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            timeout_seconds: 300,
+            warnings: None,
+            tasks,
+        }
+    }
+
+    pub(super) fn activity_app() -> (tokio::runtime::Runtime, App) {
+        let (rt, mut app) = app();
+        app.settings = Some(settings(true));
+        app.screen = Screen::Main;
+        app.page = Page::Activity;
+        app.focus = Focus::Content;
+        let mut tasks: Vec<JobTask> = (0..31).map(|i| finished_task(&format!("PC-{i:02}"), "SUCCEEDED", &format!("PC-{i:02}: TPM present"), None)).collect();
+        tasks.extend((31..38).map(|i| finished_task(&format!("PC-{i:02}"), "FAILED", "Fail - TPM not present", Some("something went wrong while parsing the PowerShell output"))));
+        tasks.extend((38..40).map(|i| JobTask::new(&format!("t{i}"), None, &format!("PC-{i}"), 0)));
+        app.jobs.seed(vec![
+            job("1", "BitlockerPreChecker", 3, tasks),
+            job("2", "Cleanup temp files", 95, vec![finished_task("SLS-2188", "SUCCEEDED", "Freed 2.1 GB", None)]),
+            job("3", "App Usage Tracker", 60 * 26, vec![finished_task("A", "FAILED", "", Some("timed out")), finished_task("B", "SUCCEEDED", "ok", None)]),
+        ]);
+        app.sync_jobs();
+        (rt, app)
+    }
+
+    #[test]
+    fn activity_lists_runs_with_progress_and_groups_results_by_outcome() {
+        let (_rt, mut app) = activity_app();
+        let screen = text_of(&draw_at(&mut app, 130, 34));
+        for expected in ["BitlockerPreChecker", "Cleanup temp files", "38/40", "3 runs · 1 running", "31 passed", "7 non-zero", "2 waiting", "Non-zero exit", "watching 1 run"] {
+            assert!(screen.contains(expected), "missing {expected:?}:\n{screen}");
+        }
+        // The headline doesn't fit beside the counts, so it must end in an ellipsis, not stop mid-word.
+        assert!(screen.contains("Fail - TPM…") || screen.contains("Fail - TPM n…") || screen.contains("Fail - TPM no…"), "{screen}");
+    }
+
+    #[test]
+    fn the_selected_result_group_shows_its_devices_and_output() {
+        let (_rt, mut app) = activity_app();
+        app.pane = Pane::Results;
+        // Groups are ordered: waiting, passed (31), non-zero (7).
+        app.group_table.select(Some(1));
+        let screen = text_of(&draw_at(&mut app, 130, 34));
+        assert!(screen.contains("31 devices:") && screen.contains("PC-00, PC-01"), "{screen}");
+        assert!(screen.contains("{device}: TPM present"), "{screen}");
+        assert!(screen.contains("… +1 more"), "long device lists are cut: {screen}");
+    }
+
+    #[test]
+    fn an_empty_history_explains_itself_and_loading_says_so() {
+        let (_rt, mut app) = app();
+        app.settings = Some(settings(true));
+        app.screen = Screen::Main;
+        app.page = Page::Activity;
+        let loading = text_of(&draw_at(&mut app, 100, 24));
+        assert!(loading.contains("Loading run history"), "{loading}");
+        app.jobs.seed(vec![]);
+        let empty = text_of(&draw_at(&mut app, 100, 24));
+        assert!(empty.contains("No runs yet.") && empty.contains("desktop app"), "{empty}");
+    }
+
+    #[test]
+    fn the_remove_prompt_replaces_the_key_hints() {
+        let (_rt, mut app) = activity_app();
+        app.confirm = Some(Confirm::RemoveJob("1".into()));
+        let screen = text_of(&draw_at(&mut app, 130, 34));
+        assert!(screen.contains("Remove this run from your history?"), "{screen}");
+    }
+
+    #[test]
+    fn progress_bars_always_fill_their_width_and_show_every_non_empty_outcome() {
+        let counts = PhaseCounts { succeeded: 31, non_zero: 0, failed: 7, running: 0, queued: 2, stopped: 0 };
+        for width in [1, 3, 10, 16, 40] {
+            assert_eq!(progress_cells(&counts, width, 0).len(), width);
+        }
+        // One failure among thousands still gets a visible cell.
+        let lopsided = PhaseCounts { succeeded: 5000, failed: 1, ..Default::default() };
+        let cells = progress_cells(&lopsided, 16, 0);
+        assert_eq!(cells.len(), 16);
+        assert!(cells.iter().any(|(_, c)| *c == ERR), "the lone failure must be visible");
+        // Nothing yet: a dim placeholder of the right width.
+        assert_eq!(progress_cells(&PhaseCounts::default(), 8, 0), vec![('╌', BORDER); 8]);
+        // Running cells animate; finished ones do not.
+        let running = PhaseCounts { running: 4, ..Default::default() };
+        assert_ne!(progress_cells(&running, 8, 0), progress_cells(&running, 8, 3));
+        assert_eq!(progress_cells(&counts, 16, 0), progress_cells(&counts, 16, 99));
+    }
+
+    #[test]
+    fn each_outcome_has_its_own_symbol_and_colour() {
+        let phases = [TaskPhase::Succeeded, TaskPhase::NonZero, TaskPhase::Failed, TaskPhase::Queued, TaskPhase::Stopped];
+        let glyphs: std::collections::HashSet<_> = phases.iter().map(|p| phase_glyph(*p, 0)).collect();
+        assert_eq!(glyphs.len(), phases.len(), "outcomes must be tellable apart without colour");
+        assert_ne!(phase_color(TaskPhase::Succeeded), phase_color(TaskPhase::Failed));
+        assert_ne!(phase_color(TaskPhase::Failed), phase_color(TaskPhase::NonZero));
     }
 }

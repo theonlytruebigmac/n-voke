@@ -8,6 +8,18 @@ A small desktop app for running N-able repository scripts on devices, or on whol
 - **Audit log** — a local, append-only record of every change the app makes in N-able (script runs, tag changes) and of settings changes, with outcome and error details. Password inputs are redacted.
 - **Watch task** — follow a run started elsewhere, such as from `Invoke-NableScriptRun.ps1`, by pasting its Task ID. This works even seconds after the run was created.
 
+## Terminal app
+
+`nvoke` is a terminal interface that shares the desktop app's API key, settings, run history and audit log, so a run started in one shows up in the other.
+
+```sh
+cargo run --release --manifest-path crates/tui/Cargo.toml
+```
+
+Arrow keys move around: `↑`/`↓` choose a page, `→` steps into it, `←` steps back out. Press `?` for every key. The app paints its own background so text stays readable on any terminal theme; set `NVOKE_TRANSPARENT=1` to use the terminal's own instead. It needs a terminal with 24-bit colour.
+
+Built so far: Activity (follow runs live, results grouped by outcome), Audit log and Settings. Run and Tags are next. If both apps are open at once, the one that saves last wins, so run history is best used from one at a time.
+
 ## Setup
 
 On first launch the app asks for your N-able API-Access token (generate it in the N-able dashboard). The token is stored in the operating system's credential store and never reaches the web UI:
@@ -32,6 +44,7 @@ npm run tauri dev     # run the app with hot reload
 npm test              # frontend unit tests
 cargo test --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path crates/core/Cargo.toml
+cargo test --manifest-path crates/tui/Cargo.toml
 npm run tauri build   # build an installer for the current platform
 ```
 
@@ -44,7 +57,9 @@ See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full guide: setup, debugg
 | `crates/core/src/lib.rs` | Shared core: keychain storage, settings file, and the `graphql` call that sends every API request |
 | `crates/core/src/audit.rs` | Audit log: every mutation is recorded automatically by `graphql` |
 | `crates/core/src/vault.rs` | Encryption at rest (data key in the OS keychain) |
+| `crates/core/src/{api,task_state,jobs,job_store,poll,rules,inputs,sync,targets}.rs` | The same domain logic as `src/lib/`, in Rust, for the terminal app. Saved history uses the desktop app's exact JSON |
 | `src-tauri/src/lib.rs` | Desktop app: exposes the core to the web view as Tauri commands |
+| `crates/tui/` | Terminal app (`nvoke`): ratatui interface over the core. Shares the desktop app's API key, settings and run history |
 | `src/lib/api.ts` | GraphQL queries and mutations |
 | `src/lib/jobs.ts` | Jobs (one run on many devices): batched polling and persistence |
 | `src/lib/taskState.ts` | Per-device task phases and grouping results by outcome |

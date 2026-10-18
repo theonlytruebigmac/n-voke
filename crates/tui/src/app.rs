@@ -7,7 +7,12 @@
 
 use std::{io, sync::{Arc, mpsc}, thread, time::Duration};
 
-use nvoke_core::{AuditLogView, Core, Settings};
+use nvoke_core::{
+    AuditLogView, Core, Settings,
+    job_store::JobStore,
+    jobs::Job,
+    task_state::{PhaseCounts, ResultGroup, count_phases, group_results},
+};
 use ratatui::{
     DefaultTerminal,
     crossterm::event::{self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
@@ -79,7 +84,7 @@ impl Page {
 
     /// Whether the page has anything to move around in (so focus can enter it).
     pub fn interactive(self) -> bool {
-        matches!(self, Page::Audit | Page::Settings)
+        matches!(self, Page::Activity | Page::Audit | Page::Settings)
     }
 
     pub fn index(self) -> usize {
@@ -131,6 +136,18 @@ impl SettingsForm {
     }
 }
 
+/// Which half of the Activity page the arrow keys act on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Pane {
+    Jobs,
+    Results,
+}
+
+/// A question waiting for y or n.
+pub enum Confirm {
+    RemoveJob(String),
+}
+
 pub enum Screen {
     Loading,
     /// Settings couldn't be read at all (usually: no keychain).
@@ -157,6 +174,20 @@ pub struct App {
     pub settings: Option<Settings>,
     pub audit: Load<AuditLogView>,
     pub audit_table: TableState,
+    pub jobs: Arc<JobStore>,
+    jobs_started: bool,
+    jobs_version: u64,
+    /// Newest first, as the store keeps them; refreshed when the store changes.
+    pub job_list: Vec<Job>,
+    pub job_table: TableState,
+    pub selected_job: Option<String>,
+    /// Results of the selected job, grouped by outcome.
+    pub groups: Vec<ResultGroup>,
+    pub counts: PhaseCounts,
+    pub group_table: TableState,
+    pub pane: Pane,
+    pub output_scroll: u16,
+    pub confirm: Option<Confirm>,
     pub focus: Focus,
     pub show_help: bool,
     /// Counts ticks since start; animations are a function of it.
@@ -167,6 +198,7 @@ pub struct App {
 impl App {
     pub fn new(core: Arc<Core>, runtime: Handle) -> Self {
         let (tx, rx) = mpsc::channel();
+        let jobs = JobStore::new(core.clone(), 30);
         Self {
             core,
             runtime,
@@ -177,6 +209,18 @@ impl App {
             settings: None,
             audit: Load::NotLoaded,
             audit_table: TableState::default(),
+            jobs,
+            jobs_started: false,
+            jobs_version: u64::MAX,
+            job_list: vec![],
+            job_table: TableState::default(),
+            selected_job: None,
+            groups: vec![],
+            counts: PhaseCounts::default(),
+            group_table: TableState::default(),
+            pane: Pane::Jobs,
+            output_scroll: 0,
+            confirm: None,
             focus: Focus::Sidebar,
             show_help: false,
             tick: 0,
@@ -237,7 +281,10 @@ impl App {
     fn update(&mut self, event: Event) {
         match event {
             Event::Key(key) => self.on_key(key),
-            Event::Tick => self.tick = self.tick.wrapping_add(1),
+            Event::Tick => {
+                self.tick = self.tick.wrapping_add(1);
+                self.sync_jobs();
+            }
             Event::Msg(msg) => self.on_msg(msg),
         }
     }
@@ -248,12 +295,19 @@ impl App {
         match msg {
             Msg::Settings(Ok(settings)) => {
                 self.screen = if settings.has_api_key { Screen::Main } else { Screen::Form(SettingsForm::new(&settings)) };
+                self.jobs.set_history_days(settings.history_days);
+                let has_key = settings.has_api_key;
                 self.settings = Some(settings);
+                if has_key {
+                    self.start_jobs();
+                }
                 self.enter_page();
             }
             Msg::Settings(Err(e)) => self.screen = Screen::Fatal(e),
             Msg::Saved(Ok(settings)) => {
+                self.jobs.set_history_days(settings.history_days);
                 self.settings = Some(settings);
+                self.start_jobs();
                 self.screen = Screen::Main;
                 self.audit = Load::NotLoaded; // saving a setting adds an audit entry
                 self.enter_page();
@@ -338,10 +392,17 @@ impl App {
 
     /// True while anything is waiting on the network or keychain.
     pub fn busy(&self) -> bool {
-        matches!(self.screen, Screen::Loading) || matches!(self.audit, Load::Loading)
+        matches!(self.screen, Screen::Loading) || matches!(self.audit, Load::Loading) || (self.jobs_started && !self.jobs.is_loaded())
     }
 
     fn on_main_key(&mut self, key: KeyEvent) {
+        if let Some(Confirm::RemoveJob(id)) = self.confirm.take() {
+            if matches!(key.code, KeyCode::Char('y' | 'Y')) {
+                self.jobs.remove(&id);
+                self.sync_jobs();
+            }
+            return; // any other key cancels
+        }
         if self.show_help {
             // Any key closes the help overlay.
             self.show_help = false;
@@ -375,6 +436,9 @@ impl App {
 
     /// Left or esc steps back out to the sidebar; everything else is the page's.
     fn on_content_key(&mut self, key: KeyEvent) {
+        if self.page == Page::Activity {
+            return self.on_activity_key(key);
+        }
         if matches!(key.code, KeyCode::Left | KeyCode::Char('h') | KeyCode::Esc) {
             self.focus = Focus::Sidebar;
             return;
@@ -382,16 +446,144 @@ impl App {
         match self.page {
             Page::Audit => self.on_audit_key(key),
             Page::Settings => {
-                if matches!(key.code, KeyCode::Enter | KeyCode::Char('e')) {
-                    if let Some(settings) = &self.settings {
-                        let mut form = SettingsForm::new(settings);
-                        form.first_run = false;
-                        self.screen = Screen::Form(form);
-                    }
+                if let (true, Some(settings)) = (matches!(key.code, KeyCode::Enter | KeyCode::Char('e')), &self.settings) {
+                    let mut form = SettingsForm::new(settings);
+                    form.first_run = false;
+                    self.screen = Screen::Form(form);
                 }
             }
             _ => {}
         }
+    }
+
+    // ---- activity ----------------------------------------------------------
+
+    /// Loads saved history and starts watching unfinished tasks. Safe to call more than once.
+    fn start_jobs(&mut self) {
+        if std::mem::replace(&mut self.jobs_started, true) {
+            return;
+        }
+        let store = self.jobs.clone();
+        self.runtime.spawn(async move {
+            store.load().await;
+            store.run().await;
+        });
+    }
+
+    /// Picks up changes the store made (polling, saved history arriving) so the screen shows them.
+    pub fn sync_jobs(&mut self) {
+        let version = self.jobs.version();
+        if version == self.jobs_version {
+            return;
+        }
+        self.jobs_version = version;
+        self.job_list = self.jobs.jobs();
+        self.reselect_job();
+    }
+
+    /// Keeps the same job selected when new ones arrive above it, and rebuilds its result groups.
+    fn reselect_job(&mut self) {
+        let index = self.selected_job.as_ref().and_then(|id| self.job_list.iter().position(|j| &j.id == id)).or((!self.job_list.is_empty()).then_some(0));
+        self.job_table.select(index);
+        let previous = self.selected_job.take();
+        self.selected_job = index.map(|i| self.job_list[i].id.clone());
+        if previous != self.selected_job {
+            self.output_scroll = 0;
+            self.group_table.select(None);
+        }
+        self.refresh_groups();
+    }
+
+    fn refresh_groups(&mut self) {
+        let job = self.job_table.selected().and_then(|i| self.job_list.get(i));
+        (self.groups, self.counts) = match job {
+            Some(j) => (group_results(&j.tasks), count_phases(&j.tasks)),
+            None => (vec![], PhaseCounts::default()),
+        };
+        let selected = self.group_table.selected().filter(|&i| i < self.groups.len()).or((!self.groups.is_empty()).then_some(0));
+        self.group_table.select(selected);
+    }
+
+    pub fn jobs_loaded(&self) -> bool {
+        self.jobs.is_loaded()
+    }
+
+    pub fn current_job(&self) -> Option<&Job> {
+        self.job_table.selected().and_then(|i| self.job_list.get(i))
+    }
+
+    pub fn current_group(&self) -> Option<&ResultGroup> {
+        self.group_table.selected().and_then(|i| self.groups.get(i))
+    }
+
+    /// Left/right move between the menu, the jobs and their results; up/down move within.
+    fn on_activity_key(&mut self, key: KeyEvent) {
+        let back = matches!(key.code, KeyCode::Left | KeyCode::Char('h') | KeyCode::Esc);
+        if back {
+            match self.pane {
+                Pane::Results => self.pane = Pane::Jobs,
+                Pane::Jobs => self.focus = Focus::Sidebar,
+            }
+            return;
+        }
+        match (self.pane, key.code) {
+            (Pane::Jobs, KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter) if !self.groups.is_empty() => self.pane = Pane::Results,
+            (Pane::Jobs, KeyCode::Down | KeyCode::Char('j')) => self.move_job(1),
+            (Pane::Jobs, KeyCode::Up | KeyCode::Char('k')) => self.move_job(-1),
+            (Pane::Jobs, KeyCode::PageDown) => self.move_job(10),
+            (Pane::Jobs, KeyCode::PageUp) => self.move_job(-10),
+            (Pane::Jobs, KeyCode::Home | KeyCode::Char('g')) => self.select_job(0),
+            (Pane::Jobs, KeyCode::End | KeyCode::Char('G')) => self.select_job(self.job_list.len().saturating_sub(1)),
+            (Pane::Results, KeyCode::Down | KeyCode::Char('j')) => self.move_group(1),
+            (Pane::Results, KeyCode::Up | KeyCode::Char('k')) => self.move_group(-1),
+            (Pane::Results, KeyCode::PageDown) => self.output_scroll = self.output_scroll.saturating_add(8),
+            (Pane::Results, KeyCode::PageUp) => self.output_scroll = self.output_scroll.saturating_sub(8),
+            (Pane::Results, KeyCode::Home | KeyCode::Char('g')) => self.output_scroll = 0,
+            (_, KeyCode::Char('r')) => {
+                let store = self.jobs.clone();
+                self.runtime.spawn(async move { store.poll_once().await });
+            }
+            (_, KeyCode::Char('s')) => {
+                if let Some(id) = self.selected_job.clone() {
+                    self.jobs.stop(&id);
+                    self.sync_jobs();
+                }
+            }
+            (_, KeyCode::Char('w')) => {
+                if let Some(id) = self.selected_job.clone() {
+                    let store = self.jobs.clone();
+                    self.runtime.spawn(async move { store.resume(&id, None).await });
+                }
+            }
+            (_, KeyCode::Char('x') | KeyCode::Delete) => {
+                if let Some(id) = self.selected_job.clone() {
+                    self.confirm = Some(Confirm::RemoveJob(id));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn select_job(&mut self, index: usize) {
+        if self.job_list.is_empty() {
+            return;
+        }
+        self.selected_job = Some(self.job_list[index.min(self.job_list.len() - 1)].id.clone());
+        self.job_table.select(self.job_list.iter().position(|j| Some(&j.id) == self.selected_job.as_ref()));
+        self.output_scroll = 0;
+        self.group_table.select(None);
+        self.refresh_groups();
+    }
+
+    fn move_job(&mut self, by: isize) {
+        let current = self.job_table.selected().unwrap_or(0) as isize;
+        self.select_job((current + by).clamp(0, self.job_list.len().saturating_sub(1) as isize) as usize);
+    }
+
+    fn move_group(&mut self, by: isize) {
+        let current = self.group_table.selected().unwrap_or(0) as isize;
+        self.group_table.select(Some((current + by).clamp(0, self.groups.len().saturating_sub(1) as isize) as usize));
+        self.output_scroll = 0;
     }
 
     fn go(&mut self, page: Page) {
@@ -521,5 +713,118 @@ mod tests {
         press(&mut app, KeyCode::Char('x'));
         assert!(!app.show_help);
         assert!(!app.quit, "the key that closes help must not also act");
+    }
+
+    // ---- activity -----------------------------------------------------------
+
+    use nvoke_core::{jobs::Job, task_state::JobTask};
+
+    fn job(id: &str, watching: bool) -> Job {
+        let mut task = JobTask::new(&format!("t-{id}"), None, "PC", 0);
+        task.watching = watching;
+        if !watching {
+            task.task_status = Some("SUCCEEDED".into());
+            task.execution = Some(nvoke_core::model::Execution { id: "e".into(), status: "SUCCEEDED".into(), exit_code: None, error_message: None, started_at: None, updated_at: None, duration_milliseconds: None, output: None });
+        }
+        Job {
+            id: id.into(),
+            name: id.into(),
+            script_id: None,
+            script: None,
+            script_name: id.into(),
+            org_id: None,
+            org_name: None,
+            target_label: "PC".into(),
+            created_at: format!("2026-10-17T12:0{}:00Z", id.len()),
+            timeout_seconds: 0,
+            warnings: None,
+            tasks: vec![task],
+        }
+    }
+
+    fn activity() -> (tokio::runtime::Runtime, App) {
+        let (rt, mut app) = app();
+        app.jobs.seed(vec![job("a", false), job("bb", true), job("ccc", false)]);
+        app.go(Page::Activity);
+        app.sync_jobs();
+        press(&mut app, KeyCode::Right); // menu -> jobs
+        (rt, app)
+    }
+
+    #[test]
+    fn up_and_down_choose_a_run_and_the_selection_follows_it() {
+        let (_rt, mut app) = activity();
+        assert!(app.focus == Focus::Content);
+        assert_eq!(app.selected_job.as_deref(), Some("a"));
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.selected_job.as_deref(), Some("bb"));
+        press(&mut app, KeyCode::End);
+        assert_eq!(app.selected_job.as_deref(), Some("ccc"));
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.selected_job.as_deref(), Some("ccc"), "stops at the last run");
+        press(&mut app, KeyCode::Home);
+        assert_eq!(app.selected_job.as_deref(), Some("a"));
+        assert_eq!(app.groups.len(), 1, "the selected run's results are grouped");
+    }
+
+    #[test]
+    fn right_goes_into_the_results_and_left_comes_back_out_one_level_at_a_time() {
+        let (_rt, mut app) = activity();
+        press(&mut app, KeyCode::Right);
+        assert!(app.pane == Pane::Results);
+        press(&mut app, KeyCode::Left);
+        assert!(app.pane == Pane::Jobs && app.focus == Focus::Content);
+        press(&mut app, KeyCode::Left);
+        assert!(app.focus == Focus::Sidebar);
+    }
+
+    #[test]
+    fn the_selected_run_stays_selected_when_new_runs_arrive_above_it() {
+        let (_rt, mut app) = activity();
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.selected_job.as_deref(), Some("bb"));
+        app.jobs.seed(vec![job("new", false), job("a", false), job("bb", true), job("ccc", false)]);
+        app.sync_jobs();
+        assert_eq!(app.selected_job.as_deref(), Some("bb"));
+        assert_eq!(app.job_table.selected(), Some(2));
+    }
+
+    #[test]
+    fn s_stops_watching_the_selected_run() {
+        let (_rt, mut app) = activity();
+        press(&mut app, KeyCode::Down); // "bb" is the one being watched
+        assert!(app.job_list[1].is_active());
+        press(&mut app, KeyCode::Char('s'));
+        assert!(!app.job_list[1].is_active());
+        assert_eq!(app.job_list[1].tasks[0].stop_reason, Some(nvoke_core::task_state::StopReason::Manual));
+    }
+
+    #[test]
+    fn removing_a_run_needs_a_y_and_any_other_key_cancels() {
+        let (_rt, mut app) = activity();
+        press(&mut app, KeyCode::Char('x'));
+        assert!(app.confirm.is_some());
+        press(&mut app, KeyCode::Char('n'));
+        assert!(app.confirm.is_none());
+        assert_eq!(app.job_list.len(), 3, "cancelled: nothing removed");
+
+        press(&mut app, KeyCode::Char('x'));
+        press(&mut app, KeyCode::Char('y'));
+        assert_eq!(app.job_list.len(), 2);
+        assert!(app.job_list.iter().all(|j| j.id != "a"));
+        assert!(app.selected_job.is_some(), "selection moves to a remaining run");
+    }
+
+    #[test]
+    fn the_keys_that_act_on_a_run_do_nothing_when_there_are_none() {
+        let (_rt, mut app) = app();
+        app.jobs.seed(vec![]);
+        app.go(Page::Activity);
+        app.sync_jobs();
+        press(&mut app, KeyCode::Right);
+        for key in [KeyCode::Down, KeyCode::Right, KeyCode::Char('s'), KeyCode::Char('x'), KeyCode::End, KeyCode::PageDown] {
+            press(&mut app, key);
+        }
+        assert!(app.confirm.is_none() && app.selected_job.is_none() && app.pane == Pane::Jobs);
     }
 }

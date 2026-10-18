@@ -85,6 +85,16 @@ impl JobStore {
         self.state.lock().unwrap().jobs.clone()
     }
 
+    /// Replaces the job list without polling or saving anything. For tests of code built on the store.
+    #[doc(hidden)]
+    pub fn seed(&self, jobs: Vec<Job>) {
+        let mut s = self.state.lock().unwrap();
+        s.jobs = jobs;
+        s.loaded = true;
+        s.persist = false;
+        s.version += 1;
+    }
+
     /// Changes whenever the jobs do.
     pub fn version(&self) -> u64 {
         self.state.lock().unwrap().version
@@ -94,10 +104,14 @@ impl JobStore {
         self.state.lock().unwrap().loaded
     }
 
+    /// Applies a new retention setting. Only a real change counts as one: merely starting up
+    /// must not rewrite the saved history.
     pub fn set_history_days(&self, days: u32) {
         let mut s = self.state.lock().unwrap();
-        s.history_days = days;
-        Self::changed(&mut s);
+        if s.history_days != days {
+            s.history_days = days;
+            Self::changed(&mut s);
+        }
     }
 
     fn changed(s: &mut State) {
@@ -223,5 +237,114 @@ impl JobStore {
             }
         };
         tokio::join!(poller, saver);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Execution;
+
+    fn store() -> Arc<JobStore> {
+        JobStore::new(Arc::new(Core::new("test").unwrap()), 30)
+    }
+
+    /// A finished job, so adding it never needs the network.
+    fn job(id: &str, finished: bool) -> Job {
+        let mut task = JobTask::new(&format!("t-{id}"), None, "PC", 0);
+        if finished {
+            task.watching = false;
+            task.task_status = Some("SUCCEEDED".into());
+            task.execution = Some(Execution { id: "e".into(), status: "SUCCEEDED".into(), exit_code: None, error_message: None, started_at: None, updated_at: None, duration_milliseconds: None, output: None });
+        }
+        Job {
+            id: id.into(),
+            name: id.into(),
+            script_id: None,
+            script: None,
+            script_name: id.into(),
+            org_id: None,
+            org_name: None,
+            target_label: "PC".into(),
+            created_at: "2026-10-17T12:00:00Z".into(),
+            timeout_seconds: 0,
+            warnings: None,
+            tasks: vec![task],
+        }
+    }
+
+    fn dirty(store: &JobStore) -> bool {
+        store.state.lock().unwrap().dirty
+    }
+
+    #[test]
+    fn starting_up_does_not_mark_the_history_for_rewriting() {
+        let store = store();
+        store.set_history_days(30); // what the app does with the saved setting at startup
+        assert!(!dirty(&store), "an unchanged setting must not trigger a write");
+        store.set_history_days(7);
+        assert!(dirty(&store));
+    }
+
+    #[tokio::test]
+    async fn adding_replaces_a_job_with_the_same_id_and_puts_the_newest_first() {
+        let store = store();
+        store.add(job("a", true)).await;
+        store.add(job("b", true)).await;
+        store.add(job("a", true)).await;
+        let ids: Vec<_> = store.jobs().iter().map(|j| j.id.clone()).collect();
+        assert_eq!(ids, ["a", "b"]);
+        assert!(dirty(&store));
+    }
+
+    #[tokio::test]
+    async fn the_cap_drops_old_finished_jobs_but_never_one_still_being_watched() {
+        let store = store();
+        store.seed(vec![]);
+        // Seed a watched job at the very end, then push the cap with finished ones.
+        let mut jobs: Vec<Job> = (0..MAX_JOBS).map(|i| job(&format!("f{i}"), true)).collect();
+        jobs.push(job("watched", false));
+        store.seed(jobs);
+        store.add(job("new", true)).await;
+        let ids: Vec<_> = store.jobs().iter().map(|j| j.id.clone()).collect();
+        assert_eq!(ids.len(), MAX_JOBS + 1);
+        assert_eq!(ids[0], "new");
+        assert!(ids.contains(&"watched".to_string()), "a watched job is never dropped");
+        assert!(!ids.contains(&format!("f{}", MAX_JOBS - 1)), "the oldest finished job makes way");
+    }
+
+    #[test]
+    fn stop_remove_and_clear_finished_behave() {
+        let store = store();
+        store.seed(vec![job("done", true), job("running", false)]);
+        store.stop("running");
+        let jobs = store.jobs();
+        assert!(!jobs[1].is_active() && jobs[1].tasks[0].stop_reason == Some(StopReason::Manual));
+
+        store.seed(vec![job("done", true), job("running", false)]);
+        store.clear_finished();
+        assert_eq!(store.jobs().iter().map(|j| j.id.as_str()).collect::<Vec<_>>(), ["running"]);
+        store.remove("running");
+        assert!(store.jobs().is_empty());
+    }
+
+    #[test]
+    fn the_version_changes_whenever_the_jobs_do() {
+        let store = store();
+        let v0 = store.version();
+        store.seed(vec![job("a", true)]);
+        let v1 = store.version();
+        store.remove("a");
+        assert!(v1 > v0 && store.version() > v1);
+    }
+
+    #[tokio::test]
+    async fn nothing_is_written_before_saved_history_has_been_read() {
+        let store = store();
+        store.set_history_days(7); // a real change: the history is now waiting to be written
+        assert!(dirty(&store) && !store.is_loaded());
+        store.save().await;
+        // Saving returned at the guard: it didn't write, and didn't pretend it had by clearing the flag.
+        assert!(dirty(&store));
     }
 }

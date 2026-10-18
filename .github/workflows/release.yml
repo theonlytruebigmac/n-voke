@@ -60,6 +60,7 @@ jobs:
           workspaces: |
             ./src-tauri -> target
             ./crates/core -> target
+            ./crates/tui -> target
 
       - name: Install system dependencies
         run: |
@@ -80,6 +81,9 @@ jobs:
 
       - name: Core crate tests
         run: cargo test --manifest-path crates/core/Cargo.toml
+
+      - name: Terminal app tests
+        run: cargo test --manifest-path crates/tui/Cargo.toml
 
   draft:
     name: Draft release
