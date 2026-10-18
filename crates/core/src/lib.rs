@@ -4,9 +4,12 @@
 //! this, and share the same keychain entries and data directories, so a run
 //! started in one shows up in the other.
 
+pub mod api;
 pub mod audit;
 pub mod inputs;
+pub mod job_store;
 pub mod jobs;
+pub mod poll;
 pub mod model;
 pub mod rules;
 pub mod sync;
