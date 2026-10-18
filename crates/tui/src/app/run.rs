@@ -210,7 +210,8 @@ impl App {
     /// Whether the Run page currently owns every key (a popup or a text field is open).
     pub(super) fn run_captures_keys(&self) -> bool {
         let in_content = self.focus == Focus::Content;
-        self.picker.is_some() || (in_content && ((self.page == Page::Run && self.run.editing) || (self.page == Page::Tags && self.tags.searching)))
+        let form_editing = self.tag_form.as_ref().is_some_and(|f| f.editing);
+        self.picker.is_some() || (in_content && ((self.page == Page::Run && self.run.editing) || (self.page == Page::Tags && (self.tags.searching || form_editing))))
     }
 
     pub(super) fn on_run_modal_key(&mut self, key: KeyEvent) {
@@ -395,6 +396,12 @@ impl App {
             KeyCode::PageUp => picker.move_by(-10),
             KeyCode::Home => picker.move_by(-(picker.items.len() as isize)),
             KeyCode::End => picker.move_by(picker.items.len() as isize),
+            KeyCode::Tab | KeyCode::BackTab if picker.purpose == Purpose::TagAccess => {
+                picker.category = picker.category.map(|c| c.next());
+                picker.items.clear();
+                picker.table.select(None);
+                self.picker_search();
+            }
             KeyCode::Tab | KeyCode::BackTab if picker.kind == PickKind::Targets => {
                 picker.tags_mode = !picker.tags_mode;
                 picker.items.clear();
@@ -430,6 +437,8 @@ impl App {
                 Target::Tag(t) => PickItem::Tag(t.clone()),
             }).collect(),
             Some(Purpose::TagMembers) => self.tags.adding.iter().cloned().map(PickItem::Asset).collect(),
+            Some(Purpose::TagFormDevices) => self.tag_form.as_ref().map(|f| f.data.devices.iter().cloned().map(PickItem::Asset).collect()).unwrap_or_default(),
+            Some(Purpose::TagAccess) => self.tag_form.as_ref().and_then(|f| f.data.org.clone()).map(|o| vec![PickItem::Org(o)]).unwrap_or_default(),
             _ => vec![],
         }
     }
@@ -441,6 +450,22 @@ impl App {
     /// Enter in a picker: choose and close, or (for several-at-a-time pickers) toggle and stay open.
     fn choose_picked(&mut self) {
         let Some(item) = self.picker.as_ref().and_then(|p| p.selected_item().cloned()) else { return };
+        match self.picker.as_ref().map(|p| p.purpose) {
+            Some(Purpose::TagAccess) => {
+                if let PickItem::Org(org) = item {
+                    self.choose_form_org(org);
+                }
+                return;
+            }
+            Some(Purpose::TagFormDevices) => {
+                if let PickItem::Asset(asset) = item {
+                    self.toggle_form_device(asset);
+                    self.refresh_picker_marks();
+                }
+                return;
+            }
+            _ => {}
+        }
         if self.picker.as_ref().is_some_and(|p| p.purpose == Purpose::TagMembers) {
             if let PickItem::Asset(asset) = item {
                 match self.tags.adding.iter().position(|a| a.id == asset.id) {
@@ -514,12 +539,18 @@ impl App {
         p.loading = true;
         p.error = None;
         p.typed_at = None;
-        let (seq, kind, term, tags_mode, org_id, exclude) = (p.seq, p.kind, p.input.value.clone(), p.tags_mode, p.org_id.clone(), p.exclude.clone());
+        let (seq, kind, term, tags_mode, org_id, exclude, category) = (p.seq, p.kind, p.input.value.clone(), p.tags_mode, p.org_id.clone(), p.exclude.clone(), p.category);
         let collections = self.collections.clone();
         self.spawn(move |_| async move {
             let result: Result<Vec<PickItem>, String> = async {
                 Ok(match (kind, org_id) {
-                    (PickKind::Org, _) => collections.organizations(&term).await?.into_iter().map(PickItem::Org).collect(),
+                    (PickKind::Org, _) => match category {
+                        Some(c) => collections.organizations_in(&term, c).await?,
+                        None => collections.organizations(&term).await?,
+                    }
+                    .into_iter()
+                    .map(PickItem::Org)
+                    .collect(),
                     (PickKind::Script, Some(org)) => collections.scripts(&org, &term).await?.into_iter().map(PickItem::Script).collect(),
                     (PickKind::Targets, Some(org)) if tags_mode => collections.tags(&term, Some(&org)).await?.into_iter().map(PickItem::Tag).collect(),
                     (PickKind::Targets, Some(org)) => collections.assets(&org, &term).await?.into_iter().map(PickItem::Asset).collect(),

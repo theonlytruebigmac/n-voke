@@ -32,6 +32,8 @@ pub enum Purpose {
     TagAccess,
     /// Devices to add to the tag being viewed.
     TagMembers,
+    /// Devices for a tag that is being created.
+    TagFormDevices,
     /// Devices from a run result, to be put in a tag.
     AssignTag,
 }
@@ -69,6 +71,8 @@ pub struct Picker {
     pub purpose: Purpose,
     /// The organization that scripts, devices and tags are looked up in.
     pub org_id: Option<String>,
+    /// Access pickers: which kind of organization is listed. Tab changes it.
+    pub category: Option<nvoke_core::collections::AccessCategory>,
     /// Ids that are never listed (devices already in the tag).
     pub exclude: std::collections::HashSet<String>,
     pub title: String,
@@ -88,7 +92,7 @@ pub struct Picker {
 
 impl Picker {
     pub fn new(kind: PickKind, purpose: Purpose, title: &str, org_id: Option<String>) -> Self {
-        Self { kind, purpose, org_id, exclude: Default::default(), title: title.into(), input: TextInput::default(), items: vec![], table: TableState::default(), tags_mode: false, loading: true, error: None, seq: 0, typed_at: None }
+        Self { kind, purpose, org_id, category: None, exclude: Default::default(), title: title.into(), input: TextInput::default(), items: vec![], table: TableState::default(), tags_mode: false, loading: true, error: None, seq: 0, typed_at: None }
     }
 
     pub fn term(&self) -> &str {

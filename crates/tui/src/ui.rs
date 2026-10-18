@@ -54,6 +54,7 @@ fn draw_main(frame: &mut Frame, area: Rect, app: &mut App) {
     let focused = app.focus == Focus::Content;
     match app.page {
         Page::Run => crate::run_ui::draw_run(frame, content, app, focused),
+        Page::Tags if app.tag_form.is_some() => crate::tag_form_ui::draw_tag_form(frame, content, app),
         Page::Tags => crate::tags_ui::draw_tags(frame, content, app, focused),
         Page::Activity => draw_activity(frame, content, app, focused),
         Page::Audit => draw_audit(frame, content, app, focused),
@@ -63,10 +64,12 @@ fn draw_main(frame: &mut Frame, area: Rect, app: &mut App) {
     let hints: &[(&str, &str)] = match (app.focus, app.page) {
         (Focus::Sidebar, p) if p.interactive() => &[("↑↓", "page"), ("→", "open"), ("?", "help"), ("q", "quit")],
         (Focus::Sidebar, _) => &[("↑↓", "page"), ("?", "help"), ("q", "quit")],
+        (Focus::Content, Page::Tags) if app.tag_form.as_ref().is_some_and(|f| f.editing) => &[("type", "edit"), ("enter", "done"), ("tab", "next field"), ("esc", "done")],
+        (Focus::Content, Page::Tags) if app.tag_form.is_some() && app.picker.is_none() => &[("↑↓", "field"), ("enter", "choose/edit"), ("←→", "part/switch"), ("+", "add row"), ("x", "remove row"), ("esc", "leave")],
         (Focus::Content, Page::Tags) if app.picker.is_some() => &[("type", "search"), ("↑↓", "move"), ("enter", "add/remove"), ("esc", "done")],
         (Focus::Content, Page::Tags) if app.tags.searching => &[("type", "filter"), ("enter", "done"), ("esc", "clear")],
         (Focus::Content, Page::Tags) if app.tags.pane == crate::app::TagsPane::Devices => &[("↑↓", "device"), ("space", "tick"), ("a", "all"), ("x", "remove"), ("+", "add"), ("R", "run script"), ("←", "back")],
-        (Focus::Content, Page::Tags) => &[("↑↓", "tag"), ("/", "search"), ("→", "devices"), ("+", "add devices"), ("x", "delete"), ("R", "run script"), ("←", "back")],
+        (Focus::Content, Page::Tags) => &[("↑↓", "tag"), ("/", "search"), ("→", "devices"), ("n", "new"), ("e", "edit"), ("+", "add devices"), ("x", "delete"), ("R", "run script"), ("←", "back")],
         (Focus::Content, Page::Run) if app.picker.is_some() => &[("type", "search"), ("↑↓", "move"), ("enter", "choose"), ("esc", "close")],
         (Focus::Content, Page::Run) if app.run.editing => &[("type", "edit"), ("enter", "done"), ("esc", "done"), ("tab", "next field")],
         (Focus::Content, Page::Run) if app.run.pane == crate::app::RunPane::Devices => &[("↑↓", "device"), ("space", "include/leave out"), ("a", "all/none"), ("←", "back to form")],
@@ -2098,5 +2101,162 @@ mod tests {
         run_tests::press(&mut app, KeyCode::Right);
         let devices = draw_at(&mut app, 130, 30);
         assert!((60..130).any(|x| (0..30).any(|y| devices[(x, y)].bg == SELECTED_BG)), "the focused device row is highlighted");
+    }
+
+    // ---- the tag form ----------------------------------------------------------------------------
+
+    use crate::app::tag_form::tests as form_tests;
+    use crate::app::{FormMode, TagField};
+
+    #[test]
+    fn a_new_static_tag_form_lists_its_fields_and_says_it_is_not_ready() {
+        let (_rt, mut app) = form_tests::form_app();
+        let screen = text_of(&draw_at(&mut app, 130, 30));
+        for expected in ["┤ new tag ├", "Type", "● Static", "○ Dynamic", "Holds the devices you choose", "Name", "letters, numbers", "Description", "Category", "Usable in", "choose where it can be used", "Devices", "add devices (optional)", "▶ Create tag", "┤ not ready yet ├", "No devices yet."] {
+            assert!(screen.contains(expected), "missing {expected:?}:\n{screen}");
+        }
+        assert_eq!(chips(&draw_at(&mut app, 130, 30)), ["new tag"], "one focus chip");
+    }
+
+    #[test]
+    fn problems_show_only_after_a_first_attempt_to_save() {
+        let (_rt, mut app) = form_tests::form_app();
+        assert!(!text_of(&draw_at(&mut app, 130, 30)).contains("✗"));
+        form_tests::form_mut(&mut app).field = TagField::Submit;
+        run_tests::press(&mut app, KeyCode::Enter);
+        let screen = text_of(&draw_at(&mut app, 130, 30));
+        assert!(screen.contains("✗ Enter a name.") && screen.contains("✗ Choose where the tag can be used") && screen.contains("Fix the highlighted fields first."), "{screen}");
+    }
+
+    #[test]
+    fn typing_shows_in_the_field_and_the_ready_footer_says_what_the_button_will_do() {
+        let (_rt, mut app) = form_tests::form_app();
+        form_tests::type_into(&mut app, TagField::Name, "Servers");
+        form_tests::choose_org(&mut app, "Acme Corp");
+        let screen = text_of(&draw_at(&mut app, 130, 30));
+        assert!(screen.contains("Servers") && screen.contains("Acme Corp") && screen.contains("┤ ready ├"), "{screen}");
+        form_tests::form_mut(&mut app).field = TagField::Submit;
+        run_tests::press(&mut app, KeyCode::Enter);
+        let confirming = text_of(&draw_at(&mut app, 130, 30));
+        // The footer is short; the full sentence, with where it is made, is on the button (and may wrap).
+        assert!(confirming.contains("┤ enter again to confirm ├") && confirming.contains("▶ Confirm: create static tag Servers in Acme"), "{confirming}");
+    }
+
+    #[test]
+    fn a_dynamic_form_shows_the_rule_rows_and_a_preview_that_waits_for_what_it_needs() {
+        let (_rt, mut app) = form_tests::form_app();
+        form_tests::form_mut(&mut app).field = TagField::Kind;
+        run_tests::press(&mut app, KeyCode::Char(' '));
+        let screen = text_of(&draw_at(&mut app, 130, 34));
+        for expected in ["● Dynamic", "Fills itself from a rule.", "Match", "of these conditions", "Device name", "contains", "…", "┤ matches now ├", "Add a condition to see which devices match."] {
+            assert!(screen.contains(expected), "missing {expected:?}:\n{screen}");
+        }
+        assert!(!screen.contains("add devices (optional)"), "a dynamic tag fills itself, so there is no device picker");
+        // With a value but no place yet, it says what is missing.
+        form_tests::form_mut(&mut app).field = TagField::Condition(0);
+        form_tests::form_mut(&mut app).part = crate::app::CondPart::Value;
+        run_tests::press(&mut app, KeyCode::Enter);
+        run_tests::type_text(&mut app, "PC");
+        run_tests::press(&mut app, KeyCode::Enter);
+        assert!(text_of(&draw_at(&mut app, 130, 34)).contains("Choose where the tag can be used to preview"));
+    }
+
+    #[test]
+    fn the_preview_shows_matching_devices_the_total_and_the_empty_and_error_cases() {
+        let (_rt, mut app) = form_tests::form_app();
+        form_tests::form_mut(&mut app).field = TagField::Kind;
+        run_tests::press(&mut app, KeyCode::Char(' '));
+        form_tests::choose_org(&mut app, "Acme Corp");
+        form_tests::form_mut(&mut app).field = TagField::Condition(0);
+        form_tests::form_mut(&mut app).part = crate::app::CondPart::Value;
+        run_tests::press(&mut app, KeyCode::Enter);
+        run_tests::type_text(&mut app, "PC");
+        run_tests::press(&mut app, KeyCode::Enter);
+        assert!(text_of(&draw_at(&mut app, 130, 34)).contains("Finding matching devices…"));
+        let (seq, key) = form_tests::preview_ids(&app);
+        form_tests::deliver_preview(&mut app, seq, &key, Ok((vec![run_tests::device("a1", "PC-1", "CONNECTED", "Windows 11"), run_tests::device("a2", "PC-2", "DISCONNECTED", "Windows 10")], 40)));
+        let screen = text_of(&draw_at(&mut app, 130, 34));
+        assert!(screen.contains("PC-1") && screen.contains("PC-2") && screen.contains("┤ 2 of 40 ├"), "{screen}");
+        form_tests::deliver_preview(&mut app, seq, &key, Ok((vec![], 0)));
+        assert!(text_of(&draw_at(&mut app, 130, 34)).contains("No devices match yet."));
+        form_tests::deliver_preview(&mut app, seq, &key, Err("Request failed: timed out".into()));
+        assert!(text_of(&draw_at(&mut app, 130, 34)).contains("Request failed: timed out"));
+    }
+
+    #[test]
+    fn the_condition_row_marks_which_part_is_selected() {
+        let (_rt, mut app) = form_tests::form_app();
+        form_tests::form_mut(&mut app).field = TagField::Kind;
+        run_tests::press(&mut app, KeyCode::Char(' '));
+        form_tests::form_mut(&mut app).field = TagField::Condition(0);
+        let hint = text_of(&draw_at(&mut app, 150, 34));
+        assert!(hint.contains("←→ part · enter changes · + adds a row · x removes"), "{hint}");
+        // A narrower form gets a shorter hint rather than one that wraps under the highlight.
+        let narrow = text_of(&draw_at(&mut app, 80, 34));
+        assert!(narrow.contains("←→ part · + add · x remove") && !narrow.contains("enter changes"), "{narrow}");
+        // The selected part is drawn as a cyan chip, one at a time.
+        let on_accent = |b: &ratatui::buffer::Buffer| (0..b.area.height).flat_map(|y| (0..b.area.width).map(move |x| (x, y))).filter(|&(x, y)| b[(x, y)].bg == ACCENT && b[(x, y)].symbol() != " ").collect::<Vec<_>>();
+        let first = draw_at(&mut app, 130, 34);
+        run_tests::press(&mut app, KeyCode::Right);
+        let second = draw_at(&mut app, 130, 34);
+        assert_ne!(on_accent(&first), on_accent(&second), "moving to the next part moves the chip");
+    }
+
+    #[test]
+    fn the_access_picker_shows_the_three_categories_with_the_current_one_marked() {
+        let (_rt, mut app) = form_tests::form_app();
+        form_tests::form_mut(&mut app).field = TagField::Access;
+        run_tests::press(&mut app, KeyCode::Enter);
+        run_tests::pump(&mut app);
+        let screen = text_of(&draw_at(&mut app, 130, 30));
+        for expected in ["Where can this tag be used?", "Organization", "Customer", "Site", "MSP Inc", "tab organization/customer/site"] {
+            assert!(screen.contains(expected), "missing {expected:?}:\n{screen}");
+        }
+    }
+
+    #[test]
+    fn an_edit_form_names_the_tag_and_says_where_static_devices_are_managed() {
+        let (_rt, mut app) = tags_tests::tags_app();
+        tags_tests::settle(&mut app);
+        run_tests::press(&mut app, KeyCode::Char('e'));
+        let screen = text_of(&draw_at(&mut app, 130, 30));
+        assert!(screen.contains("┤ edit Servers ├") && screen.contains("▶ Save changes") && screen.contains("use + and x on the tag's"), "{screen}");
+        assert!(!screen.contains("Usable in") && !screen.contains("Category"), "place and category are fixed once made:\n{screen}");
+        assert!(app.tag_form.as_ref().is_some_and(|f| f.mode == FormMode::Edit));
+    }
+
+    #[test]
+    fn a_rule_the_editor_cannot_show_is_displayed_as_stored_and_kept() {
+        let (_rt, mut app) = tags_tests::tags_app();
+        let mut odd = run_tests::tag("t2", "Windows10", true, 3);
+        odd.filter = Some(r#"{"and":[{"cpu":{"cores":{"gte":4}}}]}"#.into());
+        tags_tests::cache_tag(&app, odd);
+        tags_tests::settle(&mut app);
+        run_tests::press(&mut app, KeyCode::Down);
+        tags_tests::settle(&mut app);
+        run_tests::press(&mut app, KeyCode::Char('e'));
+        let screen = text_of(&draw_at(&mut app, 130, 30));
+        assert!(screen.contains("kept as it is") && screen.contains("Stored rule") && screen.contains("cores"), "{screen}");
+    }
+
+    #[test]
+    fn the_form_paints_a_solid_background_at_every_size_and_never_panics() {
+        for kind_step in 0..2 {
+            let (_rt, mut app) = form_tests::form_app();
+            if kind_step == 1 {
+                form_tests::form_mut(&mut app).field = TagField::Kind;
+                run_tests::press(&mut app, KeyCode::Char(' '));
+                form_tests::choose_org(&mut app, "Acme Corp");
+            }
+            form_tests::form_mut(&mut app).show_errors = true;
+            for (w, h) in [(130, 34), (100, 28), (80, 24), (60, 18), (40, 10), (24, 6)] {
+                let buffer = draw_at(&mut app, w, h);
+                for y in 0..h {
+                    for x in 0..w {
+                        assert!(matches!(buffer[(x, y)].bg, Color::Rgb(..)), "tag form (dynamic: {}) at {w}x{h}: cell ({x},{y}) is not painted", kind_step == 1);
+                    }
+                }
+            }
+        }
     }
 }

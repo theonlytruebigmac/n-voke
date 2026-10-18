@@ -425,11 +425,22 @@ pub fn draw_picker(frame: &mut Frame, area: Rect, app: &mut App) {
     clear(frame, popup);
 
     let hints = match picker.kind {
+        PickKind::Org if picker.purpose == crate::picker::Purpose::TagAccess => " ↑↓ move · enter choose · tab organization/customer/site · esc cancel ",
         PickKind::Targets => " ↑↓ move · enter add or remove · tab devices ⇄ tags · esc done ",
         PickKind::Devices => " ↑↓ move · enter add or remove · esc done ",
         _ => " ↑↓ move · enter choose · esc cancel ",
     };
     let mut title = vec![Span::styled(picker.title.clone(), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))];
+    if let Some(current) = picker.category {
+        let (on, off) = (Style::new().fg(ACCENT).add_modifier(Modifier::BOLD), Style::new().fg(DIM));
+        title.push(Span::raw("  "));
+        for (i, c) in nvoke_core::collections::AccessCategory::ALL.iter().enumerate() {
+            if i > 0 {
+                title.push(Span::styled(" · ", off));
+            }
+            title.push(Span::styled(c.label(), if *c == current { on } else { off }));
+        }
+    }
     if picker.kind == PickKind::Targets {
         let (on, off) = (Style::new().fg(ACCENT).add_modifier(Modifier::BOLD), Style::new().fg(DIM));
         title.push(Span::raw("  "));
@@ -496,7 +507,7 @@ fn pick_row(item: &PickItem, chosen: &std::collections::HashSet<String>, width: 
     let name_width = width.saturating_sub(8) * 3 / 5;
     let detail_width = width.saturating_sub(8) * 2 / 5;
     match item {
-        PickItem::Org(o) => Row::new(vec![Cell::from(""), Cell::from(truncate(&o.name, name_width)).style(Style::new().fg(TEXT)), Cell::from(org_kind(&o.typename)).style(Style::new().fg(DIM))]),
+        PickItem::Org(o) => Row::new(vec![Cell::from(Line::from(mark)), Cell::from(truncate(&o.name, name_width)).style(Style::new().fg(TEXT)), Cell::from(org_kind(&o.typename)).style(Style::new().fg(DIM))]),
         PickItem::Script(s) => {
             let detail = match s.description.as_deref().filter(|d| !d.is_empty() && *d != s.name) {
                 Some(d) => format!("{} · {d}", language_name(&s.language)),

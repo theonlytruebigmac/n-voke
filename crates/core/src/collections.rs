@@ -121,6 +121,49 @@ pub fn search_tags(items: &[Tag], term: &str, prefer_org: Option<&str>) -> Vec<T
     own.into_iter().chain(rest).take(RESULTS).cloned().collect()
 }
 
+/// Where a tag can be used: an organization, a customer or a site (and everything under it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccessCategory {
+    Organization,
+    Customer,
+    Site,
+}
+
+impl AccessCategory {
+    pub const ALL: [AccessCategory; 3] = [Self::Organization, Self::Customer, Self::Site];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Organization => "Organization",
+            Self::Customer => "Customer",
+            Self::Site => "Site",
+        }
+    }
+
+    /// The API's organization types that belong to this category.
+    pub fn types(self) -> &'static [&'static str] {
+        match self {
+            Self::Organization => &["ServiceOrganization", "Partner"],
+            Self::Customer => &["Customer"],
+            Self::Site => &["Site"],
+        }
+    }
+
+    /// The category an organization falls in (organizations of unknown type count as "organization").
+    pub fn of(org: &Organization) -> Self {
+        Self::ALL.into_iter().find(|c| c.types().contains(&org.typename.as_str())).unwrap_or(Self::Organization)
+    }
+
+    pub fn next(self) -> Self {
+        Self::ALL[(Self::ALL.iter().position(|c| *c == self).unwrap_or(0) + 1) % Self::ALL.len()]
+    }
+}
+
+/// Organizations of one category matching `term`.
+pub fn search_organizations_in(items: &[Organization], term: &str, category: AccessCategory) -> Vec<Organization> {
+    items.iter().filter(|o| category.types().contains(&o.typename.as_str()) && matches(term, &[Some(&o.name)])).take(RESULTS).cloned().collect()
+}
+
 // ---- the cache ----------------------------------------------------------------
 
 struct Fresh<T> {
@@ -223,9 +266,11 @@ impl Collections {
         Ok(devices)
     }
 
-    /// Every organization (for the places that browse them all, such as choosing where a tag can be used).
-    pub async fn all_organizations(&self) -> Result<Vec<Organization>, String> {
-        self.organizations("").await.and_then(|_| Ok(self.orgs.lock().unwrap().as_ref().map(|f| f.value.items.clone()).unwrap_or_default()))
+    /// Organizations of one category (for choosing where a tag can be used).
+    pub async fn organizations_in(&self, term: &str, category: AccessCategory) -> Result<Vec<Organization>, String> {
+        self.organizations("").await?; // makes sure the full directory is loaded and fresh
+        let items = self.orgs.lock().unwrap().as_ref().map(|f| f.value.items.clone()).unwrap_or_default();
+        Ok(search_organizations_in(&items, term, category))
     }
 
     /// Every tag matching `term`, not just the first page of results (for the Tags page).
@@ -472,6 +517,21 @@ mod tests {
         assert_eq!(c.all_tags("").await.unwrap().len(), 1);
         assert!(c.members.lock().unwrap().is_empty());
         assert!(c.tag_details.lock().unwrap().get("1").is_none());
+    }
+
+    #[test]
+    fn organizations_sort_into_the_categories_a_tag_can_be_scoped_to() {
+        let org = |id: &str, name: &str, kind: &str| Organization { id: id.into(), name: name.into(), typename: kind.into() };
+        let all = [org("1", "MSP", "ServiceOrganization"), org("2", "Acme", "Customer"), org("3", "Acme HQ", "Site"), org("4", "Reseller", "Partner"), org("5", "Odd", "SomethingNew")];
+        let names = |c| search_organizations_in(&all, "", c).into_iter().map(|o| o.name).collect::<Vec<_>>();
+        assert_eq!(names(AccessCategory::Organization), ["MSP", "Reseller"]);
+        assert_eq!(names(AccessCategory::Customer), ["Acme"]);
+        assert_eq!(names(AccessCategory::Site), ["Acme HQ"]);
+        assert_eq!(search_organizations_in(&all, "hq", AccessCategory::Site).len(), 1, "the term still filters");
+        assert_eq!(AccessCategory::of(&all[3]), AccessCategory::Organization);
+        assert_eq!(AccessCategory::of(&all[2]), AccessCategory::Site);
+        assert_eq!(AccessCategory::of(&all[4]), AccessCategory::Organization, "an unknown type is treated as an organization");
+        assert_eq!(AccessCategory::Site.next(), AccessCategory::Organization);
     }
 
     #[test]

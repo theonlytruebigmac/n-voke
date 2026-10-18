@@ -30,9 +30,12 @@ use crate::{
 };
 
 pub(crate) mod run;
+pub(crate) mod tag_form;
 pub(crate) mod tags;
 use tags::{TagConfirm, TagDetail, TagDone};
 pub use tags::{TagsPane, TagsState};
+use tag_form::Saved;
+pub use tag_form::{CondPart, FormMode, TagField, TagForm};
 pub(crate) mod viewer;
 pub use viewer::TOAST_TICKS;
 pub use run::{NoticeKind, RunField, RunPane, RunState};
@@ -60,6 +63,8 @@ pub enum Msg {
     TagList { seq: u64, result: Result<Vec<nvoke_core::model::Tag>, String> },
     TagDetailLoaded { seq: u64, tag_id: String, result: Result<TagDetail, String> },
     TagDone(Result<TagDone, String>),
+    TagPreview { seq: u64, key: String, result: Result<(Vec<nvoke_core::model::Asset>, i64), String> },
+    TagFormDone(Result<Saved, nvoke_core::tags::CreateFailure>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -192,6 +197,8 @@ pub struct App {
     collections: Arc<Collections>,
     pub run: RunState,
     pub tags: TagsState,
+    /// The new-tag / edit-tag form, when open.
+    pub tag_form: Option<TagForm>,
     /// The open search popup, whichever page opened it.
     pub picker: Option<Picker>,
     /// The full-screen output reader.
@@ -245,6 +252,7 @@ impl App {
             collections,
             run: RunState::default(),
             tags: TagsState::default(),
+            tag_form: None,
             picker: None,
             viewer: None,
             outbox: vec![],
@@ -354,6 +362,7 @@ impl App {
                 self.sync_jobs();
                 self.tick_picker();
                 self.tick_tags();
+                self.tick_tag_form();
             }
             Event::Msg(msg) => self.on_msg(*msg),
         }
@@ -401,6 +410,8 @@ impl App {
             Msg::TagList { seq, result } => self.on_tag_list(seq, result),
             Msg::TagDetailLoaded { seq, tag_id, result } => self.on_tag_detail(seq, tag_id, result),
             Msg::TagDone(result) => self.on_tag_done(result),
+            Msg::TagPreview { seq, key, result } => self.on_tag_preview(seq, key, result),
+            Msg::TagFormDone(result) => self.on_tag_form_done(result),
         }
     }
 
@@ -504,7 +515,8 @@ impl App {
             return;
         }
         match key.code {
-            KeyCode::Char('q') => self.quit = true,
+            // With a tag form open, q would throw away unsaved work: esc leaves it, asking first.
+            KeyCode::Char('q') if self.tag_form.is_none() => self.quit = true,
             KeyCode::Char('?') | KeyCode::F(1) => self.show_help = true,
             KeyCode::Char('d') if self.core.is_dry_run() => {
                 self.show_dry_log = true;

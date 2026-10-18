@@ -6,6 +6,7 @@ mod input;
 mod output_view;
 mod picker;
 mod run_ui;
+mod tag_form_ui;
 mod tags_ui;
 mod theme;
 mod ui;

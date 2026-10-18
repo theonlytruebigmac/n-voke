@@ -72,6 +72,41 @@ impl RuleField {
     }
 }
 
+impl RuleField {
+    /// The next field in the editor's order, wrapping round (for stepping through a dropdown).
+    pub fn next(self) -> Self {
+        let i = Self::ALL.iter().position(|f| *f == self).unwrap_or(0);
+        Self::ALL[(i + 1) % Self::ALL.len()]
+    }
+
+    pub fn previous(self) -> Self {
+        let i = Self::ALL.iter().position(|f| *f == self).unwrap_or(0);
+        Self::ALL[(i + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+}
+
+impl RuleCondition {
+    /// A blank condition, as the editor adds one.
+    pub fn blank() -> Self {
+        Self { field: RuleField::Name, op: RuleOp::Contains, value: String::new() }
+    }
+
+    /// Changes the field; the operator stays if the new field supports it, else becomes the field's first.
+    pub fn set_field(&mut self, field: RuleField) {
+        self.field = field;
+        if !field.ops().contains(&self.op) {
+            self.op = field.ops()[0];
+        }
+    }
+
+    /// Steps to the next operator the field supports, wrapping round.
+    pub fn next_op(&mut self) {
+        let ops = self.field.ops();
+        let i = ops.iter().position(|o| *o == self.op).unwrap_or(0);
+        self.op = ops[(i + 1) % ops.len()];
+    }
+}
+
 impl RuleOp {
     pub const ALL: [RuleOp; 3] = [Self::Contains, Self::Equals, Self::StartsWith];
 
@@ -243,6 +278,43 @@ mod tests {
         assert_eq!(filter_to_rule(&json!({ "and": [{ "cpu": { "cores": { "gte": 4 } } }] })), None);
         assert_eq!(filter_to_rule(&Value::String("not json".into())), None);
         assert_eq!(filter_to_rule(&json!({ "and": [], "or": [] })), None);
+    }
+
+    #[test]
+    fn stepping_through_fields_wraps_round_both_ways() {
+        assert_eq!(RuleField::Name.next(), RuleField::Os);
+        assert_eq!(RuleField::Tag.next(), RuleField::Name, "wraps to the first");
+        assert_eq!(RuleField::Name.previous(), RuleField::Tag, "and back to the last");
+        let mut f = RuleField::Name;
+        for _ in 0..RuleField::ALL.len() {
+            f = f.next();
+        }
+        assert_eq!(f, RuleField::Name, "a full lap is a no-op");
+    }
+
+    #[test]
+    fn changing_a_conditions_field_keeps_the_operator_only_if_the_field_supports_it() {
+        let mut c = RuleCondition { field: RuleField::Name, op: RuleOp::StartsWith, value: "x".into() };
+        c.set_field(RuleField::Os);
+        assert_eq!(c.op, RuleOp::StartsWith, "operating system supports starts-with");
+        c.set_field(RuleField::Tag);
+        assert_eq!(c.op, RuleOp::Equals, "a tag can only be matched exactly");
+        assert_eq!(c.value, "x", "the value is never lost");
+    }
+
+    #[test]
+    fn the_operator_steps_only_through_what_the_field_allows() {
+        let mut c = RuleCondition::blank();
+        assert_eq!(c.op, RuleOp::Contains);
+        c.next_op();
+        assert_eq!(c.op, RuleOp::Equals);
+        c.next_op();
+        assert_eq!(c.op, RuleOp::StartsWith);
+        c.next_op();
+        assert_eq!(c.op, RuleOp::Contains, "wraps round");
+        c.set_field(RuleField::Tag);
+        c.next_op();
+        assert_eq!(c.op, RuleOp::Equals, "the only choice for a tag");
     }
 
     #[test]

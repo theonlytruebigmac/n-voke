@@ -48,6 +48,8 @@ pub enum TagConfirm {
     Delete { id: String, name: String, count: i64 },
     RemoveDevices { tag_id: String, name: String, asset_ids: Vec<String> },
     AddDevices { tag_id: String, name: String, assets: Vec<Asset> },
+    /// Leaving the new-tag or edit form with unsaved work.
+    DiscardForm { creating: bool },
 }
 
 impl TagConfirm {
@@ -61,6 +63,8 @@ impl TagConfirm {
             }
             TagConfirm::RemoveDevices { name, asset_ids, .. } => format!("Remove {} from {name}?", devices(asset_ids.len())),
             TagConfirm::AddDevices { name, assets, .. } => format!("Add {} to {name}?", devices(assets.len())),
+            TagConfirm::DiscardForm { creating: true } => "Discard this new tag? Nothing has been created yet.".into(),
+            TagConfirm::DiscardForm { creating: false } => "Discard your changes to this tag?".into(),
         }
     }
 }
@@ -194,7 +198,7 @@ impl App {
     }
 
     /// Makes `id` the tag shown on the right; its details load once the selection settles.
-    fn set_selected_tag(&mut self, id: Option<String>) {
+    pub(super) fn set_selected_tag(&mut self, id: Option<String>) {
         self.tags.selected = id.clone();
         self.tags.detail = if id.is_some() { Load::Loading } else { Load::NotLoaded };
         self.tags.members = Load::NotLoaded;
@@ -265,6 +269,9 @@ impl App {
     // ---- keys ----------------------------------------------------------------------
 
     pub(super) fn on_tags_key(&mut self, key: KeyEvent) {
+        if self.tag_form.is_some() {
+            return self.on_tag_form_key(key);
+        }
         if self.tags.busy {
             return;
         }
@@ -328,6 +335,8 @@ impl App {
             }
             KeyCode::Char('x') | KeyCode::Delete => self.ask_delete_tag(),
             KeyCode::Char('+') => self.open_add_devices(),
+            KeyCode::Char('n') => self.open_new_tag_form(),
+            KeyCode::Char('e') => self.open_edit_tag_form(),
             KeyCode::Char('R') => self.run_on_tag(),
             _ => {}
         }
@@ -437,6 +446,9 @@ impl App {
 
     /// The user said yes.
     pub(super) fn run_tag_confirmed(&mut self, confirm: TagConfirm) {
+        if matches!(confirm, TagConfirm::DiscardForm { .. }) {
+            return self.close_tag_form();
+        }
         self.tags.busy = true;
         self.tags.notice = None;
         let (core, collections) = (self.core.clone(), self.collections.clone());
@@ -459,6 +471,7 @@ impl App {
                 };
                 Msg::TagDone(result)
             }),
+            TagConfirm::DiscardForm { .. } => unreachable!("handled above"),
             TagConfirm::AddDevices { tag_id, name, assets } => self.spawn(move |_| async move {
                 let ids: Vec<String> = assets.iter().map(|a| a.id.clone()).collect();
                 let result = match core.assign_static_tags(std::slice::from_ref(&tag_id), &ids, Some(&name)).await {
@@ -544,6 +557,11 @@ pub(crate) mod tests {
         app.go(Page::Tags);
         app.focus = Focus::Content;
         (rt, app)
+    }
+
+    /// Puts a tag's full record in the cache.
+    pub fn cache_tag(app: &App, tag: Tag) {
+        app.collections.cache_tag(tag);
     }
 
     /// Makes the device search for `term` in `org` answer from the cache.
