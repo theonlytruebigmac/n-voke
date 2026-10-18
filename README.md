@@ -78,7 +78,7 @@ See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full guide: setup, debugg
 | `crates/core/src/lib.rs` | Shared core: keychain storage, settings file, and the `graphql` call that sends every API request |
 | `crates/core/src/audit.rs` | Audit log: every mutation is recorded automatically by `graphql` |
 | `crates/core/src/vault.rs` | Encryption at rest (data key in the OS keychain) |
-| `crates/core/src/{api,collections,run,tags,watch,task_state,jobs,job_store,poll,rules,inputs,sync,targets}.rs` | The same domain logic as `src/lib/`, in Rust, for the terminal app. Saved history uses the desktop app's exact JSON |
+| `crates/core/src/` (the other modules) | The same domain logic as `src/lib/`, in Rust, for the terminal app: `api`, `collections`, `run`, `tags`, `watch`, `task_state`, `jobs`, `job_store`, `poll`, `rules`, `inputs`, `sync`, `targets`. Saved history uses the desktop app's exact JSON |
 | `src-tauri/src/lib.rs` | Desktop app: exposes the core to the web view as Tauri commands |
 | `crates/tui/` | Terminal app (`nvoke`): ratatui interface over the core. Shares the desktop app's API key, settings and run history |
 | `src/lib/api.ts` | GraphQL queries and mutations |
