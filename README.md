@@ -12,6 +12,8 @@ A small desktop app for running N-able repository scripts on devices, or on whol
 
 `nvoke` is a terminal interface that shares the desktop app's API key, settings, run history and audit log, so a run started in one shows up in the other.
 
+Download it from the [releases page](https://github.com/theonlytruebigmac/n-voke/releases) (`nvoke-<version>-windows-x86_64.zip`, `-macos-universal.tar.gz` or `-linux-x86_64.tar.gz`, each with a `.sha256` checksum), unpack it and run `nvoke`. Or build it from source:
+
 ```sh
 cargo run --release --manifest-path crates/tui/Cargo.toml
 ```
@@ -100,7 +102,7 @@ Reference data is cached with TanStack Query and saved to disk for 24 hours, so 
 | Device searches, tag members, tag details | Cached per query, shown immediately and refreshed in the background after a minute. |
 | Running tasks | Not cached; polled every 5 seconds until finished. |
 
-Changes made in the app (tags created, edited, deleted, devices added or removed) update the cache immediately. Replacing the API key or endpoint clears it. Set `NVOKE_LOG_REQUESTS=1` when running `npm run tauri dev` to print every API request, which is handy for checking what the cache saves.
+Changes made in the app (tags created, edited, deleted, devices added or removed) update the cache immediately. Replacing the API key or endpoint clears it. The terminal app also keeps the organization, tag and script lists (encrypted, like the run history) for up to 24 hours, so a new session only asks what changed; "clear saved data" in its Settings removes them. Set `NVOKE_LOG_REQUESTS=1` when running `npm run tauri dev` to print every API request, which is handy for checking what the cache saves.
 
 ### Security
 

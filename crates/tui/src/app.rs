@@ -425,6 +425,9 @@ impl App {
                 self.settings = Some(settings);
                 if has_key {
                     self.start_jobs();
+                    // Start from the lists the last session saved, so the pickers only ask what changed.
+                    let collections = self.collections.clone();
+                    self.runtime.spawn(async move { collections.load_persisted().await });
                 }
                 self.enter_page();
             }
@@ -463,6 +466,8 @@ impl App {
                 Ok(()) => {
                     self.jobs.clear_finished();
                     self.sync_jobs();
+                    let collections = self.collections.clone();
+                    self.runtime.spawn(async move { collections.forget().await });
                     self.flash(NoticeKind::Info, "Cleared saved run history and cached data.");
                 }
                 Err(e) => self.flash(NoticeKind::Error, e),
@@ -533,7 +538,15 @@ impl App {
                 let endpoint = form.endpoint.value.clone();
                 let token = Some(form.token.value.clone()).filter(|t| !t.trim().is_empty());
                 let history = (!form.first_run).then_some(form.history_days);
-                self.spawn(move |core| async move { Msg::Saved(core.save_settings(endpoint, token, history).await) });
+                // Another account or endpoint means other data: drop the lists held for the old one first.
+                let credentials_changed = token.is_some() || self.settings.as_ref().is_some_and(|s| s.api_url != endpoint.trim());
+                let collections = self.collections.clone();
+                self.spawn(move |core| async move {
+                    if credentials_changed {
+                        collections.forget().await;
+                    }
+                    Msg::Saved(core.save_settings(endpoint, token, history).await)
+                });
             }
             _ => {
                 if let Some(input) = form.focused() {

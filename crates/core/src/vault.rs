@@ -32,9 +32,22 @@ pub struct Vault {
     key: Mutex<Option<Result<XChaCha20Poly1305, String>>>,
 }
 
+impl Default for Vault {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Vault {
     pub fn new() -> Self {
         Self { key: Mutex::new(None) }
+    }
+
+    /// A vault with a fixed key, so tests never touch the system keychain.
+    #[doc(hidden)]
+    pub fn for_tests() -> Self {
+        let cipher = XChaCha20Poly1305::new_from_slice(&[7u8; 32]).expect("a 32-byte key");
+        Self { key: Mutex::new(Some(Ok(cipher))) }
     }
 
     /// The cipher, loading (or creating) the data key on first use.

@@ -21,7 +21,7 @@ pub trait Synced {
 }
 
 /// A collection held in full, with what is needed to refresh it by delta.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Collection<T> {
     pub items: Vec<T>,
     /// Latest `updatedAt` seen; deltas ask for anything newer.

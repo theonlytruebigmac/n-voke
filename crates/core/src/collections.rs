@@ -1,12 +1,14 @@
 //! Cached lists for the pickers. A port of `collections.ts`: small reference
 //! lists (organizations, tags, scripts) are held in full and searched locally;
 //! tags and scripts refresh by delta (only what changed since the last sync).
-//! Device lists and tag members are cached per query. Held in memory for the
-//! session.
+//! Device lists and tag members are cached per query, in memory for the
+//! session. The reference lists are also kept (encrypted) between runs for up
+//! to a day, so a new session starts with a delta, not a full load.
 
 use std::{collections::HashMap, future::Future, sync::{Arc, Mutex}};
 
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     Core,
@@ -26,6 +28,24 @@ const TAGS_STALE: i64 = 30_000;
 const SCRIPTS_STALE: i64 = 2 * MINUTE;
 const ORGS_STALE: i64 = 10 * MINUTE;
 const QUERY_STALE: i64 = MINUTE;
+
+/// The encrypted file the lists are kept in between runs.
+pub(crate) const CACHE_NAME: &str = "collections-cache";
+/// A saved copy older than this is ignored and the lists are loaded in full.
+const CACHE_MAX_AGE: i64 = 24 * HOUR;
+const CACHE_VERSION: u32 = 1;
+
+/// The reference lists as saved to disk. Device lists and tag members are left out: they change too often to be worth keeping.
+#[derive(Serialize, Deserialize)]
+struct Snapshot {
+    version: u32,
+    saved_at: i64,
+    /// The API the lists came from; a different endpoint means a different set of data.
+    endpoint: String,
+    orgs: Option<OrgDirectory>,
+    tags: Option<Collection<Tag>>,
+    scripts: HashMap<String, Collection<Script>>,
+}
 
 fn now_ms() -> i64 {
     Utc::now().timestamp_millis()
@@ -66,7 +86,7 @@ where
     Ok(Collection { items, cursor, full_at: prev.full_at })
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OrgDirectory {
     pub items: Vec<Organization>,
     pub full_at: i64,
@@ -80,10 +100,11 @@ where
     FA: FnOnce() -> FutA,
     FutA: Future<Output = Result<Vec<Organization>, String>>,
 {
-    if let Some(prev) = prev {
-        if now - prev.full_at < FULL_RELOAD_EVERY && count().await? == prev.items.len() as i64 {
-            return Ok(prev);
-        }
+    if let Some(prev) = prev
+        && now - prev.full_at < FULL_RELOAD_EVERY
+        && count().await? == prev.items.len() as i64
+    {
+        return Ok(prev);
     }
     let mut items = fetch_all().await?;
     items.sort_by(by_name);
@@ -177,13 +198,16 @@ impl<T> Fresh<T> {
     }
 }
 
+/// A cache key made of an organization id and a second id (script or tag).
+type OrgKey = (String, String);
+
 pub struct Collections {
     core: Arc<Core>,
     orgs: Mutex<Option<Fresh<OrgDirectory>>>,
     tags: Mutex<Option<Fresh<Collection<Tag>>>>,
     scripts: Mutex<HashMap<String, Fresh<Collection<Script>>>>,
-    assets: Mutex<HashMap<(String, String), Fresh<Vec<Asset>>>>,
-    members: Mutex<HashMap<(String, String), Fresh<Devices>>>,
+    assets: Mutex<HashMap<OrgKey, Fresh<Vec<Asset>>>>,
+    members: Mutex<HashMap<OrgKey, Fresh<Devices>>>,
     tag_details: Mutex<HashMap<String, Fresh<Option<Tag>>>>,
 }
 
@@ -200,6 +224,57 @@ impl Collections {
         })
     }
 
+    /// Starts from the lists saved by an earlier run, so the first picker only has to ask what changed.
+    /// A missing, unreadable, old or foreign copy is ignored. Entries count as stale, so the next use
+    /// refreshes them (by delta where it can) before showing anything.
+    pub async fn load_persisted(&self) {
+        let Ok(Some(text)) = self.core.store_get(CACHE_NAME).await else { return };
+        let Ok(snapshot) = serde_json::from_str::<Snapshot>(&text) else { return };
+        let now = now_ms();
+        if snapshot.version != CACHE_VERSION || now - snapshot.saved_at > CACHE_MAX_AGE || snapshot.saved_at > now + MINUTE || snapshot.endpoint != self.core.api_url() {
+            return;
+        }
+        // Whatever the session already fetched is newer than the file.
+        let mut orgs = self.orgs.lock().unwrap();
+        if orgs.is_none() {
+            *orgs = snapshot.orgs.map(|value| Fresh { value, checked_at: 0 });
+        }
+        let mut tags = self.tags.lock().unwrap();
+        if tags.is_none() {
+            *tags = snapshot.tags.map(|value| Fresh { value, checked_at: 0 });
+        }
+        let mut scripts = self.scripts.lock().unwrap();
+        for (org, value) in snapshot.scripts {
+            scripts.entry(org).or_insert(Fresh { value, checked_at: 0 });
+        }
+    }
+
+    /// Saves the lists for the next run. A failure only costs a full load next time.
+    async fn persist(&self) {
+        let snapshot = Snapshot {
+            version: CACHE_VERSION,
+            saved_at: now_ms(),
+            endpoint: self.core.api_url(),
+            orgs: self.orgs.lock().unwrap().as_ref().map(|f| f.value.clone()),
+            tags: self.tags.lock().unwrap().as_ref().map(|f| f.value.clone()),
+            scripts: self.scripts.lock().unwrap().iter().map(|(k, f)| (k.clone(), f.value.clone())).collect(),
+        };
+        if let Ok(json) = serde_json::to_string(&snapshot) {
+            let _ = self.core.store_set(CACHE_NAME, json).await;
+        }
+    }
+
+    /// Forgets everything held, in memory and on disk (another account or endpoint, or the data was cleared).
+    pub async fn forget(&self) {
+        *self.orgs.lock().unwrap() = None;
+        *self.tags.lock().unwrap() = None;
+        self.scripts.lock().unwrap().clear();
+        self.assets.lock().unwrap().clear();
+        self.members.lock().unwrap().clear();
+        self.tag_details.lock().unwrap().clear();
+        let _ = self.core.store_remove(CACHE_NAME).await;
+    }
+
     pub async fn organizations(&self, term: &str) -> Result<Vec<Organization>, String> {
         let now = now_ms();
         let cached = self.orgs.lock().unwrap().as_ref().map(|f| (f.value.clone(), f.is_fresh(ORGS_STALE, now)));
@@ -208,6 +283,7 @@ impl Collections {
             other => {
                 let fresh = refresh_organizations(other.map(|(d, _)| d), now, || self.core.count_organizations(), || self.core.fetch_all_organizations()).await?;
                 *self.orgs.lock().unwrap() = Some(Fresh { value: fresh.clone(), checked_at: now });
+                self.persist().await;
                 fresh
             }
         };
@@ -222,6 +298,7 @@ impl Collections {
             other => {
                 let fresh = sync_collection(other.map(|(c, _)| c), now, || self.core.fetch_all_scripts(org_id), |since| async move { self.core.fetch_scripts_changed_since(org_id, &since).await }).await?;
                 self.scripts.lock().unwrap().insert(org_id.to_string(), Fresh { value: fresh.clone(), checked_at: now });
+                self.persist().await;
                 fresh
             }
         };
@@ -236,6 +313,7 @@ impl Collections {
             other => {
                 let fresh = sync_collection(other.map(|(c, _)| c), now, || self.core.fetch_all_tags(), |since| async move { self.core.fetch_tags_changed_since(&since).await }).await?;
                 *self.tags.lock().unwrap() = Some(Fresh { value: fresh.clone(), checked_at: now });
+                self.persist().await;
                 fresh
             }
         };
@@ -558,5 +636,86 @@ mod tests {
     fn a_picker_never_shows_more_than_the_result_limit() {
         let orgs: Vec<Organization> = (0..80).map(|i| org(&i.to_string(), &format!("Org {i}"))).collect();
         assert_eq!(search_organizations(&orgs, "").len(), RESULTS);
+    }
+
+    // ---- the copy kept between runs ----
+
+    async fn saved_lists(core: &Arc<Core>) -> Arc<Collections> {
+        let first = Collections::new(core.clone());
+        first.seed(vec![org("1", "Acme")], vec![tag_named("t1", "Servers")], vec![("1", vec![script("s1", "Cleanup", None)])]);
+        first.persist().await;
+        first
+    }
+
+    #[tokio::test]
+    async fn the_lists_come_back_in_the_next_session_as_stale_so_they_refresh_by_delta() {
+        let core = Core::for_tests("persist");
+        saved_lists(&core).await;
+
+        let next = Collections::new(core);
+        assert!(next.tags.lock().unwrap().is_none());
+        next.load_persisted().await;
+        let tags = next.tags.lock().unwrap();
+        let tags = tags.as_ref().expect("tags were restored");
+        assert_eq!(tags.value.items[0].name, "Servers");
+        assert_eq!(tags.checked_at, 0, "restored lists are checked again before they are trusted");
+        assert!(next.orgs.lock().unwrap().is_some() && next.scripts.lock().unwrap().contains_key("1"));
+    }
+
+    #[tokio::test]
+    async fn a_copy_that_is_too_old_or_from_another_endpoint_is_ignored() {
+        let core = Core::for_tests("persist-old");
+        let first = saved_lists(&core).await;
+
+        // Too old: rewrite the file with an old timestamp.
+        let text = core.store_get(CACHE_NAME).await.unwrap().unwrap();
+        let mut snapshot: Snapshot = serde_json::from_str(&text).unwrap();
+        snapshot.saved_at -= CACHE_MAX_AGE + 1;
+        core.store_set(CACHE_NAME, serde_json::to_string(&snapshot).unwrap()).await.unwrap();
+        let next = Collections::new(core.clone());
+        next.load_persisted().await;
+        assert!(next.tags.lock().unwrap().is_none(), "older than a day");
+
+        // Another endpoint: the same lists, saved for a different API.
+        snapshot.saved_at += CACHE_MAX_AGE + 1;
+        snapshot.endpoint = "https://other.example/graphql".into();
+        core.store_set(CACHE_NAME, serde_json::to_string(&snapshot).unwrap()).await.unwrap();
+        let next = Collections::new(core.clone());
+        next.load_persisted().await;
+        assert!(next.tags.lock().unwrap().is_none(), "a different endpoint is different data");
+
+        // Damaged contents are not an error either.
+        core.store_set(CACHE_NAME, "not json".into()).await.unwrap();
+        Collections::new(core).load_persisted().await;
+        drop(first);
+    }
+
+    #[tokio::test]
+    async fn what_this_session_already_fetched_is_not_overwritten_by_the_file() {
+        let core = Core::for_tests("persist-newer");
+        saved_lists(&core).await;
+        let next = Collections::new(core);
+        next.seed(vec![], vec![tag_named("t9", "Newer")], vec![]);
+        next.load_persisted().await;
+        assert_eq!(next.tags.lock().unwrap().as_ref().unwrap().value.items[0].name, "Newer");
+    }
+
+    #[tokio::test]
+    async fn forgetting_clears_memory_and_the_saved_copy() {
+        let core = Core::for_tests("persist-forget");
+        let first = saved_lists(&core).await;
+        first.forget().await;
+        assert!(first.tags.lock().unwrap().is_none() && core.store_get(CACHE_NAME).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn changing_the_key_or_endpoint_drops_the_saved_copy_but_changing_history_does_not() {
+        let core = Core::for_tests("persist-settings");
+        saved_lists(&core).await;
+        let url = core.api_url();
+        core.save_settings(url.clone(), None, Some(7)).await.unwrap();
+        assert!(core.store_get(CACHE_NAME).await.unwrap().is_some(), "history length says nothing about the data");
+        core.save_settings("https://other.example/graphql".into(), None, None).await.unwrap();
+        assert!(core.store_get(CACHE_NAME).await.unwrap().is_none(), "another endpoint means other data");
     }
 }

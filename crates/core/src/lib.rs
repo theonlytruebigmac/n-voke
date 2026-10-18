@@ -217,7 +217,8 @@ impl Core {
         let paths = Paths { config_dir: dir.join("config"), data_dir: dir.join("data") };
         fs::create_dir_all(&paths.config_dir).unwrap();
         fs::write(paths.config_file(), r#"{ "apiUrl": "https://127.0.0.1:9/graphql", "historyDays": 30 }"#).unwrap();
-        let core = Core::new_in(paths, "test").unwrap();
+        let mut core = Core::new_in(paths, "test").unwrap();
+        core.vault = Arc::new(Vault::for_tests());
         *core.api_key.lock().unwrap() = Some("test-key-not-real".into());
         core.set_dry_run(false);
         Arc::new(core)
@@ -263,6 +264,11 @@ impl Core {
     /// Converts any plain-JSON audit lines from older versions. Call once at startup, off the UI thread.
     pub fn encrypt_existing_audit(&self) {
         self.audit.encrypt_existing();
+    }
+
+    /// The API endpoint now in use.
+    pub fn api_url(&self) -> String {
+        self.load_config().api_url
     }
 
     fn load_config(&self) -> Config {
@@ -318,6 +324,11 @@ impl Core {
             let summary = if history_days == 0 { "Stopped saving run history".to_string() } else { format!("Keep run history for {history_days} days") };
             let details = json!({ "from": previous.history_days, "to": history_days });
             self.audit.append(&AuditEntry::new("settings.history", &summary, Ok(()), details));
+        }
+        let credentials_changed = previous_url != api_url || api_key.as_deref().is_some_and(|k| !k.trim().is_empty());
+        if credentials_changed {
+            // Lists saved for another account or endpoint must not be mixed into this one's.
+            let _ = self.store_remove(collections::CACHE_NAME).await;
         }
         if previous_url != api_url {
             let entry = AuditEntry::new(
