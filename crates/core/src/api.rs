@@ -212,6 +212,7 @@ pub struct RunResult {
     pub warnings: Vec<String>,
 }
 
+#[derive(Clone, Debug)]
 pub struct Devices {
     pub assets: Vec<Asset>,
     pub total_count: i64,

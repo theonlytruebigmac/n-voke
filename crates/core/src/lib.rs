@@ -6,11 +6,13 @@
 
 pub mod api;
 pub mod audit;
+pub mod collections;
 pub mod inputs;
 pub mod job_store;
 pub mod jobs;
 pub mod poll;
 pub mod model;
+pub mod run;
 pub mod rules;
 pub mod sync;
 pub mod targets;
