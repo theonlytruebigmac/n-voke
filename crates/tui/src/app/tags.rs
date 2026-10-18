@@ -69,6 +69,13 @@ impl TagConfirm {
     }
 }
 
+/// Devices from a run, and the organization it ran in, on their way into a tag.
+#[derive(Clone, Debug)]
+pub struct AssignCtx {
+    pub org: Organization,
+    pub devices: Vec<Asset>,
+}
+
 pub struct TagsState {
     pub term: TextInput,
     /// The search box is being typed into.
@@ -388,8 +395,11 @@ impl App {
 
     // ---- actions -------------------------------------------------------------------
 
+    /// Tells the user, on the Tags page and (briefly) in the footer wherever they are.
     fn notice(&mut self, kind: NoticeKind, text: impl Into<String>) {
-        self.tags.notice = Some(Notice { kind, text: text.into() });
+        let text = text.into();
+        self.tags.notice = Some(Notice { kind, text: text.clone() });
+        self.flash(kind, text);
     }
 
     fn ask_delete_tag(&mut self) {
@@ -444,6 +454,57 @@ impl App {
         self.resolve_devices();
     }
 
+    /// Starts putting the devices of the selected run (or just the selected result group) into a tag.
+    pub(super) fn start_tag_devices(&mut self, only_group: bool) {
+        let Some(job) = self.current_job().cloned() else { return };
+        let Some(org_id) = job.org_id.clone() else {
+            return self.flash(NoticeKind::Error, "This run doesn't record which organization it ran in, so its tags can't be looked up. Use the Tags page instead.");
+        };
+        let org = Organization { id: org_id, name: job.org_name.clone().unwrap_or_default(), typename: String::new() };
+        let indexes: Vec<usize> = match (only_group, self.current_group()) {
+            (true, Some(group)) => group.tasks.clone(),
+            _ => (0..job.tasks.len()).collect(),
+        };
+        let mut seen = HashSet::new();
+        let devices: Vec<Asset> = indexes
+            .into_iter()
+            .filter_map(|i| job.tasks.get(i))
+            .filter_map(|t| t.asset_id.as_ref().map(|id| Asset::stub(id, &t.device_name)))
+            .filter(|a| seen.insert(a.id.clone()))
+            .collect();
+        if devices.is_empty() {
+            return self.flash(NoticeKind::Error, "None of these devices have a known ID to tag.");
+        }
+        let title = format!("Tag {} device{}", devices.len(), if devices.len() == 1 { "" } else { "s" });
+        let picker = Picker::new(PickKind::StaticTags, Purpose::AssignTag, &title, Some(org.id.clone()));
+        self.assign = Some(AssignCtx { org, devices });
+        self.open_picker_with(picker);
+    }
+
+    /// The picker chose something for a run's devices.
+    pub(super) fn choose_for_assign(&mut self, item: crate::picker::PickItem) {
+        use crate::picker::PickItem;
+        let Some(ctx) = self.assign.take() else { return };
+        self.picker = None;
+        match item {
+            PickItem::Tag(tag) => {
+                self.confirm = Some(Confirm::Tag(TagConfirm::AddDevices { tag_id: tag.id, name: tag.name, assets: ctx.devices }));
+            }
+            PickItem::NewTag(name) => {
+                // A new tag with these devices already in it, to be named and confirmed on the form.
+                let mut form = super::TagForm::create(Some(ctx.org));
+                form.data.name = nvoke_core::rules::suggest_tag_name(&name);
+                form.data.devices = ctx.devices;
+                form.dirty = true;
+                self.tag_form = Some(form);
+                self.page = Page::Tags;
+                self.focus = Focus::Content;
+                self.enter_tags();
+            }
+            _ => {}
+        }
+    }
+
     /// The user said yes.
     pub(super) fn run_tag_confirmed(&mut self, confirm: TagConfirm) {
         if matches!(confirm, TagConfirm::DiscardForm { .. }) {
@@ -488,6 +549,7 @@ impl App {
 
     pub(super) fn on_tag_done(&mut self, result: Result<TagDone, String>) {
         self.tags.busy = false;
+        self.tags.notice = None;
         let plural = |n: usize| format!("{n} device{}", if n == 1 { "" } else { "s" });
         match result {
             Ok(TagDone::Deleted { id, name }) => {
@@ -871,5 +933,136 @@ pub(crate) mod tests {
         app.tags.busy = false;
         press(&mut app, KeyCode::Down);
         assert_eq!(app.tags.selected.as_deref(), Some("t2"));
+    }
+
+    // ---- tagging the devices of a run -------------------------------------------------------------
+
+    use crate::app::viewer::tests::viewer_app;
+
+    /// Activity with a run that remembers its organization, on its results pane (three devices, one group).
+    fn assign_app() -> (tokio::runtime::Runtime, App) {
+        let (rt, mut app) = viewer_app();
+        let mut job = app.job_list[0].clone();
+        job.org_id = Some("o1".into());
+        job.org_name = Some("Acme".into());
+        app.jobs.seed(vec![job]);
+        app.sync_jobs();
+        app.collections.seed(vec![], vec![tag("t1", "Servers", false, 2), tag("t2", "Windows10", true, 5), tag("t3", "Laptops", false, 0)], vec![]);
+        (rt, app)
+    }
+
+    fn picked_keys(app: &App) -> Vec<String> {
+        app.picker.as_ref().unwrap().items.iter().map(PickItem::key).collect()
+    }
+
+    #[test]
+    fn t_on_a_result_group_offers_the_static_tags_and_asks_before_adding_its_devices() {
+        let (_rt, mut app) = assign_app();
+        app.core().set_dry_run(true);
+        press(&mut app, KeyCode::Char('T'));
+        pump(&mut app);
+        let p = app.picker.as_ref().unwrap();
+        assert_eq!(p.title, "Tag 3 devices");
+        assert_eq!(picked_keys(&app), ["t:t3", "t:t1"], "static tags only (Windows10 is dynamic), by name");
+        press(&mut app, KeyCode::Down); // Servers
+        press(&mut app, KeyCode::Enter);
+        assert!(app.picker.is_none());
+        assert_eq!(app.confirm.as_ref().unwrap().prompt(), "Add 3 devices to Servers?");
+        press(&mut app, KeyCode::Char('y'));
+        pump(&mut app);
+        let entry = &app.core().dry_run_log()[0];
+        assert_eq!(entry.summary, "Added 3 devices to Servers");
+        assert_eq!(entry.variables["input"]["assetIds"], serde_json::json!(["PC-1", "PC-2", "PC-3"]));
+        assert_eq!(entry.variables["input"]["tagIds"], serde_json::json!(["t1"]));
+    }
+
+    #[test]
+    fn the_result_of_tagging_is_shown_in_the_footer_wherever_you_are() {
+        let (_rt, mut app) = assign_app();
+        app.core().set_dry_run(true);
+        press(&mut app, KeyCode::Char('T'));
+        pump(&mut app);
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('y'));
+        pump(&mut app);
+        assert!(app.page == Page::Activity, "the user never left Activity");
+        let (flash, _) = app.flash.as_ref().unwrap();
+        assert!(flash.text.starts_with("Dry run: nothing was sent"), "{}", flash.text);
+        app.on_tag_done(Ok(TagDone::MembersAdded { count: 3 }));
+        assert_eq!(app.flash.as_ref().unwrap().0.text, "Added 3 devices.");
+    }
+
+    #[test]
+    fn a_name_that_matches_nothing_offers_to_create_a_tag_and_an_exact_match_does_not() {
+        let (_rt, mut app) = assign_app();
+        press(&mut app, KeyCode::Char('T'));
+        pump(&mut app);
+        type_text(&mut app, "brand new");
+        pump(&mut app);
+        assert_eq!(picked_keys(&app), ["n:brand new"], "nothing matches, so the only option is to create it");
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Char('T'));
+        pump(&mut app);
+        type_text(&mut app, "SERVERS");
+        pump(&mut app);
+        assert_eq!(picked_keys(&app), ["t:t1"], "an exact match (ignoring case) needs no 'create' option");
+    }
+
+    #[test]
+    fn choosing_to_create_opens_the_tag_form_with_the_devices_already_in_it() {
+        let (_rt, mut app) = assign_app();
+        press(&mut app, KeyCode::Char('T'));
+        pump(&mut app);
+        type_text(&mut app, "needs patching");
+        pump(&mut app);
+        press(&mut app, KeyCode::Enter);
+        assert!(app.page == Page::Tags && app.picker.is_none());
+        let form = app.tag_form.as_ref().expect("the form opened");
+        assert_eq!(form.data.name, "needs_patching", "spaces become underscores, as a tag name needs");
+        assert_eq!(form.data.org.as_ref().unwrap().id, "o1", "in the organization the run was in");
+        assert_eq!(form.data.devices.iter().map(|d| d.name.clone()).collect::<Vec<_>>(), ["PC-1", "PC-2", "PC-3"]);
+        assert!(form.dirty && !form.problems().any(), "ready to create as it is");
+        press(&mut app, KeyCode::Char('q'));
+        assert!(!app.quit, "and an accidental q cannot throw it away");
+    }
+
+    #[test]
+    fn on_the_run_list_t_tags_every_device_in_the_run() {
+        let (_rt, mut app) = assign_app();
+        app.pane = crate::app::Pane::Jobs;
+        press(&mut app, KeyCode::Char('T'));
+        pump(&mut app);
+        assert_eq!(app.picker.as_ref().unwrap().title, "Tag 3 devices");
+    }
+
+    #[test]
+    fn a_run_that_forgot_its_organization_says_so_instead_of_failing() {
+        let (_rt, mut app) = viewer_app(); // its job has no organization recorded
+        press(&mut app, KeyCode::Char('T'));
+        assert!(app.picker.is_none());
+        assert!(app.flash.as_ref().unwrap().0.text.contains("doesn't record which organization"));
+    }
+
+    #[test]
+    fn closing_the_tag_picker_forgets_the_devices() {
+        let (_rt, mut app) = assign_app();
+        press(&mut app, KeyCode::Char('T'));
+        pump(&mut app);
+        assert!(app.assign.is_some());
+        press(&mut app, KeyCode::Esc);
+        assert!(app.assign.is_none() && app.picker.is_none() && app.confirm.is_none());
+    }
+
+    #[test]
+    fn the_flash_goes_away_and_never_hides_a_question() {
+        let (_rt, mut app) = assign_app();
+        app.flash(NoticeKind::Info, "Saved something.");
+        app.confirm = Some(Confirm::Tag(TagConfirm::DiscardForm { creating: true }));
+        // Drawing is the UI's business; here: the state says which is newer and that the flash expires.
+        assert!(app.flash.is_some());
+        let at = app.flash.as_ref().unwrap().1;
+        assert!(app.tick.saturating_sub(at) < 50);
+        app.tick += 60;
+        assert!(app.tick.saturating_sub(at) >= 50);
     }
 }

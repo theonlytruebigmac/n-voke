@@ -17,6 +17,7 @@ pub mod rules;
 pub mod sync;
 pub mod tags;
 pub mod targets;
+pub mod watch;
 pub mod task_state;
 pub mod vault;
 

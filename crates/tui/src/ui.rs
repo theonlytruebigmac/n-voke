@@ -75,11 +75,12 @@ fn draw_main(frame: &mut Frame, area: Rect, app: &mut App) {
         (Focus::Content, Page::Run) if app.run.pane == crate::app::RunPane::Devices => &[("↑↓", "device"), ("space", "include/leave out"), ("a", "all/none"), ("←", "back to form")],
         (Focus::Content, Page::Run) => &[("↑↓", "field"), ("enter", "choose/edit"), ("→", "devices"), ("←", "back"), ("?", "help")],
         (Focus::Content, Page::Activity) if app.pane == Pane::Results => &[("↑↓", "group"), ("enter", "read the output"), ("PgUp/PgDn", "scroll"), ("←", "back"), ("?", "help")],
-        (Focus::Content, Page::Activity) => &[("↑↓", "run"), ("→", "results"), ("s", "stop"), ("w", "watch"), ("R", "run again"), ("F", "re-run failed"), ("x", "remove"), ("←", "back")],
+        (Focus::Content, Page::Activity) => &[("↑↓", "run"), ("→", "results"), ("s", "stop"), ("w", "watch"), ("R", "run again"), ("F", "re-run failed"), ("T", "tag devices"), ("W", "watch task"), ("x", "remove"), ("←", "back")],
         (Focus::Content, Page::Audit) => &[("↑↓", "move"), ("PgUp/PgDn", "jump"), ("r", "refresh"), ("←", "back"), ("?", "help")],
         (Focus::Content, _) => &[("enter", "edit"), ("←", "back"), ("?", "help"), ("q", "quit")],
     };
     let viewer_hints: Vec<(&str, &str)> = match &app.viewer {
+        _ if app.watch.is_some() => vec![("esc", "cancel"), ("enter", "watch"), ("paste", "the task ID")],
         Some(v) if v.searching => vec![("esc", "cancel"), ("enter", "find"), ("type", "search")],
         Some(v) => {
             // Most important first: a narrow window cuts the end of the line, and what must never go is the way out.
@@ -92,11 +93,15 @@ fn draw_main(frame: &mut Frame, area: Rect, app: &mut App) {
         }
         None => vec![],
     };
-    let hints: &[(&str, &str)] = if app.viewer.is_some() { &viewer_hints } else { hints };
+    let hints: &[(&str, &str)] = if app.viewer.is_some() || app.watch.is_some() { &viewer_hints } else { hints };
     let dry_hint = [("d", "held-back changes")];
     let hints: Vec<(&str, &str)> = if app.is_dry_run() { hints.iter().chain(dry_hint.iter()).copied().collect() } else { hints.to_vec() };
     let hints = hints.as_slice();
-    if let Some(confirm) = &app.confirm {
+    let flash = app.flash.as_ref().filter(|(_, at)| app.tick.saturating_sub(*at) < 50);
+    if let (None, Some((notice, _))) = (&app.confirm, flash) {
+        let color = if notice.kind == crate::app::NoticeKind::Error { ERR } else { ACCENT };
+        frame.render_widget(Paragraph::new(Line::styled(format!(" {}", notice.text), Style::new().fg(color).add_modifier(Modifier::BOLD))), footer);
+    } else if let Some(confirm) = &app.confirm {
         let prompt = Line::from(vec![
             Span::styled(format!(" {} ", confirm.prompt()), Style::new().fg(WARN).add_modifier(Modifier::BOLD)),
             Span::styled("y", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)),
@@ -107,7 +112,9 @@ fn draw_main(frame: &mut Frame, area: Rect, app: &mut App) {
         frame.render_widget(Paragraph::new(theme::key_hints(hints)), footer);
     }
 
-    if app.viewer.is_some() {
+    if app.watch.is_some() {
+        draw_watch(frame, area, app);
+    } else if app.viewer.is_some() {
         crate::viewer_ui::draw_viewer(frame, area, app);
     } else if app.picker.is_some() {
         crate::run_ui::draw_picker(frame, area, app);
@@ -895,8 +902,32 @@ fn draw_dry_log(frame: &mut Frame, area: Rect, app: &mut App) {
     frame.render_widget(Paragraph::new(lines).scroll((app.dry_scroll, 0)).block(Block::new().borders(ratatui::widgets::Borders::LEFT).border_style(Style::new().fg(BORDER))), detail_area);
 }
 
+fn draw_watch(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(w) = app.watch.as_ref() else { return };
+    let popup = centered(area, area.width.saturating_sub(6).min(80), 11.min(area.height));
+    clear(frame, popup);
+    let outer = panel_padded("Watch a task", true).title_bottom(theme::footer_text(if w.busy { "looking it up…" } else { "enter watch · esc cancel" }));
+    let inner = outer.inner(popup);
+    frame.render_widget(outer, popup);
+    let [intro, input, message] = Layout::vertical([Constraint::Length(3), Constraint::Length(3), Constraint::Fill(1)]).areas(inner);
+    frame.render_widget(Paragraph::new("Follow a run started elsewhere, such as from the PowerShell script. Paste its task ID.").style(Style::new().fg(TEXT)).wrap(Wrap { trim: true }), intro);
+    let shown: String = w.input.value.chars().rev().take(input.width.saturating_sub(5) as usize).collect::<Vec<_>>().into_iter().rev().collect();
+    let blink = if !w.busy && theme::cursor_visible(app.tick) { "▏" } else { "" };
+    let field = Paragraph::new(Line::from(vec![Span::styled(shown, Style::new().fg(TEXT)), Span::styled(blink, Style::new().fg(ACCENT))]))
+        .block(ratatui::widgets::Block::bordered().border_type(ratatui::widgets::BorderType::Rounded).title(" Task ID ").border_style(Style::new().fg(ACCENT)));
+    frame.render_widget(field, input);
+    let status = if w.busy {
+        Line::styled(format!("{} Looking it up…", spinner(app.tick)), Style::new().fg(ACCENT))
+    } else if let Some(e) = &w.error {
+        Line::styled(e.clone(), Style::new().fg(ERR))
+    } else {
+        Line::from("")
+    };
+    frame.render_widget(Paragraph::new(status).wrap(Wrap { trim: false }), message);
+}
+
 fn draw_help(frame: &mut Frame, area: Rect) {
-    let popup = centered(area, 70, 36);
+    let popup = centered(area, 72, 46);
     clear(frame, popup);
     let key = |k: &str, what: &str| Line::from(vec![Span::styled(format!(" {k:<14}"), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)), Span::styled(what.to_string(), Style::new().fg(TEXT))]);
     let heading = |text: &str| Line::styled(format!(" {text}"), Style::new().fg(DIM).add_modifier(Modifier::BOLD));
@@ -922,10 +953,17 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         key("w  < >", "wrap lines · scroll sideways when not wrapped"),
         key("y  e", "copy to clipboard · save to a file"),
         Line::from(""),
+        heading("Tags"),
+        key("↑ ↓  /", "choose a tag · search by name"),
+        key("→ then space", "tick devices (static tags) · a all · x remove"),
+        key("+  n  e  x", "add devices · new tag · edit · delete"),
+        key("R", "run a script on the tag's devices"),
+        Line::from(""),
         heading("Activity"),
         key("→ / ←", "runs ⇄ results ⇄ menu"),
         key("s w x", "stop watching / watch / remove"),
         key("R  F", "run again / re-run failed"),
+        key("T  W", "tag these devices · watch a task by its ID"),
         Line::from(""),
         heading("Inside a page"),
         key("↑ ↓", "move (j/k work too)"),
@@ -2255,6 +2293,87 @@ mod tests {
                     for x in 0..w {
                         assert!(matches!(buffer[(x, y)].bg, Color::Rgb(..)), "tag form (dynamic: {}) at {w}x{h}: cell ({x},{y}) is not painted", kind_step == 1);
                     }
+                }
+            }
+        }
+    }
+
+    // ---- watch a task, tag a run's devices, the footer message -----------------------------------------
+
+
+    fn activity_with_org() -> (tokio::runtime::Runtime, App) {
+        let (rt, mut app) = viewer_tests::viewer_app();
+        let mut job = app.job_list[0].clone();
+        job.org_id = Some("o1".into());
+        job.org_name = Some("Acme".into());
+        app.jobs.seed(vec![job]);
+        app.sync_jobs();
+        app.collections_seed_tags(vec![run_tests::tag("t1", "Servers", false, 2), run_tests::tag("t2", "Windows10", true, 5)]);
+        (rt, app)
+    }
+
+    #[test]
+    fn the_watch_box_explains_itself_shows_what_is_pasted_and_the_reason_for_a_failure() {
+        let (_rt, mut app) = viewer_tests::viewer_app();
+        run_tests::press(&mut app, KeyCode::Char('W'));
+        let screen = text_of(&draw_at(&mut app, 120, 30));
+        for expected in ["Watch a task", "Follow a run started elsewhere", "Paste", "its task ID", "Task ID", "enter watch · esc cancel", "paste"] {
+            assert!(screen.contains(expected), "missing {expected:?}:\n{screen}");
+        }
+        run_tests::type_text(&mut app, "MDFhMTUwMzgtM2VhMC03YWUx==");
+        assert!(text_of(&draw_at(&mut app, 120, 30)).contains("MDFhMTUwMzgtM2VhMC03YWUx=="));
+        run_tests::deliver(&mut app, crate::app::Msg::Watched(Err("No task found with that ID.".into())));
+        assert!(text_of(&draw_at(&mut app, 120, 30)).contains("No task found with that ID."));
+    }
+
+    #[test]
+    fn while_looking_a_task_up_the_box_says_so() {
+        let (_rt, mut app) = viewer_tests::viewer_app();
+        run_tests::press(&mut app, KeyCode::Char('W'));
+        run_tests::type_text(&mut app, "abc");
+        app.watch.as_mut().unwrap().busy = true;
+        let screen = text_of(&draw_at(&mut app, 120, 30));
+        assert!(screen.contains("Looking it up…") && screen.contains("looking it up…"), "{screen}");
+    }
+
+    #[test]
+    fn the_footer_shows_a_recent_message_in_place_of_the_hints_and_a_question_wins_over_it() {
+        let (_rt, mut app) = viewer_tests::viewer_app();
+        app.flash(crate::app::NoticeKind::Info, "Added 3 devices.");
+        let screen = text_of(&draw_at(&mut app, 120, 30));
+        assert!(screen.lines().last().unwrap().contains("Added 3 devices."), "{screen}");
+        app.confirm = Some(crate::app::Confirm::RemoveJob("j".into()));
+        let asking = text_of(&draw_at(&mut app, 120, 30));
+        assert!(asking.lines().last().unwrap().contains("Remove this run from your history?") && !asking.lines().last().unwrap().contains("Added 3"), "{asking}");
+        app.confirm = None;
+        app.tick += 60;
+        assert!(!text_of(&draw_at(&mut app, 120, 30)).contains("Added 3 devices."), "it goes away on its own");
+    }
+
+    #[test]
+    fn the_tag_picker_for_a_runs_devices_lists_static_tags_and_offers_to_create_one() {
+        let (_rt, mut app) = activity_with_org();
+        run_tests::press(&mut app, KeyCode::Char('T'));
+        run_tests::pump(&mut app);
+        let screen = text_of(&draw_at(&mut app, 120, 30));
+        assert!(screen.contains("Tag 3 devices") && screen.contains("Servers") && !screen.contains("Windows10"), "{screen}");
+        run_tests::type_text(&mut app, "patching");
+        run_tests::pump(&mut app);
+        let creating = text_of(&draw_at(&mut app, 120, 30));
+        assert!(creating.contains("Create static tag “patching”"), "{creating}");
+    }
+
+    #[test]
+    fn the_watch_box_paints_a_solid_background_at_every_size() {
+        let (_rt, mut app) = viewer_tests::viewer_app();
+        run_tests::press(&mut app, KeyCode::Char('W'));
+        run_tests::type_text(&mut app, "x");
+        run_tests::deliver(&mut app, crate::app::Msg::Watched(Err("No task found with that ID.".into())));
+        for (w, h) in [(120, 30), (80, 20), (50, 12), (30, 6), (12, 3)] {
+            let buffer = draw_at(&mut app, w, h);
+            for y in 0..h {
+                for x in 0..w {
+                    assert!(matches!(buffer[(x, y)].bg, Color::Rgb(..)), "watch box at {w}x{h}: cell ({x},{y}) is not painted");
                 }
             }
         }

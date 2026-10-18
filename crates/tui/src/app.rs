@@ -31,6 +31,8 @@ use crate::{
 
 pub(crate) mod run;
 pub(crate) mod tag_form;
+pub(crate) mod watch;
+pub use watch::WatchState;
 pub(crate) mod tags;
 use tags::{TagConfirm, TagDetail, TagDone};
 pub use tags::{TagsPane, TagsState};
@@ -65,6 +67,7 @@ pub enum Msg {
     TagDone(Result<TagDone, String>),
     TagPreview { seq: u64, key: String, result: Result<(Vec<nvoke_core::model::Asset>, i64), String> },
     TagFormDone(Result<Saved, nvoke_core::tags::CreateFailure>),
+    Watched(Result<Box<nvoke_core::jobs::Job>, String>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -199,6 +202,12 @@ pub struct App {
     pub tags: TagsState,
     /// The new-tag / edit-tag form, when open.
     pub tag_form: Option<TagForm>,
+    /// The "watch a task" box, when open.
+    pub watch: Option<WatchState>,
+    /// A short message about something that just happened, shown in the footer for a few seconds.
+    pub flash: Option<(run::Notice, u64)>,
+    /// Devices from a run, waiting to be put in a tag.
+    pub(crate) assign: Option<tags::AssignCtx>,
     /// The open search popup, whichever page opened it.
     pub picker: Option<Picker>,
     /// The full-screen output reader.
@@ -253,6 +262,9 @@ impl App {
             run: RunState::default(),
             tags: TagsState::default(),
             tag_form: None,
+            watch: None,
+            flash: None,
+            assign: None,
             picker: None,
             viewer: None,
             outbox: vec![],
@@ -412,6 +424,7 @@ impl App {
             Msg::TagDone(result) => self.on_tag_done(result),
             Msg::TagPreview { seq, key, result } => self.on_tag_preview(seq, key, result),
             Msg::TagFormDone(result) => self.on_tag_form_done(result),
+            Msg::Watched(result) => self.on_watched(result),
         }
     }
 
@@ -500,6 +513,9 @@ impl App {
             }
             return; // any other key cancels
         }
+        if self.watch.is_some() {
+            return self.on_watch_key(key);
+        }
         if self.viewer.is_some() {
             return self.on_viewer_key(key);
         }
@@ -586,6 +602,17 @@ impl App {
             store.load().await;
             store.run().await;
         });
+    }
+
+    /// Puts tags in the cache (for tests of code built on it).
+    #[cfg(test)]
+    pub(crate) fn collections_seed_tags(&self, tags: Vec<nvoke_core::model::Tag>) {
+        self.collections.seed(vec![], tags, vec![]);
+    }
+
+    /// Shows a short message in the footer for a few seconds.
+    pub(crate) fn flash(&mut self, kind: NoticeKind, text: impl Into<String>) {
+        self.flash = Some((run::Notice { kind, text: text.into() }, self.tick));
     }
 
     /// Remembers that N-able refused the API key, if that is what this error is.
@@ -720,6 +747,8 @@ impl App {
                     self.runtime.spawn(async move { store.resume(&id, None).await });
                 }
             }
+            (_, KeyCode::Char('W')) => self.open_watch(),
+            (pane, KeyCode::Char('T')) => self.start_tag_devices(pane == Pane::Results),
             (_, KeyCode::Char('R')) => self.run_again(false),
             (_, KeyCode::Char('F')) => self.run_again(true),
             (_, KeyCode::Char('x') | KeyCode::Delete) => {

@@ -427,6 +427,9 @@ impl App {
         if purpose == Some(Purpose::TagMembers) {
             self.finish_adding_devices();
         }
+        if purpose == Some(Purpose::AssignTag) {
+            self.assign = None;
+        }
     }
 
     /// The items already chosen in the open picker (they lead its list and carry a tick).
@@ -451,6 +454,10 @@ impl App {
     fn choose_picked(&mut self) {
         let Some(item) = self.picker.as_ref().and_then(|p| p.selected_item().cloned()) else { return };
         match self.picker.as_ref().map(|p| p.purpose) {
+            Some(Purpose::AssignTag) => {
+                self.choose_for_assign(item);
+                return;
+            }
             Some(Purpose::TagAccess) => {
                 if let PickItem::Org(org) = item {
                     self.choose_form_org(org);
@@ -584,7 +591,15 @@ impl App {
         p.loading = false;
         match result {
             Ok(items) => {
-                let items = if matches!(p.kind, PickKind::Targets | PickKind::Devices) { lead_with_chosen(items, &chosen, p.input.value.trim()) } else { items };
+                let mut items = if matches!(p.kind, PickKind::Targets | PickKind::Devices) { lead_with_chosen(items, &chosen, p.input.value.trim()) } else { items };
+                if p.kind == PickKind::StaticTags {
+                    // Nothing matches exactly: offer to make it (the name tidied into one a tag may have).
+                    let term = p.input.value.trim();
+                    let exact = items.iter().any(|i| matches!(i, PickItem::Tag(t) if t.name.eq_ignore_ascii_case(term)));
+                    if !term.is_empty() && !exact {
+                        items.push(PickItem::NewTag(term.to_string()));
+                    }
+                }
                 p.set_items(items);
             }
             Err(e) => {

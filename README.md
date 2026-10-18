@@ -23,9 +23,11 @@ Run `nvoke --dry-run` (or set `NVOKE_DRY_RUN=1`) to try things without consequen
 Built so far:
 - **Run:** pick an organization, a script and who to run it on (devices and tags, with search), fill in the script's inputs, review the resulting devices (offline devices and OS mismatches are flagged, and any can be left out), then confirm. A run that has started takes you to it in Activity.
 - **Activity:** follow runs live, with results grouped by outcome. `R` runs the selected run again; `F` re-runs only the devices that failed. `Enter` on a result opens a full-screen output viewer: scroll, search (`/`, `n`, `N`), switch between the devices in the group (`←` `→`), wrap or unwrap long lines (`w`), copy to the clipboard (`y`) or save to a file in your downloads folder (`e`, readable only by you).
+- **Tags:** browse and search every tag; see a static tag's devices or a dynamic tag's rule in words. `n` creates a static or dynamic tag (a rule editor with a live preview of the devices it matches), `e` edits, `+` adds devices to a static tag, `x` removes ticked devices or deletes the tag, and `R` starts a run on the tag. From a run in Activity, `T` puts its devices in a tag (or creates one for them).
+- **Watch task:** `W` in Activity follows a run started elsewhere (such as by `Invoke-NableScriptRun.ps1`) by its task ID.
 - **Audit log** and **Settings.**
 
-Tags and Watch task are next. If both apps are open at once, the one that saves last wins, so run history is best used from one at a time.
+The terminal app now covers everything the desktop app does. If both apps are open at once, the one that saves last wins, so run history is best used from one at a time.
 
 ## Setup
 
@@ -64,7 +66,7 @@ See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full guide: setup, debugg
 | `crates/core/src/lib.rs` | Shared core: keychain storage, settings file, and the `graphql` call that sends every API request |
 | `crates/core/src/audit.rs` | Audit log: every mutation is recorded automatically by `graphql` |
 | `crates/core/src/vault.rs` | Encryption at rest (data key in the OS keychain) |
-| `crates/core/src/{api,collections,run,task_state,jobs,job_store,poll,rules,inputs,sync,targets}.rs` | The same domain logic as `src/lib/`, in Rust, for the terminal app. Saved history uses the desktop app's exact JSON |
+| `crates/core/src/{api,collections,run,tags,watch,task_state,jobs,job_store,poll,rules,inputs,sync,targets}.rs` | The same domain logic as `src/lib/`, in Rust, for the terminal app. Saved history uses the desktop app's exact JSON |
 | `src-tauri/src/lib.rs` | Desktop app: exposes the core to the web view as Tauri commands |
 | `crates/tui/` | Terminal app (`nvoke`): ratatui interface over the core. Shares the desktop app's API key, settings and run history |
 | `src/lib/api.ts` | GraphQL queries and mutations |

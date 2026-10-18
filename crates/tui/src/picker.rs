@@ -44,6 +44,8 @@ pub enum PickItem {
     Script(Script),
     Asset(Asset),
     Tag(Tag),
+    /// "Create a static tag with this name", offered when nothing matches exactly.
+    NewTag(String),
 }
 
 impl PickItem {
@@ -54,6 +56,7 @@ impl PickItem {
             PickItem::Script(s) => format!("s:{}", s.id),
             PickItem::Asset(a) => format!("d:{}", a.id),
             PickItem::Tag(t) => format!("t:{}", t.id),
+            PickItem::NewTag(name) => format!("n:{name}"),
         }
     }
 

@@ -428,6 +428,7 @@ pub fn draw_picker(frame: &mut Frame, area: Rect, app: &mut App) {
         PickKind::Org if picker.purpose == crate::picker::Purpose::TagAccess => " ↑↓ move · enter choose · tab organization/customer/site · esc cancel ",
         PickKind::Targets => " ↑↓ move · enter add or remove · tab devices ⇄ tags · esc done ",
         PickKind::Devices => " ↑↓ move · enter add or remove · esc done ",
+        PickKind::StaticTags => " ↑↓ move · enter choose · esc cancel ",
         _ => " ↑↓ move · enter choose · esc cancel ",
     };
     let mut title = vec![Span::styled(picker.title.clone(), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))];
@@ -523,6 +524,11 @@ fn pick_row(item: &PickItem, chosen: &std::collections::HashSet<String>, width: 
                 Cell::from(truncate(a.customer.as_ref().map_or("", |c| c.name.as_str()), detail_width)).style(Style::new().fg(DIM)),
             ])
         }
+        PickItem::NewTag(name) => Row::new(vec![
+            Cell::from(Line::styled("+", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))),
+            Cell::from(Line::styled(truncate(&format!("Create static tag “{name}”"), name_width + detail_width), Style::new().fg(ACCENT))),
+            Cell::from(""),
+        ]),
         PickItem::Tag(t) => {
             let kind = if t.is_dynamic() { "Dynamic" } else { "Static" };
             Row::new(vec![
