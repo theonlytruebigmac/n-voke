@@ -3,7 +3,7 @@
 //! Pure logic; `viewer_ui.rs` draws it and the app wires the keys.
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
-use nvoke_core::task_state::{JobTask, TaskPhase, task_outcome, task_phase, task_status_word};
+use nvoke_core::task_state::{JobTask, TaskPhase, is_generic_exit_message, outcome_explanation, task_outcome, task_phase, task_status_word};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -13,6 +13,8 @@ pub enum Kind {
     Stdout,
     Stderr,
     Message,
+    /// Plain-words explanation of what a result means.
+    Explain,
     Variable,
     Note,
 }
@@ -67,6 +69,29 @@ fn output_value(v: &nvoke_core::model::InputValue) -> String {
     }
 }
 
+/// What a finished device's ending means, in plain words, and what N-able actually said.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Meaning {
+    pub explanation: String,
+    /// N-able's own message when it is only its generic wording for a non-zero exit. Quoted quietly:
+    /// on its own it reads as if something broke when the script simply ran and exited non-zero.
+    pub generic_wording: Option<String>,
+    /// N-able's message when it says something real, worth showing as its complaint.
+    pub problem: Option<String>,
+}
+
+pub fn meaning(task: &JobTask) -> Option<Meaning> {
+    let outcome = task_outcome(task)?;
+    let explanation = outcome_explanation(&outcome)?;
+    let message = task.execution.as_ref().and_then(|e| e.error_message.as_deref()).map(str::trim).filter(|m| !m.is_empty());
+    let (generic_wording, problem) = match message {
+        Some(m) if is_generic_exit_message(m) => (Some(m.to_string()), None),
+        Some(m) => (None, Some(m.to_string())),
+        None => (None, None),
+    };
+    Some(Meaning { explanation, generic_wording, problem })
+}
+
 /// Everything worth reading about one device's run, top to bottom.
 pub fn build(task: &JobTask) -> Vec<OutLine> {
     let mut out = vec![];
@@ -107,9 +132,26 @@ pub fn build(task: &JobTask) -> Vec<OutLine> {
     };
     section(&mut out, "Output", Kind::Stdout, output.and_then(|o| o.std_output.as_deref()), true);
     section(&mut out, "Errors", Kind::Stderr, output.and_then(|o| o.std_error.as_deref()), true);
-    section(&mut out, "N-able says", Kind::Message, exec.and_then(|e| e.error_message.as_deref()), false);
+    // A confusing ending gets its meaning first; N-able's wording is quoted quietly, and only a
+    // message that says something real is shown as its complaint.
+    let meaning = meaning(task);
+    match &meaning {
+        Some(m) => {
+            out.push(OutLine::new(Kind::Heading, "What this means"));
+            for line in text_lines(&m.explanation) {
+                out.push(OutLine::new(Kind::Explain, &line));
+            }
+            if let Some(words) = &m.generic_wording {
+                out.push(OutLine::new(Kind::Note, &format!("N-able's own words: “{words}”")));
+            }
+            if let Some(problem) = &m.problem {
+                section(&mut out, "N-able says", Kind::Message, Some(problem), false);
+            }
+        }
+        None => section(&mut out, "N-able says", Kind::Message, exec.and_then(|e| e.error_message.as_deref()), false),
+    }
 
-    let has_text = out.iter().any(|l| matches!(l.kind, Kind::Stdout | Kind::Stderr | Kind::Message));
+    let has_text = out.iter().any(|l| matches!(l.kind, Kind::Stdout | Kind::Stderr | Kind::Message | Kind::Explain));
     match task_phase(task) {
         TaskPhase::Queued | TaskPhase::Running => out.push(OutLine::new(Kind::Note, "Waiting for results…")),
         _ if !has_text => out.push(OutLine::new(Kind::Note, "No output.")),
@@ -136,6 +178,9 @@ pub fn plain_text(lines: &[OutLine]) -> String {
     }
     text
 }
+
+/// Width of a detail row's label column: the label padded to 10, plus a space.
+pub const LABEL_COLUMNS: usize = 11;
 
 /// One row on screen: a logical line, or a piece of one that has been wrapped.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -167,6 +212,36 @@ pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
     pieces
 }
 
+/// Wraps prose at spaces, so words stay whole. A word wider than the line is broken as a last resort.
+pub fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let (mut lines, mut current, mut used) = (vec![], String::new(), 0);
+    for word in text.split(' ').filter(|w| !w.is_empty()) {
+        let w = word.width();
+        if used > 0 && used + 1 + w <= width {
+            current.push(' ');
+            current.push_str(word);
+            used += 1 + w;
+            continue;
+        }
+        if used > 0 {
+            lines.push(std::mem::take(&mut current));
+        }
+        if w <= width {
+            current.push_str(word);
+            used = w;
+        } else {
+            // Longer than a whole line: hard-break it, and carry on after its last piece.
+            let mut pieces = wrap_text(word, width);
+            current = pieces.pop().unwrap_or_default();
+            used = current.width();
+            lines.extend(pieces);
+        }
+    }
+    lines.push(current);
+    lines
+}
+
 /// The part of `text` between display columns `from` and `from + width`.
 pub fn slice_columns(text: &str, from: usize, width: usize) -> String {
     let (mut out, mut col) = (String::new(), 0);
@@ -193,8 +268,20 @@ pub fn layout(lines: &[OutLine], width: usize, wrap: bool, hscroll: usize) -> Ve
             None => line.text.clone(),
         };
         if wrap {
-            for (k, piece) in wrap_text(&text, width).into_iter().enumerate() {
-                out.push(Visual { line: i, first: k == 0, text: piece });
+            // A detail row that wraps keeps its value in the value column, under the label's width.
+            if line.label.is_some() && width > LABEL_COLUMNS + 4 {
+                let value = wrap_text(&line.text, width - LABEL_COLUMNS);
+                for (k, piece) in value.into_iter().enumerate() {
+                    let lead = if k == 0 { text[..text.len() - line.text.len()].to_string() } else { " ".repeat(LABEL_COLUMNS) };
+                    out.push(Visual { line: i, first: k == 0, text: format!("{lead}{piece}") });
+                }
+            } else {
+                // Sentences wrap at spaces; program output wraps by column so it stays faithful.
+                let prose = matches!(line.kind, Kind::Explain | Kind::Note | Kind::Message);
+                let pieces = if prose { wrap_words(&text, width) } else { wrap_text(&text, width) };
+                for (k, piece) in pieces.into_iter().enumerate() {
+                    out.push(Visual { line: i, first: k == 0, text: piece });
+                }
             }
         } else {
             out.push(Visual { line: i, first: true, text: slice_columns(&text, hscroll, width) });
@@ -379,8 +466,69 @@ mod tests {
         assert_eq!(lines.iter().find(|l| l.label.as_deref() == Some("Exit code")).unwrap().text, "7");
         assert_eq!(lines.iter().find(|l| l.label.as_deref() == Some("Duration")).unwrap().text, "4.2s");
         let headings: Vec<_> = lines.iter().filter(|l| l.kind == Kind::Heading).map(|l| l.text.as_str()).collect();
-        assert_eq!(headings, ["Output variables", "Output", "Errors", "N-able says"]);
+        assert_eq!(headings, ["Output variables", "Output", "Errors", "What this means", "N-able says"]);
         assert_eq!(lines.iter().find(|l| l.kind == Kind::Variable).unwrap().text, "3");
+    }
+
+    const PARSE: &str = "something went wrong while parsing the PowerShell output";
+
+    fn texts(lines: &[OutLine], kind: Kind) -> Vec<String> {
+        lines.iter().filter(|l| l.kind == kind).map(|l| l.text.clone()).collect()
+    }
+
+    #[test]
+    fn a_normal_run_that_exited_non_zero_is_explained_and_not_presented_as_an_error() {
+        // The reported case: the script ran and printed its report; N-able's message talks about "parsing".
+        let lines = build(&task("Fail - Bitlocker Key Dependancys Not Met\nUEFI - False", None, Some(PARSE)));
+        let headings: Vec<_> = lines.iter().filter(|l| l.kind == Kind::Heading).map(|l| l.text.as_str()).collect();
+        assert!(headings.contains(&"What this means") && !headings.contains(&"N-able says"), "{headings:?}");
+        let explanation = texts(&lines, Kind::Explain).join(" ");
+        assert!(explanation.contains("The script ran and finished"), "{explanation}");
+        assert!(texts(&lines, Kind::Message).is_empty(), "the generic sentence is not shown as a warning");
+        let quoted = texts(&lines, Kind::Note);
+        assert_eq!(quoted, [format!("N-able's own words: “{PARSE}”")], "it is still there, quietly, for anyone who wants it");
+    }
+
+    #[test]
+    fn a_real_message_from_nable_is_still_shown_as_its_complaint_next_to_the_explanation() {
+        let lines = build(&task("", None, Some("error trying to run script: exit status 1001")));
+        assert!(texts(&lines, Kind::Explain).join(" ").contains("exit code 1001"));
+        assert_eq!(texts(&lines, Kind::Message), ["error trying to run script: exit status 1001"]);
+    }
+
+    #[test]
+    fn a_run_that_never_ran_shows_only_nables_message() {
+        let mut expired = JobTask::new("t", None, "PC", 0);
+        expired.watching = false;
+        expired.task_status = Some("EXPIRED".into());
+        let lines = build(&expired);
+        assert!(texts(&lines, Kind::Explain).is_empty());
+        let mut failed = task("", None, Some("Could not start the script"));
+        failed.execution.as_mut().unwrap().output = None;
+        let lines = build(&failed);
+        // No output and an unrecognised message: it did not run, so N-able's words are the story.
+        assert_eq!(texts(&lines, Kind::Message), ["Could not start the script"]);
+    }
+
+    #[test]
+    fn a_passing_run_has_no_explanation_section() {
+        let mut ok = task("all good", None, None);
+        ok.task_status = Some("SUCCEEDED".into());
+        ok.execution.as_mut().unwrap().status = "SUCCEEDED".into();
+        let lines = build(&ok);
+        assert!(texts(&lines, Kind::Explain).is_empty() && !lines.iter().any(|l| l.text == "What this means"));
+    }
+
+    #[test]
+    fn a_wrapped_detail_row_keeps_its_value_under_the_label() {
+        let lines = vec![OutLine::labelled(Kind::Meta, "Task ID", "ABCDEFGHIJKLMNOPQRSTUVWXYZ")];
+        let rows = layout(&lines, 20, true, 0);
+        let shown: Vec<&str> = rows.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(shown, ["Task ID    ABCDEFGHI", "           JKLMNOPQR", "           STUVWXYZ"]);
+        assert_eq!(rows.iter().filter(|r| r.first).count(), 1);
+        assert_eq!(shown.concat().replace(' ', "").replace("TaskID", ""), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "nothing lost");
+        // Too narrow to hold a column: it falls back to plain wrapping rather than failing.
+        assert!(!layout(&lines, 8, true, 0).is_empty());
     }
 
     #[test]
@@ -422,6 +570,30 @@ mod tests {
         let text = "The quick brown fox jumps over the lazy dog";
         assert_eq!(wrap_text(text, 7).concat(), text);
         assert_eq!(wrap_text("abc", 0).concat(), "abc", "a zero width must not loop forever or drop text");
+    }
+
+    #[test]
+    fn prose_wraps_at_spaces_and_keeps_words_whole() {
+        assert_eq!(wrap_words("The script ran and finished", 10), ["The script", "ran and", "finished"]);
+        assert_eq!(wrap_words("short", 20), ["short"]);
+        assert_eq!(wrap_words("", 20), [""]);
+        // A word wider than the line is broken rather than lost, and the next words carry on after it.
+        assert_eq!(wrap_words("a supercalifragilistic word", 8), ["a", "supercal", "ifragili", "stic", "word"]);
+        let text = "N-able counts any non-zero exit code as a failure; the output above is the script's own.";
+        for width in [5, 12, 20, 40] {
+            let rows = wrap_words(text, width);
+            assert!(rows.iter().all(|r| r.width() <= width), "{rows:?}");
+            assert_eq!(rows.concat().replace(' ', ""), text.replace(' ', ""), "nothing lost at width {width}");
+        }
+        assert!(!wrap_words(text, 30).iter().any(|r| r.ends_with("outp")), "no word is cut when it fits on a line");
+    }
+
+    #[test]
+    fn explanations_wrap_by_word_and_program_output_wraps_by_column_in_the_same_view() {
+        let lines = vec![OutLine::new(Kind::Explain, "one two three four"), OutLine::new(Kind::Stdout, "one two three four")];
+        let rows = layout(&lines, 10, true, 0);
+        let shown: Vec<(usize, &str)> = rows.iter().map(|r| (r.line, r.text.as_str())).collect();
+        assert_eq!(shown, [(0, "one two"), (0, "three four"), (1, "one two th"), (1, "ree four")]);
     }
 
     #[test]

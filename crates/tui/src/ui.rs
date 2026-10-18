@@ -474,8 +474,21 @@ fn draw_job_detail(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) 
             };
             section(&mut out, "output", &g.stdout, TEXT);
             section(&mut out, "errors", &g.stderr, ERR);
-            section(&mut out, "N-able says", &g.error_message, WARN);
-            if g.stdout.is_empty() && g.stderr.is_empty() && g.error_message.is_empty() {
+            // The same plain-words meaning as the full viewer, so the two never disagree.
+            let meaning = g.tasks.first().and_then(|&i| crate::output_view::meaning(&tasks[i]));
+            match &meaning {
+                Some(m) => {
+                    section(&mut out, "what this means", &m.explanation, TEXT);
+                    if let Some(words) = &m.generic_wording {
+                        out.push(Line::styled(format!("N-able's own words: “{words}”"), Style::new().fg(DIM)));
+                    }
+                    if let Some(problem) = &m.problem {
+                        section(&mut out, "N-able says", problem, WARN);
+                    }
+                }
+                None => section(&mut out, "N-able says", &g.error_message, WARN),
+            }
+            if g.stdout.is_empty() && g.stderr.is_empty() && g.error_message.is_empty() && meaning.is_none() {
                 out.push(Line::from(""));
                 out.push(Line::styled("No output.", Style::new().fg(DIM)));
             }
@@ -1885,5 +1898,65 @@ mod tests {
         assert!(screen.contains("┤ ready · run on 2 devices ├"), "{screen}");
         app.run.confirming = true;
         assert!(text_of(&draw_at(&mut app, 100, 18)).contains("enter again to run on 2 devices"));
+    }
+
+    // ---- explaining a non-zero exit -----------------------------------------------------------
+
+    #[test]
+    fn a_non_zero_exit_is_explained_inline_instead_of_shown_as_an_error() {
+        let (_rt, mut app) = bitlocker_app();
+        let screen = text_of(&draw_at(&mut app, 130, 40));
+        assert!(screen.contains("what this means") && screen.contains("The script ran and finished"), "{screen}");
+        // The panel is narrow, so the quoted sentence wraps: check the pieces that sit on one line.
+        assert!(screen.contains("N-able's own words:") && screen.contains("wrong while"), "still there, quietly:\n{screen}");
+        assert!(!screen.contains("N-able says"), "the generic sentence must not be presented as N-able's complaint:\n{screen}");
+    }
+
+    #[test]
+    fn the_viewer_explains_it_too_and_only_says_what_is_true_about_wrapping() {
+        let (_rt, mut app) = bitlocker_app();
+        run_tests::press(&mut app, KeyCode::Enter);
+        // Wide enough that nothing wraps, so the whole sentence is on one line and no wrap hint is shown.
+        let screen = text_of(&draw_at(&mut app, 170, 34));
+        for expected in ["── What this means ", "The script ran and finished", "N-able's own words: “something went wrong while parsing the PowerShell output”"] {
+            assert!(screen.contains(expected), "missing {expected:?}:\n{screen}");
+        }
+        assert!(!screen.contains("N-able says"), "{screen}");
+        assert!(!screen.contains("wrapped"), "nothing here wraps, so no hint about wrapping:\n{screen}");
+        // With a line that really is wrapped, the hint appears.
+        let narrow = text_of(&draw_at(&mut app, 50, 24));
+        assert!(narrow.contains("Some long lines are wrapped"), "{narrow}");
+    }
+
+    #[test]
+    fn a_real_complaint_from_nable_is_still_shown_as_one() {
+        let (_rt, mut app) = bitlocker_app();
+        let task = finished_task("PC-1", "FAILED", "partial output", Some("error trying to run script: exit status 1001"));
+        app.jobs.seed(vec![job("1", "Cleanup", 1, vec![task])]);
+        app.sync_jobs();
+        let screen = text_of(&draw_at(&mut app, 130, 40));
+        assert!(screen.contains("N-able says") && screen.contains("error trying to run script") && screen.contains("what this means") && screen.contains("code 1001"), "{screen}");
+    }
+
+    #[test]
+    fn a_long_task_id_wraps_under_its_label_not_back_to_the_edge() {
+        let (_rt, mut app) = bitlocker_app();
+        let mut task = finished_task("HP", "FAILED", "x", Some("y"));
+        task.task_id = "MDFhMTUwMzgtM2VhMC03YWUxLWExYjktNjVlZWUwYzEyNWNmOmE3YWY0YjJhLWVjY2MtNDY0MC04MWI0LWVhZDE5NjBkZTc0MA==".into();
+        app.jobs.seed(vec![job("1", "S", 1, vec![task])]);
+        app.sync_jobs();
+        run_tests::press(&mut app, KeyCode::Enter);
+        let screen = text_of(&draw_at(&mut app, 60, 24));
+        let lines: Vec<&str> = screen.lines().collect();
+        let at = lines.iter().position(|l| l.contains("Task ID")).expect("task id row");
+        // Columns, not bytes: the border characters are several bytes wide.
+        let col = |line: &str, needle: &str| line.find(needle).map(|b| line[..b].chars().count());
+        let label_col = col(lines[at], "Task ID").unwrap();
+        let value_col = col(lines[at], "MDFh").unwrap();
+        assert!(value_col > label_col + 5, "the value starts to the right of its label");
+        // The next row is the value's continuation: blank up to the value column, then text.
+        let next: Vec<char> = lines[at + 1].chars().collect();
+        assert!(next[..value_col].iter().all(|c| matches!(c, ' ' | '│')), "continuation must not start at the label's edge: {:?}", lines[at + 1]);
+        assert!(next[value_col] != ' ', "continuation text starts under the value: {:?}", lines[at + 1]);
     }
 }

@@ -223,6 +223,27 @@ pub fn task_outcome(t: &JobTask) -> Option<Outcome> {
     outcome(if has_output { OutcomeKind::NonZeroExit } else { OutcomeKind::Error }, has_output, reported)
 }
 
+/// Whether N-able's error text is its generic wording for a script that ran and exited non-zero:
+/// it says "something went wrong while parsing the PowerShell output" whatever the script did.
+pub fn is_generic_exit_message(message: &str) -> bool {
+    PARSE_ERROR.is_match(message)
+}
+
+/// What a finished task's ending means in plain words, for the endings that confuse. N-able calls
+/// a script "failed" whenever it exits non-zero, even when it ran normally and printed its report,
+/// and its message then talks about "parsing the output", which makes a normal run look broken.
+pub fn outcome_explanation(o: &Outcome) -> Option<String> {
+    match o.kind {
+        OutcomeKind::NonZeroExit => Some(match o.exit_code {
+            Some(code) => format!("The script ran and finished with exit code {code}. N-able counts any non-zero exit code as a failure; the output above is the script's own."),
+            None => "The script ran and finished with a non-zero exit code. N-able counts that as a failure; the output above is the script's own.".into(),
+        }),
+        OutcomeKind::Cancelled => Some("The task was cancelled in N-able.".into()),
+        OutcomeKind::TimedOut => Some("The script didn't finish in time and was stopped.".into()),
+        OutcomeKind::Passed | OutcomeKind::Error => None,
+    }
+}
+
 /// Short label for a finished task, e.g. "Exit 1001".
 pub fn outcome_label(o: &Outcome) -> String {
     match o.kind {
@@ -542,6 +563,31 @@ mod tests {
     fn headline_uses_the_scripts_output_not_nables_message_for_non_zero_exits() {
         let tasks = [finished("PC", "FAILED", "Fail - TPM not ready\nUEFI - False", Some(PARSE))];
         assert_eq!(group_headline(&group_results(&tasks)[0], &tasks), "Fail - TPM not ready");
+    }
+
+    #[test]
+    fn nables_parse_message_is_recognised_as_its_wording_for_a_non_zero_exit() {
+        assert!(is_generic_exit_message(PARSE));
+        assert!(is_generic_exit_message("Something went wrong while Parsing The PowerShell Output"));
+        assert!(!is_generic_exit_message("error trying to run script: exit status 1001"));
+        assert!(!is_generic_exit_message(""));
+    }
+
+    #[test]
+    fn endings_that_look_alarming_are_explained_in_plain_words() {
+        let nonzero = task_outcome(&finished("PC", "FAILED", "report", Some(PARSE))).unwrap();
+        let text = outcome_explanation(&nonzero).unwrap();
+        assert!(text.contains("script ran and finished") && text.contains("non-zero exit code") && !text.to_lowercase().contains("parsing"), "{text}");
+        let with_code = task_outcome(&finished("PC", "FAILED", "", Some("exit status 1001"))).unwrap();
+        assert!(outcome_explanation(&with_code).unwrap().contains("exit code 1001"));
+        let timed_out = task_outcome(&finished("PC", "FAILED", "", Some("timed out"))).unwrap();
+        assert!(outcome_explanation(&timed_out).unwrap().contains("in time"));
+        let cancelled = task_outcome(&finished("PC", "CANCELLED", "", None)).unwrap();
+        assert!(outcome_explanation(&cancelled).unwrap().contains("cancelled"));
+        // A pass needs no explaining, and a run that never ran has a real error message of its own.
+        assert!(outcome_explanation(&task_outcome(&finished("PC", "SUCCEEDED", "ok", None)).unwrap()).is_none());
+        let expired = JobTask { task_status: Some("EXPIRED".into()), watching: false, ..task("PC") };
+        assert!(outcome_explanation(&task_outcome(&expired).unwrap()).is_none());
     }
 
     #[test]

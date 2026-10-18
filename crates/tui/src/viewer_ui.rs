@@ -89,8 +89,13 @@ pub fn draw_viewer(frame: &mut Frame, area: Rect, app: &mut App) {
                 Span::styled("   n next · N previous · esc clears", Style::new().fg(DIM)),
             ])
         }
+    } else if viewer.wrap && viewer.total > lines.len() {
+        // Only said when it is true: some line really was wrapped.
+        Line::styled("Some long lines are wrapped: w shows them whole, and < > then scroll sideways.", Style::new().fg(DIM))
+    } else if !viewer.wrap {
+        Line::styled("Lines are shown whole: < > scroll sideways, w wraps them again.", Style::new().fg(DIM))
     } else {
-        Line::styled(if viewer.wrap { "Long lines are wrapped: w shows them whole, and < > then scroll sideways." } else { "Lines are shown whole: < > scroll sideways, w wraps them again." }, Style::new().fg(DIM))
+        Line::from("")
     };
     frame.render_widget(Paragraph::new(status), status_area);
 }
@@ -118,6 +123,7 @@ fn visual_line(v: &Visual, lines: &[OutLine], gutter: usize, width: usize, searc
         Kind::Stdout | Kind::Variable | Kind::Meta => Style::new().fg(TEXT),
         Kind::Stderr => Style::new().fg(ERR),
         Kind::Message => Style::new().fg(WARN),
+        Kind::Explain => Style::new().fg(TEXT),
         Kind::Note | Kind::Heading => Style::new().fg(DIM),
     };
 
