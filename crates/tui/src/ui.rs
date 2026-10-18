@@ -17,7 +17,7 @@ use ratatui::{
 use crate::{
     app::{App, Field, Focus, Load, Page, Screen, SettingsForm},
     input::TextInput,
-    theme::{self, ACCENT, BORDER, DIM, ERR, OK, SELECTED_BG, TEXT, WARN, panel},
+    theme::{self, ACCENT, BORDER, DIM, ERR, OK, SCRIPT, SELECTED_BG, TEXT, WARN, panel},
 };
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -28,6 +28,7 @@ fn spinner(tick: u64) -> &'static str {
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
+    frame.render_widget(Block::new().style(theme::background()), area);
     match &app.screen {
         Screen::Loading => centered_message(frame, area, &format!("{} Loading…", spinner(app.tick)), ACCENT),
         Screen::Fatal(error) => {
@@ -96,8 +97,9 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
             let label = format!(" {} {} {}", i + 1, page.icon(), page.title());
             if *page == app.page {
                 // The selected page is a full-width bar; it is brighter while the sidebar has focus.
-                let bg = if focused { SELECTED_BG } else { Color::Reset };
-                Line::styled(format!("{label:<width$}", width = nav.width.saturating_sub(2) as usize), Style::new().fg(ACCENT).bg(bg).add_modifier(Modifier::BOLD))
+                let style = Style::new().fg(ACCENT).add_modifier(Modifier::BOLD);
+                let style = if focused { style.bg(SELECTED_BG) } else { style };
+                Line::styled(format!("{label:<width$}", width = nav.width.saturating_sub(2) as usize), style)
             } else {
                 Line::styled(label, Style::new().fg(TEXT))
             }
@@ -134,8 +136,38 @@ fn draw_placeholder(frame: &mut Frame, area: Rect, page: Page) {
 
 // ---- audit log ---------------------------------------------------------------
 
+/// Narrowest width at which the activity chart sits beside the totals.
+const MIN_CHART_ROW: u16 = 70;
+
 /// How far back the activity chart reaches.
 const CHART_DAYS: i64 = 14;
+
+/// Terminal columns per time slice: two filled and one gap, so neighbouring bars stay distinct.
+const SLOT_COLS: usize = 3;
+
+/// Spreads per-slice counts across `width` columns as bars. Empty slices (and the
+/// gap column) are "absent", which the sparkline draws as a dim baseline.
+fn bars(values: &[u64], width: usize, color: impl Fn(u64) -> Color) -> Vec<SparklineBar> {
+    let mut out: Vec<SparklineBar> = (0..width.saturating_sub(values.len() * SLOT_COLS)).map(|_| SparklineBar::from(None::<u64>)).collect();
+    for &n in values {
+        if n == 0 {
+            out.extend((0..SLOT_COLS).map(|_| SparklineBar::from(None::<u64>)));
+        } else {
+            let style = Some(Style::new().fg(color(n)));
+            out.extend([SparklineBar::from(n).style(style), SparklineBar::from(n).style(style), SparklineBar::from(None::<u64>)]);
+        }
+    }
+    out
+}
+
+/// Cuts text to `width` characters, ending in an ellipsis if anything was removed.
+fn truncate(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        text.to_string()
+    } else {
+        text.chars().take(width.saturating_sub(1)).chain(std::iter::once('…')).collect()
+    }
+}
 
 fn parse_time(text: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(text).ok().map(|t| t.with_timezone(&Utc))
@@ -173,7 +205,7 @@ fn ago(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
 
 fn action_color(action: &str) -> Color {
     match action.split('.').next().unwrap_or("") {
-        "script" => Color::Rgb(190, 140, 255),
+        "script" => SCRIPT,
         "tag" => ACCENT,
         "settings" => WARN,
         _ => DIM,
@@ -199,24 +231,43 @@ fn draw_audit(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
     }
 
     let now = Utc::now();
-    let [top, table_area, detail_area] = Layout::vertical([Constraint::Length(8), Constraint::Fill(1), Constraint::Length(7)]).areas(area);
-    let [chart_area, stats_area] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(34)]).areas(top);
+    let [top, table_area, detail_area] = Layout::vertical([Constraint::Length(10), Constraint::Fill(1), Constraint::Length(7)]).areas(area);
+    // Below this width the chart would be a sliver, so the totals get the whole row.
+    let show_chart = top.width >= MIN_CHART_ROW;
+    let [chart_area, stats_area] = if show_chart {
+        Layout::horizontal([Constraint::Fill(1), Constraint::Length(30)]).areas(top)
+    } else {
+        [Rect::default(), top]
+    };
 
-    // Activity over time: one bar per slice, taller and hotter where more happened.
-    let chart_block = panel(&format!("activity · last {CHART_DAYS} days"), false);
-    let inner = chart_block.inner(chart_area);
-    frame.render_widget(chart_block, chart_area);
-    let [changes_area, failures_area] = Layout::vertical([Constraint::Fill(1), Constraint::Length(2)]).areas(inner);
-    let (all, failed) = bucket(&log.entries, inner.width.max(1) as usize, now);
-    let max = all.iter().copied().max().unwrap_or(1).max(1);
-    // Empty slices are "absent": drawn as a dim baseline rather than left blank.
-    let bars = all.iter().map(|&n| match n {
-        0 => SparklineBar::from(None),
-        n => SparklineBar::from(n).style(Some(Style::new().fg(theme::heat(n as f32 / max as f32)))),
-    });
-    frame.render_widget(Sparkline::default().data(bars).max(max).absent_value_symbol(symbols::bar::ONE_EIGHTH).absent_value_style(Style::new().fg(BORDER)), changes_area);
-    let fmax = failed.iter().copied().max().unwrap_or(1).max(1);
-    frame.render_widget(Sparkline::default().data(failed.iter().copied()).max(fmax).style(Style::new().fg(ERR)), failures_area);
+    if show_chart {
+        // Activity over time: one bar per slice of the last two weeks, taller and
+        // brighter where more happened. Failures get their own red strip underneath.
+        let chart_block = panel(&format!("activity · last {CHART_DAYS} days"), false);
+        let inner = chart_block.inner(chart_area);
+        frame.render_widget(chart_block, chart_area);
+        let [changes_area, failures_area, axis_area] = Layout::vertical([Constraint::Fill(1), Constraint::Length(2), Constraint::Length(1)]).areas(inner);
+        let width = inner.width as usize;
+        let (all, failed) = bucket(&log.entries, (width / SLOT_COLS).max(1), now);
+        let max = all.iter().copied().max().unwrap_or(1).max(1);
+        frame.render_widget(Sparkline::default().data(bars(&all, width, |n| theme::volume(n as f32 / max as f32))).max(max).absent_value_symbol(symbols::bar::ONE_EIGHTH).absent_value_style(Style::new().fg(BORDER)), changes_area);
+        let fmax = failed.iter().copied().max().unwrap_or(1).max(1);
+        frame.render_widget(Sparkline::default().data(bars(&failed, width, |_| ERR)).max(fmax).absent_value_symbol(symbols::bar::ONE_EIGHTH).absent_value_style(Style::new().fg(BORDER)), failures_area);
+
+        // A legend and the time axis, so the bars can be read without guessing.
+        let legend = Line::from(vec![
+            Span::styled("■", Style::new().fg(theme::volume(0.7))),
+            Span::styled(" changes   ", Style::new().fg(DIM)),
+            Span::styled("■", Style::new().fg(ERR)),
+            Span::styled(" failed", Style::new().fg(DIM)),
+        ]);
+        frame.render_widget(Paragraph::new(format!("{CHART_DAYS}d ago")).style(Style::new().fg(DIM)), axis_area);
+        // The legend only gets the middle if it clears both end labels.
+        if axis_area.width >= 36 {
+            frame.render_widget(Paragraph::new(legend).alignment(Alignment::Center), axis_area);
+        }
+        frame.render_widget(Paragraph::new("now").style(Style::new().fg(DIM)).alignment(Alignment::Right), axis_area);
+    }
 
     // Totals.
     let total = log.entries.len();
@@ -243,24 +294,42 @@ fn draw_audit(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
             .label(format!(" {:>3.0}% ok ", ratio * 100.0))
             .filled_symbol(symbols::line::THICK_HORIZONTAL)
             .unfilled_symbol(symbols::line::THICK_HORIZONTAL)
-            .filled_style(Style::new().fg(theme::heat(1.0 - ratio as f32)))
+            .filled_style(Style::new().fg(theme::health(ratio)))
             .unfilled_style(Style::new().fg(BORDER)),
         gauge,
     );
 
-    // The entries, newest first.
+    // The entries, newest first. On a narrow window the action column goes, so the
+    // summary (the part that matters) keeps its room.
+    let inner_width = table_area.width.saturating_sub(2) as usize;
+    let show_action = inner_width >= 90;
+    let mut widths = vec![Constraint::Length(19), Constraint::Length(1)];
+    let mut headers = vec!["When", ""];
+    if show_action {
+        widths.push(Constraint::Length(16));
+        headers.push("Action");
+    }
+    widths.push(Constraint::Fill(1));
+    headers.push("Summary");
+    let spacing = 2usize;
+    let fixed = 2 /* selection marker */ + 19 + 1 + if show_action { 16 } else { 0 } + spacing * (widths.len() - 1) + 1 /* scrollbar */;
+    let summary_width = inner_width.saturating_sub(fixed);
+
     let rows = log.entries.iter().map(|e| {
         let (mark, color) = if e.outcome == "ok" { ("✓", OK) } else { ("✗", ERR) };
-        Row::new(vec![
+        let mut cells = vec![
             Cell::from(e.timestamp.replace('T', " ").trim_end_matches('Z').to_string()).style(Style::new().fg(DIM)),
             Cell::from(mark).style(Style::new().fg(color)),
-            Cell::from(e.action.clone()).style(Style::new().fg(action_color(&e.action))),
-            Cell::from(e.summary.clone()).style(Style::new().fg(if e.outcome == "ok" { TEXT } else { ERR })),
-        ])
+        ];
+        if show_action {
+            cells.push(Cell::from(e.action.clone()).style(Style::new().fg(action_color(&e.action))));
+        }
+        cells.push(Cell::from(truncate(&e.summary, summary_width)).style(Style::new().fg(if e.outcome == "ok" { TEXT } else { ERR })));
+        Row::new(cells)
     });
-    let table = Table::new(rows, [Constraint::Length(19), Constraint::Length(1), Constraint::Length(16), Constraint::Fill(1)])
-        .column_spacing(2)
-        .header(Row::new(["When", "", "Action", "Summary"]).style(Style::new().fg(DIM).add_modifier(Modifier::BOLD)))
+    let table = Table::new(rows, widths)
+        .column_spacing(spacing as u16)
+        .header(Row::new(headers).style(Style::new().fg(DIM).add_modifier(Modifier::BOLD)))
         .row_highlight_style(Style::new().bg(SELECTED_BG).add_modifier(Modifier::BOLD))
         .highlight_symbol("▌ ")
         .block(panel("audit log", focused).title_bottom(Line::styled(format!(" {total} entries "), Style::new().fg(DIM))));
@@ -323,7 +392,7 @@ fn draw_settings(frame: &mut Frame, area: Rect, app: &App, focused: bool) {
 fn draw_form(frame: &mut Frame, area: Rect, form: &SettingsForm) {
     let title = if form.first_run { "Welcome to N-voke" } else { "Edit settings" };
     let popup = centered(area, 72, 14);
-    frame.render_widget(Clear, popup);
+    clear(frame, popup);
     let outer = panel(title, true);
     let inner = outer.inner(popup);
     frame.render_widget(outer, popup);
@@ -374,7 +443,7 @@ fn draw_field(frame: &mut Frame, area: Rect, label: &str, input: &TextInput, foc
 
 fn draw_help(frame: &mut Frame, area: Rect) {
     let popup = centered(area, 56, 17);
-    frame.render_widget(Clear, popup);
+    clear(frame, popup);
     let key = |k: &str, what: &str| Line::from(vec![Span::styled(format!(" {k:<14}"), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)), Span::styled(what.to_string(), Style::new().fg(TEXT))]);
     let heading = |text: &str| Line::styled(format!(" {text}"), Style::new().fg(DIM).add_modifier(Modifier::BOLD));
     let lines = vec![
@@ -395,6 +464,12 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         key("r", "refresh"),
     ];
     frame.render_widget(Paragraph::new(lines).block(panel("keys", true).title_bottom(Line::styled(" any key closes ", Style::new().fg(DIM)))), popup);
+}
+
+/// Blanks an area for a popup. `Clear` also resets the background, so it is repainted.
+fn clear(frame: &mut Frame, area: Rect) {
+    frame.render_widget(Clear, area);
+    frame.render_widget(Block::new().style(theme::background()), area);
 }
 
 fn centered_message(frame: &mut Frame, area: Rect, text: &str, color: Color) {
@@ -509,5 +584,93 @@ mod tests {
         app.page = Page::Tags;
         assert!(render(&mut app).contains("Tags isn't built yet."));
     }
-}
 
+    /// Draws at the given size and returns the buffer.
+    fn draw_at(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| draw(frame, app)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn text_of(buffer: &ratatui::buffer::Buffer) -> String {
+        (0..buffer.area.height).map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>().join("\n")
+    }
+
+    fn audit_app() -> (tokio::runtime::Runtime, App) {
+        let (rt, mut app) = app();
+        app.settings = Some(settings(true));
+        app.screen = Screen::Main;
+        app.page = Page::Audit;
+        app.focus = Focus::Content;
+        let entries = ["Deleted tag ScriptRunner_Test_Static", "Deleted tag ScriptRunner_Test_Failing_Dynamic"]
+            .iter()
+            .map(|s| AuditEntry::new("tag.delete", s, Ok(()), Value::Null))
+            .collect();
+        app.audit = Load::Ready(AuditLogView { path: "/tmp/audit.jsonl".into(), entries });
+        app.audit_table.select(Some(0));
+        (rt, app)
+    }
+
+    /// Readability depends on every cell having our own background: a cell left as
+    /// "reset" shows the terminal's (maybe transparent, maybe light) background, and
+    /// the colours were only checked against ours. Popups clear their area, so they are the risk.
+    #[test]
+    fn every_screen_paints_a_solid_background_at_every_size() {
+        for (width, height) in [(120, 36), (100, 31), (70, 26), (50, 20)] {
+            for (name, setup) in [
+                ("audit", (|_: &mut App| {}) as fn(&mut App)),
+                ("audit + help", |a| a.show_help = true),
+                ("audit, menu focused", |a| a.focus = Focus::Sidebar),
+                ("settings", |a| a.page = Page::Settings),
+                ("placeholder", |a| a.page = Page::Run),
+                ("form", |a| a.screen = Screen::Form(SettingsForm::new(&settings(false)))),
+                ("loading", |a| a.screen = Screen::Loading),
+                ("fatal", |a| a.screen = Screen::Fatal("No keychain".into())),
+            ] {
+                let (_rt, mut app) = audit_app();
+                setup(&mut app);
+                let buffer = draw_at(&mut app, width, height);
+                for y in 0..height {
+                    for x in 0..width {
+                        let bg = buffer[(x, y)].bg;
+                        assert!(matches!(bg, Color::Rgb(..)), "{name} at {width}x{height}: cell ({x},{y}) {:?} has background {bg:?}", buffer[(x, y)].symbol());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn narrow_windows_drop_the_chart_instead_of_squeezing_it() {
+        let (_rt, mut app) = audit_app();
+        let wide = text_of(&draw_at(&mut app, 120, 36));
+        assert!(wide.contains("activity · last 14 days") && wide.contains("■ changes"), "{wide}");
+        let narrow = text_of(&draw_at(&mut app, 70, 26));
+        assert!(!narrow.contains("activity"), "{narrow}");
+        assert!(narrow.contains("totals"), "{narrow}");
+        assert!(!narrow.contains("changesnow"), "labels must not run together:\n{narrow}");
+    }
+
+    #[test]
+    fn long_summaries_end_in_an_ellipsis_instead_of_being_cut_mid_word() {
+        let (_rt, mut app) = audit_app();
+        let screen = text_of(&draw_at(&mut app, 70, 26));
+        assert!(screen.contains("…"), "{screen}");
+        // The full text is always one keypress away in the details panel.
+        assert!(screen.contains("Summary  Deleted tag ScriptRunner_Test_Static"), "{screen}");
+        assert_eq!(truncate("short", 10), "short");
+        assert_eq!(truncate("abcdefghij", 6), "abcde…");
+        assert_eq!(truncate("abc", 0), "…");
+    }
+
+    #[test]
+    fn meaning_never_depends_on_colour_alone() {
+        let (_rt, mut app) = audit_app();
+        if let Load::Ready(log) = &mut app.audit {
+            log.entries.push(AuditEntry::new("script.run", "Ran it", Err("HTTP 500".into()), Value::Null));
+        }
+        let screen = text_of(&draw_at(&mut app, 120, 36));
+        assert!(screen.contains('✓') && screen.contains('✗'), "success and failure need different glyphs:\n{screen}");
+        assert!(screen.contains("% ok"), "the gauge needs a number:\n{screen}");
+    }
+}
