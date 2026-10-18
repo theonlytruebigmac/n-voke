@@ -3,6 +3,8 @@
 
 mod app;
 mod input;
+mod picker;
+mod run_ui;
 mod theme;
 mod ui;
 

@@ -20,7 +20,12 @@ Arrow keys move around: `↑`/`↓` choose a page, `→` steps into it, `←` st
 
 Run `nvoke --dry-run` (or set `NVOKE_DRY_RUN=1`) to try things without consequences: reads work as normal, but nothing that would change N-able is ever sent. Each change is held back instead, and `d` lists them with the exact request that would have gone out (passwords redacted). Nothing is written to the audit log or the shared run history either. The mode is chosen at launch and a banner shows it for the whole session. It only covers N-able: saving your own settings still works.
 
-Built so far: Activity (follow runs live, results grouped by outcome), Audit log and Settings. Run and Tags are next. If both apps are open at once, the one that saves last wins, so run history is best used from one at a time.
+Built so far:
+- **Run:** pick an organization, a script and who to run it on (devices and tags, with search), fill in the script's inputs, review the resulting devices (offline devices and OS mismatches are flagged, and any can be left out), then confirm. A run that has started takes you to it in Activity.
+- **Activity:** follow runs live, with results grouped by outcome. `R` runs the selected run again; `F` re-runs only the devices that failed.
+- **Audit log** and **Settings.**
+
+Tags and Watch task are next. If both apps are open at once, the one that saves last wins, so run history is best used from one at a time.
 
 ## Setup
 
@@ -59,7 +64,7 @@ See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full guide: setup, debugg
 | `crates/core/src/lib.rs` | Shared core: keychain storage, settings file, and the `graphql` call that sends every API request |
 | `crates/core/src/audit.rs` | Audit log: every mutation is recorded automatically by `graphql` |
 | `crates/core/src/vault.rs` | Encryption at rest (data key in the OS keychain) |
-| `crates/core/src/{api,task_state,jobs,job_store,poll,rules,inputs,sync,targets}.rs` | The same domain logic as `src/lib/`, in Rust, for the terminal app. Saved history uses the desktop app's exact JSON |
+| `crates/core/src/{api,collections,run,task_state,jobs,job_store,poll,rules,inputs,sync,targets}.rs` | The same domain logic as `src/lib/`, in Rust, for the terminal app. Saved history uses the desktop app's exact JSON |
 | `src-tauri/src/lib.rs` | Desktop app: exposes the core to the web view as Tauri commands |
 | `crates/tui/` | Terminal app (`nvoke`): ratatui interface over the core. Shares the desktop app's API key, settings and run history |
 | `src/lib/api.ts` | GraphQL queries and mutations |

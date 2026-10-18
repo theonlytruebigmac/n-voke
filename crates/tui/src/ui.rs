@@ -26,7 +26,7 @@ use crate::{
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-fn spinner(tick: u64) -> &'static str {
+pub(crate) fn spinner(tick: u64) -> &'static str {
     SPINNER[(tick % SPINNER.len() as u64) as usize]
 }
 
@@ -53,6 +53,7 @@ fn draw_main(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let focused = app.focus == Focus::Content;
     match app.page {
+        Page::Run => crate::run_ui::draw_run(frame, content, app, focused),
         Page::Activity => draw_activity(frame, content, app, focused),
         Page::Audit => draw_audit(frame, content, app, focused),
         Page::Settings => draw_settings(frame, content, app, focused),
@@ -62,8 +63,12 @@ fn draw_main(frame: &mut Frame, area: Rect, app: &mut App) {
     let hints: &[(&str, &str)] = match (app.focus, app.page) {
         (Focus::Sidebar, p) if p.interactive() => &[("↑↓", "page"), ("→", "open"), ("?", "help"), ("q", "quit")],
         (Focus::Sidebar, _) => &[("↑↓", "page"), ("?", "help"), ("q", "quit")],
+        (Focus::Content, Page::Run) if app.run.picker.is_some() => &[("type", "search"), ("↑↓", "move"), ("enter", "choose"), ("esc", "close")],
+        (Focus::Content, Page::Run) if app.run.editing => &[("type", "edit"), ("enter", "done"), ("esc", "done"), ("tab", "next field")],
+        (Focus::Content, Page::Run) if app.run.pane == crate::app::RunPane::Devices => &[("↑↓", "device"), ("space", "include/leave out"), ("a", "all/none"), ("←", "back to form")],
+        (Focus::Content, Page::Run) => &[("↑↓", "field"), ("enter", "choose/edit"), ("→", "devices"), ("←", "back"), ("?", "help")],
         (Focus::Content, Page::Activity) if app.pane == Pane::Results => &[("↑↓", "group"), ("PgUp/PgDn", "scroll output"), ("←", "back"), ("?", "help")],
-        (Focus::Content, Page::Activity) => &[("↑↓", "run"), ("→", "results"), ("s", "stop"), ("w", "watch"), ("x", "remove"), ("r", "refresh"), ("←", "back"), ("?", "help")],
+        (Focus::Content, Page::Activity) => &[("↑↓", "run"), ("→", "results"), ("s", "stop"), ("w", "watch"), ("R", "run again"), ("F", "re-run failed"), ("x", "remove"), ("←", "back")],
         (Focus::Content, Page::Audit) => &[("↑↓", "move"), ("PgUp/PgDn", "jump"), ("r", "refresh"), ("←", "back"), ("?", "help")],
         (Focus::Content, _) => &[("enter", "edit"), ("←", "back"), ("?", "help"), ("q", "quit")],
     };
@@ -81,7 +86,9 @@ fn draw_main(frame: &mut Frame, area: Rect, app: &mut App) {
         frame.render_widget(Paragraph::new(theme::key_hints(hints)), footer);
     }
 
-    if app.show_dry_log {
+    if app.run.picker.is_some() {
+        crate::run_ui::draw_picker(frame, area, app);
+    } else if app.show_dry_log {
         draw_dry_log(frame, area, app);
     } else if app.show_help {
         draw_help(frame, area);
@@ -476,7 +483,7 @@ fn bars(values: &[u64], width: usize, color: impl Fn(u64) -> Color) -> Vec<Spark
 }
 
 /// Cuts text to `width` characters, ending in an ellipsis if anything was removed.
-fn truncate(text: &str, width: usize) -> String {
+pub(crate) fn truncate(text: &str, width: usize) -> String {
     if text.chars().count() <= width {
         text.to_string()
     } else {
@@ -484,7 +491,7 @@ fn truncate(text: &str, width: usize) -> String {
     }
 }
 
-fn parse_time(text: &str) -> Option<DateTime<Utc>> {
+pub(crate) fn parse_time(text: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(text).ok().map(|t| t.with_timezone(&Utc))
 }
 
@@ -508,7 +515,7 @@ fn bucket(entries: &[AuditEntry], slots: usize, now: DateTime<Utc>) -> (Vec<u64>
     (all, failed)
 }
 
-fn ago(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+pub(crate) fn ago(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
     let secs = (now - at).num_seconds().max(0);
     match secs {
         0..=59 => "just now".into(),
@@ -518,7 +525,7 @@ fn ago(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
     }
 }
 
-fn action_color(action: &str) -> Color {
+pub(crate) fn action_color(action: &str) -> Color {
     match action.split('.').next().unwrap_or("") {
         "script" => SCRIPT,
         "tag" => ACCENT,
@@ -812,7 +819,7 @@ fn draw_dry_log(frame: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn draw_help(frame: &mut Frame, area: Rect) {
-    let popup = centered(area, 60, 21);
+    let popup = centered(area, 66, 28);
     clear(frame, popup);
     let key = |k: &str, what: &str| Line::from(vec![Span::styled(format!(" {k:<14}"), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)), Span::styled(what.to_string(), Style::new().fg(TEXT))]);
     let heading = |text: &str| Line::styled(format!(" {text}"), Style::new().fg(DIM).add_modifier(Modifier::BOLD));
@@ -826,9 +833,15 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         key("↑ ↓", "choose a page"),
         key("→ enter", "step into the page"),
         Line::from(""),
+        heading("Run"),
+        key("↑ ↓", "field · enter chooses or edits"),
+        key("→", "devices (space leaves one out, a all/none)"),
+        key("enter ×2", "confirm and run (d lists a dry run)"),
+        Line::from(""),
         heading("Activity"),
         key("→ / ←", "runs ⇄ results ⇄ menu"),
-        key("s  w  x", "stop watching / watch / remove"),
+        key("s w x", "stop watching / watch / remove"),
+        key("R  F", "run again / re-run failed"),
         Line::from(""),
         heading("Inside a page"),
         key("↑ ↓", "move (j/k work too)"),
@@ -841,7 +854,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
 }
 
 /// Blanks an area for a popup. `Clear` also resets the background, so it is repainted.
-fn clear(frame: &mut Frame, area: Rect) {
+pub(crate) fn clear(frame: &mut Frame, area: Rect) {
     frame.render_widget(Clear, area);
     frame.render_widget(Block::new().style(theme::background()), area);
 }
@@ -852,7 +865,7 @@ fn centered_message(frame: &mut Frame, area: Rect, text: &str, color: Color) {
 }
 
 /// A `width` x `height` rectangle in the middle of `area` (clamped to fit).
-fn centered(area: Rect, width: u16, height: u16) -> Rect {
+pub(crate) fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let [_, row, _] = Layout::vertical([Constraint::Fill(1), Constraint::Length(height.min(area.height)), Constraint::Fill(1)]).areas(area);
     let [_, cell, _] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(width.min(area.width)), Constraint::Fill(1)]).areas(row);
     cell
@@ -860,7 +873,6 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
 
     use nvoke_core::{AuditLogView, Core, Settings, audit::AuditEntry};
     use ratatui::{Terminal, backend::TestBackend};
@@ -870,7 +882,7 @@ mod tests {
 
     fn app() -> (tokio::runtime::Runtime, App) {
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let app = App::new(Arc::new(Core::new("test").unwrap()), runtime.handle().clone());
+        let app = App::new(Core::for_tests("tui"), runtime.handle().clone());
         (runtime, app)
     }
 
@@ -1285,5 +1297,256 @@ mod tests {
             }
         }
         assert!(edge_has_blocks(&mut many), "a long list needs its scrollbar");
+    }
+
+    // ---- the run page ---------------------------------------------------------------
+
+    use crate::app::{RunField, RunPane, run::tests as run_tests};
+    use nvoke_core::run::{FieldValue, Resolved};
+    use ratatui::crossterm::event::KeyCode;
+
+    /// The Run page with an organization, script (with inputs) and tag chosen, as a user would have it.
+    fn filled_run_app() -> (tokio::runtime::Runtime, App) {
+        let (rt, mut app) = run_tests::run_app();
+        run_tests::press(&mut app, KeyCode::Enter);
+        run_tests::pump(&mut app);
+        run_tests::press(&mut app, KeyCode::Enter);
+        run_tests::pump(&mut app);
+        run_tests::press(&mut app, KeyCode::Enter);
+        run_tests::pump(&mut app);
+        run_tests::press(&mut app, KeyCode::Tab);
+        run_tests::pump(&mut app);
+        run_tests::press(&mut app, KeyCode::Enter);
+        run_tests::press(&mut app, KeyCode::Esc);
+        run_tests::pump(&mut app);
+        app.run.field = RunField::Run;
+        (rt, app)
+    }
+
+    #[test]
+    fn an_empty_run_form_says_what_to_do_first() {
+        let (_rt, mut app) = run_tests::run_app();
+        let screen = text_of(&draw_at(&mut app, 130, 30));
+        for expected in ["run a script", "choose an organization", "Run  ·  Choose an organization", "Choose who to run on and the devices appear here"] {
+            assert!(screen.contains(expected), "missing {expected:?}:\n{screen}");
+        }
+    }
+
+    #[test]
+    fn a_filled_form_shows_the_choices_the_inputs_and_the_options() {
+        let (_rt, mut app) = filled_run_app();
+        app.run.values.insert("pw".into(), FieldValue::Text("hunter2-secret".into()));
+        let screen = text_of(&draw_at(&mut app, 130, 32));
+        for expected in ["Acme Corp", "BitlockerPre", "PowerShell", "PatchGroupTwo", "Inputs", "Count", "Fast", "[ ] no", "Pass", "Options", "Task name", "auto-named", "Timeout", "120s (the script's own)", "Run on 2 devices"] {
+            assert!(screen.contains(expected), "missing {expected:?}:\n{screen}");
+        }
+        assert!(screen.contains("••••••••••••••") && !screen.contains("hunter2-secret"), "a password must be masked:\n{screen}");
+    }
+
+    #[test]
+    fn problems_with_inputs_show_only_after_a_first_attempt() {
+        let (_rt, mut app) = filled_run_app();
+        app.run.values.insert("n".into(), FieldValue::Text("abc".into()));
+        assert!(!text_of(&draw_at(&mut app, 130, 32)).contains("expected a whole number"), "don't nag before they've tried");
+        app.run.show_errors = true;
+        assert!(text_of(&draw_at(&mut app, 130, 32)).contains("✗ expected a whole number"));
+        app.run.timeout = crate::input::TextInput::new("9999", false);
+        assert!(text_of(&draw_at(&mut app, 130, 32)).contains("✗ use 0–3600 seconds"));
+    }
+
+    #[test]
+    fn confirming_names_exactly_what_will_run_and_where() {
+        let (_rt, mut app) = filled_run_app();
+        app.run.confirming = true;
+        let screen = text_of(&draw_at(&mut app, 130, 32));
+        // It may wrap on a narrow form, but the count always leads, so it can never be the part that is cut off.
+        assert!(screen.contains("Confirm: run on 2 devices") && screen.contains("BitlockerPreChecker") && screen.contains("enter again to run"), "{screen}");
+        assert!(!screen.contains('⚠'), "no warnings when nothing looks risky:\n{screen}");
+    }
+
+    #[test]
+    fn confirming_repeats_what_looks_risky_about_the_devices() {
+        let (_rt, mut app) = filled_run_app();
+        app.run.resolved = Load::Ready(vec![
+            resolved(run_tests::device("a1", "PC-1", "CONNECTED", "Windows 11"), &[], true),
+            resolved(run_tests::device("a2", "PC-2", "DISCONNECTED", "Windows 10"), &[], true),
+            resolved(run_tests::device("a9", "LNX-1", "CONNECTED", "Ubuntu 22.04"), &[], true),
+        ]);
+        app.run.confirming = true;
+        let screen = text_of(&draw_at(&mut app, 130, 34));
+        assert!(screen.contains("Confirm: run on 3 devices"), "{screen}");
+        assert!(screen.contains("⚠ 1 device is offline") && screen.contains("⚠ 1 device is on an OS"), "{screen}");
+        // Leaving the risky ones out clears the warnings.
+        app.run.excluded.insert("a2".into());
+        app.run.excluded.insert("a9".into());
+        assert!(!text_of(&draw_at(&mut app, 130, 34)).contains('⚠'));
+    }
+
+    #[test]
+    fn a_dry_run_session_says_the_run_will_be_held_back_and_a_live_one_does_not() {
+        let (_rt, mut app) = filled_run_app();
+        assert!(!text_of(&draw_at(&mut app, 130, 32)).contains("held back"));
+        app.core().set_dry_run(true);
+        assert!(text_of(&draw_at(&mut app, 130, 32)).contains("dry run: it will be held back, not sent"));
+    }
+
+    #[test]
+    fn notices_are_shown_under_the_button() {
+        let (_rt, mut app) = filled_run_app();
+        app.run.notice = Some(crate::app::run::Notice { kind: crate::app::NoticeKind::Error, text: "The script run was not created. Device offline".into() });
+        assert!(text_of(&draw_at(&mut app, 130, 32)).contains("The script run was not created."));
+    }
+
+    #[test]
+    fn typing_in_a_field_shows_what_is_typed() {
+        let (_rt, mut app) = filled_run_app();
+        app.run.field = RunField::Name;
+        run_tests::press(&mut app, KeyCode::Enter);
+        run_tests::type_text(&mut app, "Weekly cleanup");
+        let screen = text_of(&draw_at(&mut app, 130, 32));
+        assert!(screen.contains("Weekly cleanup") && !screen.contains("auto-named"), "{screen}");
+        assert!(text_of(&draw_at(&mut app, 130, 32)).contains("type edit"), "the footer explains typing mode");
+    }
+
+    fn resolved(asset: nvoke_core::model::Asset, tags: &[&str], picked: bool) -> Resolved {
+        Resolved { asset, via_tags: tags.iter().map(|t| t.to_string()).collect(), picked }
+    }
+
+    #[test]
+    fn the_device_table_flags_offline_devices_wrong_os_and_ones_left_out() {
+        let (_rt, mut app) = filled_run_app();
+        app.run.resolved = Load::Ready(vec![
+            resolved(run_tests::device("a9", "LNX-1", "CONNECTED", "Ubuntu 22.04"), &[], true),
+            resolved(run_tests::device("a1", "PC-1", "CONNECTED", "Windows 11"), &["PatchGroupTwo"], true),
+            resolved(run_tests::device("a2", "PC-2", "DISCONNECTED", "Windows 10"), &["PatchGroupTwo", "Servers"], false),
+        ]);
+        app.run.excluded.insert("a1".into());
+        let screen = text_of(&draw_at(&mut app, 130, 32));
+        assert!(screen.contains("LNX-1 OS?"), "a PowerShell script on Ubuntu is flagged:\n{screen}");
+        assert!(screen.contains("PC-2 offline"), "{screen}");
+        assert!(screen.contains("[ ]") && screen.contains("[x]"), "left-out and included are marked in text, not just colour:\n{screen}");
+        assert!(screen.contains("2 of 3 selected") && screen.contains("1 offline") && screen.contains("1 OS?"), "{screen}");
+        assert!(screen.contains("Added directly, PatchGroupTwo") && screen.contains("PatchGroupTwo, Servers"), "where each device came from:\n{screen}");
+        assert!(screen.contains("From"), "{screen}");
+    }
+
+    #[test]
+    fn the_device_table_says_what_is_going_on_while_loading_failing_or_empty() {
+        let (_rt, mut app) = filled_run_app();
+        app.run.resolved = Load::Loading;
+        assert!(text_of(&draw_at(&mut app, 130, 32)).contains("Finding devices…"));
+        app.run.resolved = Load::Failed("Access denied (HTTP 403)".into());
+        assert!(text_of(&draw_at(&mut app, 130, 32)).contains("Access denied (HTTP 403)"));
+        app.run.resolved = Load::Ready(vec![]);
+        assert!(text_of(&draw_at(&mut app, 130, 32)).contains("No devices in these tags."));
+    }
+
+    #[test]
+    fn a_tag_too_big_to_list_warns_that_only_the_first_devices_are_included() {
+        let (_rt, mut app) = filled_run_app();
+        app.run.truncated = true;
+        assert!(text_of(&draw_at(&mut app, 130, 32)).contains("Only the first 1000 devices of a tag are included."));
+    }
+
+    #[test]
+    fn the_organization_picker_lists_names_and_kinds() {
+        let (_rt, mut app) = run_tests::run_app();
+        run_tests::press(&mut app, KeyCode::Enter);
+        run_tests::pump(&mut app);
+        let screen = text_of(&draw_at(&mut app, 130, 32));
+        for expected in ["Choose an organization", "Acme Corp", "Beta Ltd", "Customer", "2 matches", "enter choose", "esc cancel"] {
+            assert!(screen.contains(expected), "missing {expected:?}:\n{screen}");
+        }
+    }
+
+    #[test]
+    fn the_target_picker_marks_chosen_items_and_shows_which_list_you_are_in() {
+        let (_rt, mut app) = filled_run_app();
+        app.run.field = RunField::Targets;
+        run_tests::press(&mut app, KeyCode::Enter);
+        run_tests::pump(&mut app);
+        let devices = text_of(&draw_at(&mut app, 130, 32));
+        assert!(devices.contains("Devices") && devices.contains("Tags") && devices.contains("PC-2") && devices.contains("LNX-1"), "{devices}");
+        assert!(devices.contains("enter add or remove"), "{devices}");
+        run_tests::press(&mut app, KeyCode::Tab);
+        run_tests::pump(&mut app);
+        let tags = text_of(&draw_at(&mut app, 130, 32));
+        assert!(tags.contains("✓") && tags.contains("PatchGroupTwo") && tags.contains("Static · 2") && tags.contains("Dynamic · 40"), "{tags}");
+    }
+
+    #[test]
+    fn a_picker_explains_an_empty_search_a_failure_and_the_wait() {
+        let (_rt, mut app) = run_tests::run_app();
+        run_tests::press(&mut app, KeyCode::Enter);
+        run_tests::pump(&mut app);
+        run_tests::type_text(&mut app, "zzz");
+        run_tests::pump(&mut app);
+        assert!(text_of(&draw_at(&mut app, 130, 32)).contains("Nothing matches."));
+        let picker = app.run.picker.as_mut().unwrap();
+        picker.error = Some("Access denied (HTTP 401)".into());
+        assert!(text_of(&draw_at(&mut app, 130, 32)).contains("Access denied (HTTP 401)"));
+        let picker = app.run.picker.as_mut().unwrap();
+        picker.error = None;
+        picker.loading = true;
+        assert!(text_of(&draw_at(&mut app, 130, 32)).contains("searching…"));
+    }
+
+    #[test]
+    fn the_device_picker_invites_you_to_type_when_nothing_is_listed() {
+        let (_rt, mut app) = filled_run_app();
+        app.run.field = RunField::Targets;
+        run_tests::press(&mut app, KeyCode::Enter);
+        run_tests::pump(&mut app);
+        let picker = app.run.picker.as_mut().unwrap();
+        picker.items.clear();
+        picker.loading = false;
+        assert!(text_of(&draw_at(&mut app, 130, 32)).contains("Type to search devices, or press tab to pick a tag."));
+    }
+
+    #[test]
+    fn the_run_page_paints_a_solid_background_at_every_size_and_never_panics() {
+        for (name, setup) in [
+            ("empty", (|_: &mut App| {}) as fn(&mut App)),
+            ("filled", |a| {
+                a.run.field = RunField::Input(0);
+                a.run.show_errors = true;
+                a.run.values.insert("n".into(), FieldValue::Text("abc".into()));
+            }),
+            ("devices focused", |a| a.run.pane = RunPane::Devices),
+            ("confirming", |a| a.run.confirming = true),
+            ("org picker", |a| {
+                a.run.field = RunField::Org;
+                run_tests::press(a, KeyCode::Enter);
+                run_tests::pump(a);
+            }),
+            ("target picker", |a| {
+                a.run.field = RunField::Targets;
+                run_tests::press(a, KeyCode::Enter);
+                run_tests::pump(a);
+                run_tests::press(a, KeyCode::Tab);
+                run_tests::pump(a);
+            }),
+        ] {
+            // Building the form takes real (if short) waits, so build once per state and draw it at every size.
+            let (_rt, mut app) = filled_run_app();
+            setup(&mut app);
+            for (width, height) in [(130, 34), (100, 28), (80, 24), (60, 20), (40, 12), (24, 8)] {
+                let buffer = draw_at(&mut app, width, height);
+                for y in 0..height {
+                    for x in 0..width {
+                        assert!(matches!(buffer[(x, y)].bg, Color::Rgb(..)), "run page {name} at {width}x{height}: cell ({x},{y}) is not painted");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn long_names_end_in_an_ellipsis_in_the_form_and_the_table() {
+        let (_rt, mut app) = filled_run_app();
+        app.run.script = Some(run_tests::script("s9", "A script with a really long descriptive name that goes on and on", vec![]));
+        app.run.resolved = Load::Ready(vec![resolved(run_tests::device("a1", "AN-EXTREMELY-LONG-DEVICE-HOSTNAME-THAT-WILL-NOT-FIT", "CONNECTED", "Windows 11"), &[], true)]);
+        let screen = text_of(&draw_at(&mut app, 100, 28));
+        assert!(screen.matches('…').count() >= 2, "{screen}");
     }
 }

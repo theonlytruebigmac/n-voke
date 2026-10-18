@@ -9,6 +9,8 @@ use std::{io, sync::{Arc, mpsc}, thread, time::Duration};
 
 use nvoke_core::{
     AuditLogView, Core, DryRunEntry, Settings,
+    collections::Collections,
+    run::Resolved,
     job_store::JobStore,
     jobs::Job,
     task_state::{PhaseCounts, ResultGroup, count_phases, group_results},
@@ -20,7 +22,10 @@ use ratatui::{
 };
 use tokio::runtime::Handle;
 
-use crate::{input::TextInput, ui};
+use crate::{input::TextInput, picker::PickItem, ui};
+
+pub(crate) mod run;
+pub use run::{NoticeKind, RunField, RunPane, RunState};
 
 /// Also the animation frame rate: spinners and the logo shimmer advance once per tick.
 const TICK: Duration = Duration::from_millis(100);
@@ -29,7 +34,7 @@ pub enum Event {
     Key(KeyEvent),
     /// Sent every `TICK` when nothing else happened; drives animation and, later, polling.
     Tick,
-    Msg(Msg),
+    Msg(Box<Msg>),
 }
 
 /// Results of async work.
@@ -37,6 +42,11 @@ pub enum Msg {
     Settings(Result<Settings, String>),
     Saved(Result<Settings, String>),
     Audit(Result<AuditLogView, String>),
+    /// Results of a picker search; `seq` says which search they answer.
+    PickResults { seq: u64, result: Result<Vec<PickItem>, String> },
+    /// The devices the Run page's targets resolve to.
+    Resolved { seq: u64, result: Result<(Vec<Resolved>, bool), String> },
+    RunFinished(Result<Box<nvoke_core::jobs::Job>, String>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -84,7 +94,7 @@ impl Page {
 
     /// Whether the page has anything to move around in (so focus can enter it).
     pub fn interactive(self) -> bool {
-        matches!(self, Page::Activity | Page::Audit | Page::Settings)
+        matches!(self, Page::Run | Page::Activity | Page::Audit | Page::Settings)
     }
 
     pub fn index(self) -> usize {
@@ -166,6 +176,8 @@ pub enum Load<T> {
 
 pub struct App {
     core: Arc<Core>,
+    collections: Arc<Collections>,
+    pub run: RunState,
     runtime: Handle,
     tx: mpsc::Sender<Event>,
     rx: mpsc::Receiver<Event>,
@@ -203,8 +215,11 @@ impl App {
     pub fn new(core: Arc<Core>, runtime: Handle) -> Self {
         let (tx, rx) = mpsc::channel();
         let jobs = JobStore::new(core.clone(), 30);
+        let collections = Collections::new(core.clone());
         Self {
             core,
+            collections,
+            run: RunState::default(),
             runtime,
             tx,
             rx,
@@ -281,7 +296,7 @@ impl App {
         let future = work(self.core.clone());
         let tx = self.tx.clone();
         self.runtime.spawn(async move {
-            let _ = tx.send(Event::Msg(future.await));
+            let _ = tx.send(Event::Msg(Box::new(future.await)));
         });
     }
 
@@ -291,8 +306,9 @@ impl App {
             Event::Tick => {
                 self.tick = self.tick.wrapping_add(1);
                 self.sync_jobs();
+                self.tick_picker();
             }
-            Event::Msg(msg) => self.on_msg(msg),
+            Event::Msg(msg) => self.on_msg(*msg),
         }
     }
 
@@ -330,6 +346,9 @@ impl App {
                 self.audit = Load::Ready(log);
             }
             Msg::Audit(Err(e)) => self.audit = Load::Failed(e),
+            Msg::PickResults { seq, result } => self.on_pick_results(seq, result),
+            Msg::Resolved { seq, result } => self.on_resolved(seq, result),
+            Msg::RunFinished(result) => self.on_run_finished(result),
         }
     }
 
@@ -413,6 +432,9 @@ impl App {
         if self.show_dry_log {
             return self.on_dry_log_key(key);
         }
+        if self.run_captures_keys() {
+            return self.on_run_modal_key(key);
+        }
         if self.show_help {
             // Any key closes the help overlay.
             self.show_help = false;
@@ -453,6 +475,9 @@ impl App {
     fn on_content_key(&mut self, key: KeyEvent) {
         if self.page == Page::Activity {
             return self.on_activity_key(key);
+        }
+        if self.page == Page::Run {
+            return self.on_run_key(key);
         }
         if matches!(key.code, KeyCode::Left | KeyCode::Char('h') | KeyCode::Esc) {
             self.focus = Focus::Sidebar;
@@ -604,6 +629,8 @@ impl App {
                     self.runtime.spawn(async move { store.resume(&id, None).await });
                 }
             }
+            (_, KeyCode::Char('R')) => self.run_again(false),
+            (_, KeyCode::Char('F')) => self.run_again(true),
             (_, KeyCode::Char('x') | KeyCode::Delete) => {
                 if let Some(id) = self.selected_job.clone() {
                     self.confirm = Some(Confirm::RemoveJob(id));
@@ -670,7 +697,7 @@ mod tests {
 
     fn app() -> (tokio::runtime::Runtime, App) {
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let mut app = App::new(Arc::new(Core::new("test").unwrap()), runtime.handle().clone());
+        let mut app = App::new(Core::for_tests("tui"), runtime.handle().clone());
         app.screen = Screen::Main;
         // Pre-load the audit page so entering it doesn't start a real read.
         app.audit = Load::Ready(AuditLogView { path: String::new(), entries: vec![] });
@@ -700,8 +727,10 @@ mod tests {
     #[test]
     fn right_enters_a_page_and_left_leaves_it() {
         let (_rt, mut app) = app();
+        app.go(Page::Tags);
         press(&mut app, KeyCode::Right);
-        assert!(app.focus == Focus::Sidebar, "Run isn't interactive yet, so focus stays in the menu");
+        assert!(app.focus == Focus::Sidebar, "Tags isn't built yet, so focus stays in the menu");
+        app.go(Page::Run);
 
         app.go(Page::Audit);
         press(&mut app, KeyCode::Right);

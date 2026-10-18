@@ -191,6 +191,22 @@ impl Core {
         Ok(Self { paths, http, api_key: Mutex::new(None), vault, audit, dry_run: AtomicBool::new(dry_run), dry_run_log: Mutex::new(vec![]) })
     }
 
+    /// A core for tests of code built on it: its own throwaway directory, a fake API key, and an
+    /// API URL nothing listens on. Any request it makes fails at once, so a test can never reach
+    /// N-able or touch the real keychain, settings or history.
+    #[doc(hidden)]
+    pub fn for_tests(name: &str) -> Arc<Core> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!("nvoke-test-{name}-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+        let paths = Paths { config_dir: dir.join("config"), data_dir: dir.join("data") };
+        fs::create_dir_all(&paths.config_dir).unwrap();
+        fs::write(paths.config_file(), r#"{ "apiUrl": "https://127.0.0.1:9/graphql", "historyDays": 30 }"#).unwrap();
+        let core = Core::new_in(paths, "test").unwrap();
+        *core.api_key.lock().unwrap() = Some("test-key-not-real".into());
+        core.set_dry_run(false);
+        Arc::new(core)
+    }
+
     pub fn set_dry_run(&self, on: bool) {
         self.dry_run.store(on, Ordering::SeqCst);
     }
