@@ -13,7 +13,7 @@ A release is created by pushing a version tag. The **Release** workflow (`.githu
 
    Check that the latest CI run on `main` passed.
 
-2. **Bump the version.** One command updates `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock` and `src-tauri/tauri.conf.json` together:
+2. **Bump the version.** One command updates `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, `src-tauri/tauri.conf.json`, `crates/core/Cargo.toml`, `crates/tui/Cargo.toml` and `crates/tui/Cargo.lock` together:
 
    ```sh
    npm run version:bump -- patch     # 0.1.0 -> 0.1.1  bug fixes
@@ -27,7 +27,7 @@ A release is created by pushing a version tag. The **Release** workflow (`.githu
 3. **Commit and tag.** The tag must be `v` plus the exact version, or the workflow stops at its first step.
 
    ```sh
-   git diff                                   # five files, version lines only
+   git diff                                   # the version lines only
    git commit -am "chore: release v0.2.0"
    git tag v0.2.0
    git push origin main v0.2.0
@@ -43,9 +43,10 @@ A release is created by pushing a version tag. The **Release** workflow (`.githu
 
 | Job | Purpose |
 |---|---|
-| **Verify** | Fails unless the tag equals `v<app version>` in all five files. Then runs the frontend build, frontend tests and Rust tests, so a tag on a broken commit never ships. |
+| **Verify** | Fails unless the tag equals `v<app version>` in every file that carries it (the app, the core crate and the terminal app). Then runs the frontend build, frontend tests and Rust tests, so a tag on a broken commit never ships. |
 | **Draft release** | Creates a draft release for the tag with notes generated from merged pull requests, or reuses the draft if one exists. Tags containing a hyphen are marked as pre-releases. |
 | **Build** | Runs once each on Windows, macOS and Linux and uploads the installers to the draft. |
+| **Terminal app** | Runs alongside Build, once per platform: compiles `nvoke` in release mode, packs it with the licence into an archive and a `.sha256` checksum, and uploads both to the same draft. A re-run replaces the files from the earlier attempt. |
 | **Publish release** | Runs only if every build succeeded. Flips the draft to public and marks it Latest (stable releases only). |
 
 Because the release stays a draft until the last job, a failed build never leaves a half-populated public release.
@@ -57,6 +58,14 @@ Installers produced:
 | Windows | `.msi` and `.exe` (NSIS) |
 | macOS | universal `.dmg` for Apple Silicon and Intel |
 | Linux | `.AppImage`, `.deb`, `.rpm` |
+
+The terminal app, `nvoke`, comes as a plain archive per platform, each with a `.sha256` file:
+
+| Platform | File |
+|---|---|
+| Windows | `nvoke-<tag>-windows-x86_64.zip` |
+| macOS | `nvoke-<tag>-macos-universal.tar.gz` (Apple Silicon and Intel) |
+| Linux | `nvoke-<tag>-linux-x86_64.tar.gz` |
 
 ## Pre-releases
 

@@ -32,6 +32,18 @@ function replaceOnce(text, re, version, where) {
   return text.slice(0, start) + version + text.slice(start + m[1].length);
 }
 
+/** A Cargo.toml: the version in its [package] table. */
+function cargoToml(file) {
+  const re = /^\[package\][^[]*?^version\s*=\s*"([^"]+)"/ms;
+  return { file, get: (t) => t.match(re)?.[1], set: (t, v) => replaceOnce(t, re, v, file) };
+}
+
+/** A Cargo.lock: the entry for one of this repo's own packages. */
+function cargoLock(file, name) {
+  const re = new RegExp(`^name = "${name}"\\nversion = "([^"]+)"`, "m");
+  return { file, label: `${file} (${name})`, get: (t) => t.match(re)?.[1], set: (t, v) => replaceOnce(t, re, v, `${file} (${name})`) };
+}
+
 // Each target reads its current version and writes a new one without reformatting the file.
 const targets = [
   {
@@ -54,16 +66,13 @@ const targets = [
       return replaceOnce(root, /^ {6}"version": "([^"]+)"/m, v, "package-lock.json") + rest;
     },
   },
-  {
-    file: "src-tauri/Cargo.toml",
-    get: (t) => t.match(/^\[package\][^[]*?^version\s*=\s*"([^"]+)"/ms)?.[1],
-    set: (t, v) => replaceOnce(t, /^\[package\][^[]*?^version\s*=\s*"([^"]+)"/ms, v, "Cargo.toml"),
-  },
-  {
-    file: "src-tauri/Cargo.lock",
-    get: (t) => t.match(/^name = "n-voke"\nversion = "([^"]+)"/m)?.[1],
-    set: (t, v) => replaceOnce(t, /^name = "n-voke"\nversion = "([^"]+)"/m, v, "Cargo.lock"),
-  },
+  cargoToml("src-tauri/Cargo.toml"),
+  cargoLock("src-tauri/Cargo.lock", "n-voke"),
+  cargoLock("src-tauri/Cargo.lock", "nvoke-core"),
+  cargoToml("crates/core/Cargo.toml"),
+  cargoToml("crates/tui/Cargo.toml"),
+  cargoLock("crates/tui/Cargo.lock", "nvoke-tui"),
+  cargoLock("crates/tui/Cargo.lock", "nvoke-core"),
   {
     file: "src-tauri/tauri.conf.json",
     get: (t) => JSON.parse(t).version,
@@ -72,7 +81,7 @@ const targets = [
 ];
 
 function current() {
-  return targets.map((t) => ({ file: t.file, version: t.get(read(t.file)) }));
+  return targets.map((t) => ({ file: t.label ?? t.file, version: t.get(read(t.file)) }));
 }
 
 function fail(message) {
@@ -106,7 +115,7 @@ const distinct = new Set(versions.map((v) => v.version));
 
 if (check) {
   if (distinct.size !== 1 || [...distinct][0] === undefined) {
-    for (const v of versions) console.error(`  ${v.file.padEnd(28)} ${v.version}`);
+    for (const v of versions) console.error(`  ${v.file.padEnd(40)} ${v.version}`);
     fail("version files disagree. Run `npm run version:bump -- <version>` to resync them.");
   }
   const version = [...distinct][0];
@@ -117,7 +126,7 @@ if (check) {
 }
 
 if (positional.length === 0) {
-  for (const v of versions) console.log(`${v.file.padEnd(28)} ${v.version}`);
+  for (const v of versions) console.log(`${v.file.padEnd(40)} ${v.version}`);
   process.exit(distinct.size === 1 ? 0 : 1);
 }
 
@@ -140,6 +149,6 @@ if (pre !== undefined && !/^\d+$/.test(pre)) {
 for (const t of targets) {
   const updated = t.set(read(t.file), next);
   write(t.file, updated);
-  console.log(`${t.file.padEnd(28)} ${t.get(read(t.file))}`);
+  console.log(`${(t.label ?? t.file).padEnd(40)} ${t.get(read(t.file))}`);
 }
 console.log(`\nVersion is now ${next} (was ${from}). Review with git diff, then commit and tag v${next}.`);

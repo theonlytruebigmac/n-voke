@@ -7,6 +7,7 @@ name: Release
 #   verify  -> tag matches the app version, tests pass
 #   draft   -> create (or reuse) a draft release
 #   build   -> one job per platform, each uploads its installers to the draft
+#   build-tui -> the terminal app, one job per platform, uploaded to the same draft
 #   publish -> turn the draft into a public release
 #
 # See docs/RELEASING.md.
@@ -188,9 +189,99 @@ jobs:
           releaseId: ${{ needs.draft.outputs.release_id }}
           args: ${{ matrix.args }}
 
+  build-tui:
+    name: Terminal app (${{ matrix.name }})
+    needs: draft
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: Windows
+            platform: windows-latest
+            asset: windows-x86_64
+            archive: zip
+          - name: macOS
+            platform: macos-latest
+            asset: macos-universal
+            archive: tar.gz
+          - name: Linux
+            platform: ubuntu-22.04
+            asset: linux-x86_64
+            archive: tar.gz
+    runs-on: ${{ matrix.platform }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ github.ref_name }}
+      RELEASE_ID: ${{ needs.draft.outputs.release_id }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './crates/tui -> target'
+          key: tui-${{ matrix.asset }}
+
+      - name: Build
+        working-directory: crates/tui
+        run: |
+          if [ "${{ matrix.platform }}" = "macos-latest" ]; then
+            # One binary that runs natively on both Apple Silicon and Intel Macs.
+            cargo build --release --locked --target aarch64-apple-darwin
+            cargo build --release --locked --target x86_64-apple-darwin
+            mkdir -p target/release
+            lipo -create -output target/release/nvoke \
+              target/aarch64-apple-darwin/release/nvoke \
+              target/x86_64-apple-darwin/release/nvoke
+          else
+            cargo build --release --locked
+          fi
+
+      - name: Package
+        run: |
+          name="nvoke-$TAG-${{ matrix.asset }}"
+          mkdir -p "dist/$name"
+          bin=nvoke
+          if [ "${{ matrix.platform }}" = "windows-latest" ]; then bin=nvoke.exe; fi
+          cp "crates/tui/target/release/$bin" "dist/$name/"
+          cp LICENSE "dist/$name/"
+          cd dist
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            7z a -tzip "$name.zip" "$name" > /dev/null
+          else
+            tar -czf "$name.tar.gz" "$name"
+          fi
+          file="$name.${{ matrix.archive }}"
+          if command -v sha256sum > /dev/null; then sha256sum "$file" > "$file.sha256"; else shasum -a 256 "$file" > "$file.sha256"; fi
+          ls -l
+
+      - name: Upload to the draft release
+        run: |
+          cd dist
+          for file in nvoke-*.${{ matrix.archive }} nvoke-*.${{ matrix.archive }}.sha256; do
+            # A re-run replaces the file from the earlier attempt instead of failing on it.
+            old=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --paginate \
+              --jq ".[] | select(.name == \"$file\") | .id")
+            if [ -n "$old" ]; then gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$old"; fi
+            gh api -X POST "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$file" \
+              -H "Content-Type: application/octet-stream" --input "$file" --jq .name
+          done
+
   publish:
     name: Publish release
-    needs: [draft, build]
+    needs: [draft, build, build-tui]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
