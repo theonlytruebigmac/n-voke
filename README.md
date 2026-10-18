@@ -8,9 +8,19 @@ A small desktop app for running N-able repository scripts on devices, or on whol
 - **Audit log** — a local, append-only record of every change the app makes in N-able (script runs, tag changes) and of settings changes, with outcome and error details. Password inputs are redacted.
 - **Watch task** — follow a run started elsewhere, such as from `Invoke-NableScriptRun.ps1`, by pasting its Task ID. This works even seconds after the run was created.
 
+![Run: devices from a tag plus two added by hand, with the offline device and the OS mismatch flagged](docs/screenshots/app-run.png)
+
+![Activity: one run's results grouped by identical outcome](docs/screenshots/app-activity.png)
+
+*The screenshots use made-up demo data.*
+
 ## Terminal app
 
 `nvoke` is a terminal interface that shares the desktop app's API key, settings, run history and audit log, so a run started in one shows up in the other.
+
+![nvoke Run page reviewing the devices a run will reach](docs/screenshots/tui-run.png)
+
+![nvoke Activity page with a run's results grouped by outcome](docs/screenshots/tui-activity.png)
 
 Download it from the [releases page](https://github.com/theonlytruebigmac/n-voke/releases) (`nvoke-<version>-windows-x86_64.zip`, `-macos-universal.tar.gz` or `-linux-x86_64.tar.gz`, each with a `.sha256` checksum), unpack it and run `nvoke`. Or build it from source:
 
