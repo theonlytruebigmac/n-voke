@@ -3,10 +3,12 @@
 
 mod app;
 mod input;
+mod output_view;
 mod picker;
 mod run_ui;
 mod theme;
 mod ui;
+mod viewer_ui;
 
 use std::{error::Error, sync::Arc};
 

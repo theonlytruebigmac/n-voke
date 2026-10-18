@@ -5,7 +5,7 @@
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType},
+    widgets::{Block, BorderType, Padding},
 };
 
 /// The palette comes from the N-voke logo: deep violet, white and bright cyan.
@@ -17,10 +17,13 @@ pub const BRAND_CYAN: Color = Color::Rgb(24, 208, 240);
 /// The app paints its own background, so every colour below is chosen against it
 /// and stays readable whatever the terminal's theme, transparency or wallpaper.
 /// Set `NVOKE_TRANSPARENT=1` to let the terminal's own background show through.
-pub const BG: Color = Color::Rgb(17, 9, 38);
+pub const BG: Color = Color::Rgb(13, 7, 30);
+/// Panels sit on a slightly lighter surface than the page, so where one ends and the next begins
+/// is visible as an area, not just a thin line.
+pub const PANEL_BG: Color = Color::Rgb(28, 17, 60);
 /// The top bar, in the logo's violet.
 pub const HEADER_BG: Color = BRAND_VIOLET;
-pub const SELECTED_BG: Color = Color::Rgb(62, 18, 132);
+pub const SELECTED_BG: Color = Color::Rgb(66, 22, 140);
 
 // Text colours. Each is at least 4.5:1 against BG, SELECTED_BG and HEADER_BG (WCAG AA); a test checks it.
 pub const TEXT: Color = Color::Rgb(242, 238, 252);
@@ -43,6 +46,11 @@ pub fn background() -> Style {
     } else {
         Style::new().bg(BG).fg(TEXT)
     }
+}
+
+/// The fill for panels: the lighter surface, unless the terminal's own background was asked for.
+pub fn surface() -> Style {
+    if background().bg.is_some() { Style::new().bg(PANEL_BG) } else { Style::new() }
 }
 
 type Rgb = (f32, f32, f32);
@@ -81,16 +89,41 @@ pub fn cursor_visible(tick: u64) -> bool {
     (tick / 5).is_multiple_of(2)
 }
 
-/// A rounded panel with its title set into the top border: ╭┤ title ├──╮.
-/// The focused panel is drawn in the accent colour.
+/// A rounded panel with its title set into the top border: ╭┤ title ├──╮, on the panel surface.
+/// The focused panel is the one that stands out: its border is cyan and its title is a cyan chip,
+/// so it is always clear which panel the arrow keys act on.
 pub fn panel(title: &str, focused: bool) -> Block<'static> {
     let border = Style::new().fg(if focused { ACCENT } else { BORDER });
-    let name = Style::new().fg(if focused { ACCENT } else { TEXT }).add_modifier(Modifier::BOLD);
-    Block::bordered().border_type(BorderType::Rounded).border_style(border).title(Line::from(vec![
-        Span::styled("┤ ", border),
-        Span::styled(title.to_string(), name),
-        Span::styled(" ├", border),
-    ]))
+    let name = if focused {
+        Span::styled(format!(" {title} "), Style::new().fg(BG).bg(ACCENT).add_modifier(Modifier::BOLD))
+    } else {
+        Span::styled(format!(" {title} "), Style::new().fg(TEXT).add_modifier(Modifier::BOLD))
+    };
+    Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(border)
+        .style(surface())
+        .title(Line::from(vec![Span::styled("┤", border), name, Span::styled("├", border)]))
+}
+
+/// Like `panel`, with a column of space inside the border so text doesn't touch it.
+pub fn panel_padded(title: &str, focused: bool) -> Block<'static> {
+    panel(title, focused).padding(Padding::horizontal(1))
+}
+
+/// Text set into a panel's bottom border, bracketed like a title so the border visibly
+/// continues around it instead of the text looking like it floats outside the box.
+pub fn footer(spans: Vec<Span<'static>>) -> Line<'static> {
+    let border = Style::new().fg(BORDER);
+    let mut all = vec![Span::styled("┤ ", border)];
+    all.extend(spans);
+    all.push(Span::styled(" ├", border));
+    Line::from(all)
+}
+
+/// A footer that is plain dim text.
+pub fn footer_text(text: &str) -> Line<'static> {
+    footer(vec![Span::styled(text.trim().to_string(), Style::new().fg(DIM))])
 }
 
 /// "↑↓ move  → open  q quit": keys in the accent colour, descriptions dim.
@@ -126,7 +159,7 @@ mod tests {
     #[test]
     fn text_colours_are_readable_on_both_backgrounds() {
         for (name, color) in [("TEXT", TEXT), ("DIM", DIM), ("ACCENT", ACCENT), ("OK", OK), ("ERR", ERR), ("WARN", WARN), ("SCRIPT", SCRIPT)] {
-            for (bg_name, bg) in [("BG", BG), ("SELECTED_BG", SELECTED_BG), ("HEADER_BG", HEADER_BG)] {
+            for (bg_name, bg) in [("BG", BG), ("PANEL_BG", PANEL_BG), ("SELECTED_BG", SELECTED_BG), ("HEADER_BG", HEADER_BG)] {
                 let ratio = contrast(color, bg);
                 assert!(ratio >= 4.5, "{name} on {bg_name} is only {ratio:.1}:1 (needs 4.5)");
             }
@@ -148,6 +181,23 @@ mod tests {
         assert!(distance >= 120, "selection bar too close to the background: {distance}");
     }
 
+    fn distance(a: Color, b: Color) -> i32 {
+        let (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) = (a, b) else { unreachable!() };
+        (r1 as i32 - r2 as i32).abs() + (g1 as i32 - g2 as i32).abs() + (b1 as i32 - b2 as i32).abs()
+    }
+
+    #[test]
+    fn a_panel_is_visibly_a_different_area_from_the_page_and_a_selection_from_a_panel() {
+        // Both are dark, so luminance contrast is low: the colours have to differ for real.
+        assert!(distance(PANEL_BG, BG) >= 50, "panels barely stand out from the page: {}", distance(PANEL_BG, BG));
+        assert!(distance(SELECTED_BG, PANEL_BG) >= 100, "selection barely stands out from a panel: {}", distance(SELECTED_BG, PANEL_BG));
+    }
+
+    #[test]
+    fn the_focused_panels_title_chip_is_readable() {
+        assert!(contrast(BG, ACCENT) >= 4.5, "{:.1}:1", contrast(BG, ACCENT));
+    }
+
     #[test]
     fn the_cursor_blinks_and_is_visible_at_the_start() {
         assert!(cursor_visible(0) && !cursor_visible(5) && cursor_visible(10));
@@ -167,6 +217,7 @@ mod tests {
     #[test]
     fn lines_and_bars_stand_out_from_the_background() {
         assert!(contrast(BORDER, BG) >= 3.0, "borders are {:.1}:1", contrast(BORDER, BG));
+        assert!(contrast(BORDER, PANEL_BG) >= 3.0, "borders on a panel are {:.1}:1", contrast(BORDER, PANEL_BG));
         for t in [0.0, 0.5, 1.0] {
             assert!(contrast(volume(t), BG) >= 3.0, "volume({t}) is {:.1}:1", contrast(volume(t), BG));
         }

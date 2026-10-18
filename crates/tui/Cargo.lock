@@ -1843,11 +1843,14 @@ dependencies = [
 name = "nvoke-tui"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "chrono",
+ "dirs",
  "nvoke-core",
  "ratatui",
  "serde_json",
  "tokio",
+ "unicode-width",
 ]
 
 [[package]]

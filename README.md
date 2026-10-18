@@ -22,7 +22,7 @@ Run `nvoke --dry-run` (or set `NVOKE_DRY_RUN=1`) to try things without consequen
 
 Built so far:
 - **Run:** pick an organization, a script and who to run it on (devices and tags, with search), fill in the script's inputs, review the resulting devices (offline devices and OS mismatches are flagged, and any can be left out), then confirm. A run that has started takes you to it in Activity.
-- **Activity:** follow runs live, with results grouped by outcome. `R` runs the selected run again; `F` re-runs only the devices that failed.
+- **Activity:** follow runs live, with results grouped by outcome. `R` runs the selected run again; `F` re-runs only the devices that failed. `Enter` on a result opens a full-screen output viewer: scroll, search (`/`, `n`, `N`), switch between the devices in the group (`←` `→`), wrap or unwrap long lines (`w`), copy to the clipboard (`y`) or save to a file in your downloads folder (`e`, readable only by you).
 - **Audit log** and **Settings.**
 
 Tags and Watch task are next. If both apps are open at once, the one that saves last wins, so run history is best used from one at a time.

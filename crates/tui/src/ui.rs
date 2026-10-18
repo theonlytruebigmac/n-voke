@@ -21,7 +21,7 @@ use ratatui::{
 use crate::{
     app::{App, Confirm, Field, Focus, Load, Page, Pane, Screen, SettingsForm},
     input::TextInput,
-    theme::{self, ACCENT, BORDER, DIM, ERR, OK, SCRIPT, SELECTED_BG, TEXT, WARN, panel},
+    theme::{self, ACCENT, BORDER, DIM, ERR, OK, SCRIPT, SELECTED_BG, TEXT, WARN, panel, panel_padded},
 };
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -67,11 +67,25 @@ fn draw_main(frame: &mut Frame, area: Rect, app: &mut App) {
         (Focus::Content, Page::Run) if app.run.editing => &[("type", "edit"), ("enter", "done"), ("esc", "done"), ("tab", "next field")],
         (Focus::Content, Page::Run) if app.run.pane == crate::app::RunPane::Devices => &[("↑↓", "device"), ("space", "include/leave out"), ("a", "all/none"), ("←", "back to form")],
         (Focus::Content, Page::Run) => &[("↑↓", "field"), ("enter", "choose/edit"), ("→", "devices"), ("←", "back"), ("?", "help")],
-        (Focus::Content, Page::Activity) if app.pane == Pane::Results => &[("↑↓", "group"), ("PgUp/PgDn", "scroll output"), ("←", "back"), ("?", "help")],
+        (Focus::Content, Page::Activity) if app.pane == Pane::Results => &[("↑↓", "group"), ("enter", "read the output"), ("PgUp/PgDn", "scroll"), ("←", "back"), ("?", "help")],
         (Focus::Content, Page::Activity) => &[("↑↓", "run"), ("→", "results"), ("s", "stop"), ("w", "watch"), ("R", "run again"), ("F", "re-run failed"), ("x", "remove"), ("←", "back")],
         (Focus::Content, Page::Audit) => &[("↑↓", "move"), ("PgUp/PgDn", "jump"), ("r", "refresh"), ("←", "back"), ("?", "help")],
         (Focus::Content, _) => &[("enter", "edit"), ("←", "back"), ("?", "help"), ("q", "quit")],
     };
+    let viewer_hints: Vec<(&str, &str)> = match &app.viewer {
+        Some(v) if v.searching => vec![("esc", "cancel"), ("enter", "find"), ("type", "search")],
+        Some(v) => {
+            // Most important first: a narrow window cuts the end of the line, and what must never go is the way out.
+            let mut h = vec![("esc", "close"), ("↑↓", "scroll"), ("PgUp/PgDn", "page")];
+            if v.task_ids.len() > 1 {
+                h.push(("←→", "device"));
+            }
+            h.extend([("/", "search"), ("n/N", "next/prev"), ("w", "wrap"), ("y", "copy"), ("e", "save")]);
+            h
+        }
+        None => vec![],
+    };
+    let hints: &[(&str, &str)] = if app.viewer.is_some() { &viewer_hints } else { hints };
     let dry_hint = [("d", "held-back changes")];
     let hints: Vec<(&str, &str)> = if app.is_dry_run() { hints.iter().chain(dry_hint.iter()).copied().collect() } else { hints.to_vec() };
     let hints = hints.as_slice();
@@ -86,7 +100,9 @@ fn draw_main(frame: &mut Frame, area: Rect, app: &mut App) {
         frame.render_widget(Paragraph::new(theme::key_hints(hints)), footer);
     }
 
-    if app.run.picker.is_some() {
+    if app.viewer.is_some() {
+        crate::viewer_ui::draw_viewer(frame, area, app);
+    } else if app.run.picker.is_some() {
         crate::run_ui::draw_picker(frame, area, app);
     } else if app.show_dry_log {
         draw_dry_log(frame, area, app);
@@ -296,7 +312,11 @@ fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
     let [jobs_area, detail_area] = if area.width >= 100 {
         Layout::horizontal([Constraint::Fill(3), Constraint::Fill(2)]).areas(area)
     } else {
-        Layout::vertical([Constraint::Percentage(40), Constraint::Fill(1)]).areas(area)
+        // The list only needs its rows (plus borders, header and the footer line), and the rest is for the
+        // run's detail, where the output is. Never more than 40% however many runs there are.
+        let wanted = (app.job_list.len() as u16 + 4).max(5);
+        let cap = (area.height * 2 / 5).max(5);
+        Layout::vertical([Constraint::Length(wanted.min(cap)), Constraint::Fill(1)]).areas(area)
     };
     draw_job_list(frame, jobs_area, app, focused && app.pane == Pane::Jobs);
     draw_job_detail(frame, detail_area, app, focused && app.pane == Pane::Results);
@@ -343,13 +363,13 @@ fn draw_job_list(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
         .collect();
 
     let running = app.job_list.iter().filter(|j| j.is_active()).count();
-    let footer = format!(" {} runs · {running} running ", app.job_list.len());
+    let footer = format!(" {} run{} · {running} running ", app.job_list.len(), if app.job_list.len() == 1 { "" } else { "s" });
     let table = Table::new(rows, widths)
         .column_spacing(2)
         .header(Row::new(headers).style(Style::new().fg(DIM).add_modifier(Modifier::BOLD)))
         .row_highlight_style(Style::new().bg(SELECTED_BG).add_modifier(Modifier::BOLD))
         .highlight_symbol("▌ ")
-        .block(panel("activity", focused).title_bottom(Line::styled(footer, Style::new().fg(DIM))));
+        .block(panel("activity", focused).title_bottom(theme::footer_text(&footer)));
     frame.render_stateful_widget(table, area, &mut app.job_table);
 }
 
@@ -365,10 +385,12 @@ fn count_spans(counts: &PhaseCounts) -> Vec<Span<'static>> {
     parts
         .iter()
         .filter(|(n, _, _)| *n > 0)
-        .flat_map(|(n, phase, label)| {
+        .enumerate()
+        .flat_map(|(i, (n, phase, label))| {
             // A still dot for "running": the summary doesn't animate, the list does.
             let glyph = if *phase == TaskPhase::Running { "●" } else { phase_glyph(*phase, 0) };
-            [Span::styled(format!("{glyph} {n} {label}"), Style::new().fg(phase_color(*phase))), Span::raw("   ")]
+            let counted = Span::styled(format!("{glyph} {n} {label}"), Style::new().fg(phase_color(*phase)));
+            if i == 0 { vec![counted] } else { vec![Span::raw("  "), counted] }
         })
         .collect()
 }
@@ -377,8 +399,14 @@ fn draw_job_detail(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) 
     let Some(job) = app.current_job().cloned() else { return };
     let now = Utc::now();
 
-    let group_rows = (app.groups.len() as u16 + 3).clamp(4, 9);
-    let [summary_area, results_area, output_area] = Layout::vertical([Constraint::Length(5), Constraint::Length(group_rows), Constraint::Fill(1)]).areas(area);
+    // The output is what people come here to read, so it gets priority: on a small window the summary
+    // shrinks, then goes, and the results table gets shorter, but the output keeps at least MIN_OUTPUT rows.
+    const MIN_OUTPUT: u16 = 7;
+    let summary_h: u16 = if area.height >= 32 { 5 } else if area.height >= 24 { 4 } else { 0 };
+    let results_max: u16 = if area.height >= 34 { 9 } else if area.height >= 24 { 6 } else { 5 };
+    let group_rows = (app.groups.len() as u16 + if area.height >= 24 { 3 } else { 2 }).clamp(3, results_max);
+    let group_rows = group_rows.min(area.height.saturating_sub(summary_h + MIN_OUTPUT)).max(3);
+    let [summary_area, results_area, output_area] = Layout::vertical([Constraint::Length(summary_h), Constraint::Length(group_rows), Constraint::Fill(1)]).areas(area);
 
     // Which run this is, and how it stands.
     let started = parse_time(&job.created_at).map(|t| ago(t, now)).unwrap_or_default();
@@ -392,7 +420,13 @@ fn draw_job_detail(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) 
         lines.truncate(2);
         lines.push(Line::styled(format!("{} warning(s) when it was created", job.warnings.as_ref().map_or(0, Vec::len)), Style::new().fg(WARN)));
     }
-    frame.render_widget(Paragraph::new(lines).block(panel("run", false)), summary_area);
+    if summary_h >= 5 {
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(theme::panel_padded("run", false)), summary_area);
+    } else if summary_h > 0 {
+        // Two lines: which run, and how it stands. (The organization and start time go first.)
+        let head = Line::from(vec![Span::styled(job.script_name.clone(), Style::new().fg(TEXT).add_modifier(Modifier::BOLD)), Span::styled(format!("  →  {}", job.target_label), Style::new().fg(DIM))]);
+        frame.render_widget(Paragraph::new(vec![head, Line::from(count_spans(&app.counts))]).wrap(Wrap { trim: false }).block(theme::panel_padded("run", false)), summary_area);
+    }
 
     // The groups: devices with the same result read as one line.
     let tasks = job.tasks.clone();
@@ -416,7 +450,11 @@ fn draw_job_detail(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) 
         .column_spacing(2)
         .row_highlight_style(Style::new().bg(SELECTED_BG).add_modifier(Modifier::BOLD))
         .highlight_symbol(if focused { "▌ " } else { "  " })
-        .block(panel("results", focused));
+        .block({
+            let block = panel("results", focused);
+            // With no room for the summary, the counts live here so they are never lost.
+            if summary_h == 0 { block.title_bottom(theme::footer(count_spans(&app.counts).into_iter().filter(|s| !s.content.trim().is_empty()).collect())) } else { block }
+        });
     frame.render_stateful_widget(table, results_area, &mut app.group_table);
 
     // Which devices, and what they printed.
@@ -446,7 +484,20 @@ fn draw_job_detail(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) 
             out.push(Line::styled(format!("{} Waiting for results…", spinner(tick)), Style::new().fg(ACCENT)));
         }
     }
-    let output = Paragraph::new(out).wrap(Wrap { trim: false }).scroll((app.output_scroll, 0)).block(panel("devices & output", false));
+    // Don't scroll past the end, and say when there is more than fits.
+    let text_width = output_area.width.saturating_sub(4).max(1) as usize; // borders and the padding inside them
+    let rows = output_area.height.saturating_sub(2) as usize;
+    let total: usize = out.iter().map(|l| l.width().max(1).div_ceil(text_width)).sum();
+    let max_scroll = total.saturating_sub(rows);
+    app.output_scroll = app.output_scroll.min(max_scroll as u16);
+    // Part of the results pane but not where focus is shown: one title chip at a time, so it is clear where you are.
+    let mut block = theme::panel_padded("devices & output", false);
+    if total > rows {
+        let at = app.output_scroll as usize;
+        let hint = format!(" lines {}–{} of {total} · enter opens the full view ", at + 1, (at + rows).min(total));
+        block = block.title_bottom(theme::footer(vec![Span::styled(hint.trim().to_string(), Style::new().fg(WARN))]));
+    }
+    let output = Paragraph::new(out).wrap(Wrap { trim: false }).scroll((app.output_scroll, 0)).block(block);
     frame.render_widget(output, output_area);
 }
 
@@ -662,7 +713,7 @@ fn draw_audit(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
         .header(Row::new(headers).style(Style::new().fg(DIM).add_modifier(Modifier::BOLD)))
         .row_highlight_style(Style::new().bg(SELECTED_BG).add_modifier(Modifier::BOLD))
         .highlight_symbol("▌ ")
-        .block(panel("audit log", focused).title_bottom(Line::styled(format!(" {total} entries "), Style::new().fg(DIM))));
+        .block(panel("audit log", focused).title_bottom(theme::footer_text(&format!("{total} entries"))));
     frame.render_stateful_widget(table, table_area, &mut app.audit_table);
 
     // Only when there is something to scroll: otherwise it is a column of blocks that means nothing.
@@ -688,7 +739,7 @@ fn draw_audit(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
             lines.push(Line::from(vec![label("Error"), Span::styled(error.clone(), Style::new().fg(ERR))]));
         }
     }
-    let detail = Paragraph::new(lines).style(Style::new().fg(TEXT)).wrap(Wrap { trim: true }).block(panel("details", false).title_bottom(Line::styled(format!(" {} ", log.path), Style::new().fg(DIM))));
+    let detail = Paragraph::new(lines).style(Style::new().fg(TEXT)).wrap(Wrap { trim: true }).block(panel_padded("details", false).title_bottom(theme::footer_text(&log.path)));
     frame.render_widget(detail, detail_area);
 }
 
@@ -793,7 +844,7 @@ fn draw_dry_log(frame: &mut Frame, area: Rect, app: &mut App) {
     let popup = centered(area, area.width.saturating_sub(6).min(130), area.height.saturating_sub(4));
     clear(frame, popup);
     let entries = app.dry_run_entries();
-    let outer = panel("held back · not sent", true).title_bottom(Line::styled(" ↑↓ choose · PgUp/PgDn scroll · esc close ", Style::new().fg(DIM)));
+    let outer = panel("held back · not sent", true).title_bottom(theme::footer_text("↑↓ choose · PgUp/PgDn scroll · esc close"));
     let inner = outer.inner(popup);
     frame.render_widget(outer, popup);
 
@@ -835,7 +886,7 @@ fn draw_dry_log(frame: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn draw_help(frame: &mut Frame, area: Rect) {
-    let popup = centered(area, 66, 28);
+    let popup = centered(area, 70, 36);
     clear(frame, popup);
     let key = |k: &str, what: &str| Line::from(vec![Span::styled(format!(" {k:<14}"), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)), Span::styled(what.to_string(), Style::new().fg(TEXT))]);
     let heading = |text: &str| Line::styled(format!(" {text}"), Style::new().fg(DIM).add_modifier(Modifier::BOLD));
@@ -854,6 +905,13 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         key("→", "devices (space leaves one out, a all/none)"),
         key("enter ×2", "confirm and run (d lists a dry run)"),
         Line::from(""),
+        heading("Reading output (enter on a result)"),
+        key("↑ ↓ PgUp PgDn", "scroll · home/end for the ends"),
+        key("← →", "previous / next device in the group"),
+        key("/  n  N", "search · next · previous match"),
+        key("w  < >", "wrap lines · scroll sideways when not wrapped"),
+        key("y  e", "copy to clipboard · save to a file"),
+        Line::from(""),
         heading("Activity"),
         key("→ / ←", "runs ⇄ results ⇄ menu"),
         key("s w x", "stop watching / watch / remove"),
@@ -866,7 +924,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         key("← esc", "back to the menu"),
         key("r", "refresh"),
     ];
-    frame.render_widget(Paragraph::new(lines).block(panel("keys", true).title_bottom(Line::styled(" any key closes ", Style::new().fg(DIM)))), popup);
+    frame.render_widget(Paragraph::new(lines).block(panel("keys", true).title_bottom(theme::footer_text("any key closes"))), popup);
 }
 
 /// Blanks an area for a popup. `Clear` also resets the background, so it is repainted.
@@ -1064,7 +1122,7 @@ mod tests {
         let screen = text_of(&draw_at(&mut app, 70, 26));
         assert!(screen.contains("…"), "{screen}");
         // The full text is always one keypress away in the details panel.
-        assert!(screen.contains("Summary  Deleted tag ScriptRunner_Test_Static"), "{screen}");
+        assert!(screen.contains("ScriptRunner_Test_Static"), "the whole name is in the details even though the table cut it:\n{screen}");
         assert_eq!(truncate("short", 10), "short");
         assert_eq!(truncate("abcdefghij", 6), "abcde…");
         assert_eq!(truncate("abc", 0), "…");
@@ -1619,5 +1677,213 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ---- reading output ---------------------------------------------------------------
+
+    /// The run from the bug report: one device, a non-zero exit, an eight-line report.
+    fn bitlocker_app() -> (tokio::runtime::Runtime, App) {
+        let (rt, mut app) = app();
+        app.settings = Some(settings(true));
+        app.screen = Screen::Main;
+        app.page = Page::Activity;
+        app.focus = Focus::Content;
+        app.pane = Pane::Results;
+        let report = "Fail - Bitlocker Key Dependancys Not Met\n----------------------------------\nUEFI - False\nTPM Ready - True\nTPM Present - True\nTPM Autoprovisioning - Enabled\nSecure Boot - Off\nBitlocker - Not Enabled";
+        let task = finished_task("HP Laptop - Vienna", "FAILED", report, Some("something went wrong while parsing the PowerShell output"));
+        app.jobs.seed(vec![job("1", "BitlockerPreChecker", 1, vec![task])]);
+        app.sync_jobs();
+        (rt, app)
+    }
+
+    #[test]
+    fn a_small_window_still_shows_a_whole_short_report() {
+        // The reported case: the window was about 100x30 and the output panel was squeezed to a few rows.
+        for (width, height) in [(104, 33), (100, 30), (96, 28), (90, 26), (80, 24)] {
+            let (_rt, mut app) = bitlocker_app();
+            let screen = text_of(&draw_at(&mut app, width, height));
+            for line in ["Fail - Bitlocker Key Dependancys Not Met", "UEFI - False", "TPM Ready - True", "TPM Present - True", "TPM Autoprovisioning - Enabled", "Secure Boot - Off", "Bitlocker - Not Enabled"] {
+                assert!(screen.contains(line), "{width}x{height}: {line:?} is missing:\n{screen}");
+            }
+        }
+    }
+
+    #[test]
+    fn one_run_does_not_take_two_fifths_of_a_narrow_window() {
+        let (_rt, mut app) = bitlocker_app();
+        let buffer = draw_at(&mut app, 100, 36);
+        // The jobs panel's bottom border is the line carrying its "1 run · 0 running" footer.
+        let screen = text_of(&buffer);
+        let footer_row = screen.lines().position(|l| l.contains("1 run · 0 running")).expect("footer");
+        assert!(footer_row <= 9, "the run list should be a few rows tall, not 40% of the screen (footer on row {footer_row}):\n{screen}");
+    }
+
+    #[test]
+    fn a_single_run_reads_as_one_run() {
+        let (_rt, mut app) = bitlocker_app();
+        let screen = text_of(&draw_at(&mut app, 120, 30));
+        assert!(screen.contains("1 run · 0 running") && !screen.contains("1 runs"), "{screen}");
+    }
+
+    // ---- boundaries and structure -----------------------------------------------------
+
+    use crate::app::viewer::tests as viewer_tests;
+
+    /// The text of every title "chip" on screen: runs of cells drawn on the accent colour.
+    fn chips(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
+        let mut found = vec![];
+        for y in 0..buffer.area.height {
+            let mut current = String::new();
+            for x in 0..buffer.area.width {
+                let cell = &buffer[(x, y)];
+                if cell.bg == ACCENT {
+                    current.push_str(cell.symbol());
+                } else if !current.is_empty() {
+                    found.push(std::mem::take(&mut current).trim().to_string());
+                }
+            }
+            if !current.is_empty() {
+                found.push(current.trim().to_string());
+            }
+        }
+        found.into_iter().filter(|c| !c.is_empty()).collect()
+    }
+
+    #[test]
+    fn exactly_one_panel_shows_where_focus_is() {
+        // Two chips at once would make "where am I" a guess; this is the bug seen in the first screenshot.
+        type Build = Box<dyn Fn() -> (tokio::runtime::Runtime, App)>;
+        let cases: Vec<(&str, Build, &str)> = vec![
+            ("activity runs", Box::new(|| { let (rt, mut a) = bitlocker_app(); a.pane = Pane::Jobs; (rt, a) }), "activity"),
+            ("activity results", Box::new(bitlocker_app), "results"),
+            ("run form", Box::new(run_tests::run_app), "run a script"),
+            ("run devices", Box::new(|| { let (rt, mut a) = filled_run_app(); a.run.pane = RunPane::Devices; (rt, a) }), "devices"),
+            ("audit", Box::new(|| { let (rt, a) = audit_app(); (rt, a) }), "audit log"),
+            ("menu", Box::new(|| { let (rt, mut a) = bitlocker_app(); a.focus = Focus::Sidebar; (rt, a) }), "menu"),
+        ];
+        for (name, build, expected) in cases {
+            let (_rt, mut app) = build();
+            let found = chips(&draw_at(&mut app, 130, 34));
+            assert_eq!(found, [expected], "{name}: the focus chip(s) were {found:?}");
+        }
+    }
+
+    #[test]
+    fn text_set_into_a_border_is_always_bracketed_like_a_title() {
+        let (_rt, mut app) = bitlocker_app();
+        let screen = text_of(&draw_at(&mut app, 130, 34));
+        assert!(screen.contains("┤ 1 run · 0 running ├"), "the runs footer:\n{screen}");
+        let (_rt, mut audit) = audit_app();
+        let screen = text_of(&draw_at(&mut audit, 110, 30));
+        assert!(screen.contains("┤ 2 entries ├") && screen.contains("┤ /tmp/audit.jsonl ├"), "{screen}");
+        let (_rt, mut run) = filled_run_app();
+        let screen = text_of(&draw_at(&mut run, 130, 30));
+        assert!(screen.contains("┤ 2 of 2 selected ├"), "the devices footer:\n{screen}");
+    }
+
+    #[test]
+    fn panels_are_a_lighter_surface_than_the_page_and_selection_stands_out_from_both() {
+        let (_rt, mut app) = bitlocker_app();
+        let buffer = draw_at(&mut app, 130, 34);
+        // The menu panel's blank interior, the page's key-hint row, and the selected result row.
+        assert_eq!(buffer[(3, 15)].bg, theme::PANEL_BG, "inside a panel");
+        assert_eq!(buffer[(60, 33)].bg, theme::BG, "the page, outside any panel");
+        let selected = (0..buffer.area.height).any(|y| (0..buffer.area.width).any(|x| buffer[(x, y)].bg == SELECTED_BG));
+        assert!(selected, "the selected row has its own colour");
+    }
+
+    #[test]
+    fn text_never_touches_a_panels_border() {
+        let (_rt, mut app) = bitlocker_app();
+        let screen = text_of(&draw_at(&mut app, 100, 30));
+        let line = screen.lines().find(|l| l.contains("UEFI - False")).expect("the output is shown");
+        assert!(line.contains("│ UEFI - False"), "there is a column of space between the border and the text: {line:?}");
+        let (_rt, mut audit) = audit_app();
+        let screen = text_of(&draw_at(&mut audit, 110, 30));
+        let details = screen.lines().find(|l| l.contains("Action")).expect("details");
+        assert!(details.contains("│ Action"), "{details:?}");
+    }
+
+    // ---- the output viewer ---------------------------------------------------------------
+
+    #[test]
+    fn the_viewer_has_a_title_numbered_lines_section_rules_and_a_position_readout() {
+        let (_rt, mut app) = viewer_tests::viewer_app();
+        viewer_tests::open(&mut app);
+        let screen = viewer_tests::draw(&mut app, 100, 30);
+        for expected in ["BitlockerPreChecker · PC-1 · device 1 of 3", "── Output ", "  1 line 1: ok", "┤ lines ", " of ", "% · wrap on ├", "Task ID    t-PC-1"] {
+            assert!(screen.contains(expected), "missing {expected:?}:\n{screen}");
+        }
+        // The essentials always show, even where the line is cut: how to leave, scroll, and search.
+        for hint in ["esc close", "scroll", "page", "device", "search"] {
+            assert!(screen.contains(hint), "hint {hint:?} missing:\n{screen}");
+        }
+        // With room, everything shows, including switching devices because there are three.
+        let wide = viewer_tests::draw(&mut app, 130, 30);
+        for hint in ["esc close", "scroll", "page", "device", "search", "next/prev", "wrap", "copy", "save"] {
+            assert!(wide.contains(hint), "hint {hint:?} missing at 130 columns:\n{wide}");
+        }
+        // The way out is visible even in a narrow window, where the end of the hints is cut off.
+        assert!(viewer_tests::draw(&mut app, 70, 24).contains("esc close"), "a narrow window must still show how to leave");
+        // The last section is at the end: its own rule, then what N-able said.
+        run_tests::press(&mut app, KeyCode::End);
+        let end = viewer_tests::draw(&mut app, 100, 30);
+        assert!(end.contains("── N-able says ") && end.contains("exit status 1") && end.contains("100 line 100: TPM not ready"), "{end}");
+    }
+
+    #[test]
+    fn search_hits_are_marked_only_while_searching_and_the_current_one_stands_out() {
+        let (_rt, mut app) = viewer_tests::viewer_app();
+        viewer_tests::open(&mut app);
+        // The body is rows 2..=h-4 (below the title border, above the status line).
+        let (w, h) = (100u16, 30u16);
+        let body = 2..=(h - 4);
+        let marked = |b: &ratatui::buffer::Buffer, color: Color| body.clone().flat_map(|y| (0..w).map(move |x| (x, y))).filter(|&(x, y)| b[(x, y)].bg == color && b[(x, y)].symbol() != " ").count();
+        let hits_on_screen = |b: &ratatui::buffer::Buffer| body.clone().map(|y| (0..w).map(|x| b[(x, y)].symbol()).collect::<String>().to_lowercase().matches("tpm").count()).sum::<usize>();
+
+        let before = draw_at(&mut app, w, h);
+        assert_eq!(marked(&before, WARN) + marked(&before, ACCENT), 0, "nothing is marked until you search");
+
+        run_tests::press(&mut app, KeyCode::Char('/'));
+        run_tests::type_text(&mut app, "tpm");
+        run_tests::press(&mut app, KeyCode::Enter);
+        run_tests::press(&mut app, KeyCode::Char('n')); // move to a later hit, which is below the first screen's worth
+        let after = draw_at(&mut app, w, h);
+        let visible = hits_on_screen(&after);
+        assert!(visible >= 1, "the current match is on screen");
+        assert_eq!(marked(&after, WARN) + marked(&after, ACCENT), visible * 3, "every visible hit is marked, three letters each");
+        assert_eq!(marked(&after, ACCENT), 3, "exactly one (the current) hit stands out from the rest");
+
+        run_tests::press(&mut app, KeyCode::Esc);
+        let cleared = draw_at(&mut app, w, h);
+        assert_eq!(marked(&cleared, WARN) + marked(&cleared, ACCENT), 0, "esc clears the marks");
+    }
+
+    #[test]
+    fn the_viewer_paints_a_solid_background_at_every_size() {
+        let (_rt, mut app) = viewer_tests::viewer_app();
+        viewer_tests::open(&mut app);
+        for (w, h) in [(130, 40), (100, 30), (60, 16), (30, 8), (12, 4)] {
+            let buffer = draw_at(&mut app, w, h);
+            for y in 0..h {
+                for x in 0..w {
+                    assert!(matches!(buffer[(x, y)].bg, Color::Rgb(..)), "viewer at {w}x{h}: cell ({x},{y}) is not painted");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_run_status_is_always_in_the_forms_border_even_when_the_button_is_off_screen() {
+        let (_rt, mut app) = run_tests::run_app();
+        let screen = text_of(&draw_at(&mut app, 120, 28));
+        assert!(screen.contains("┤ Choose an organization ├"), "a blocker is named:\n{screen}");
+        let (_rt, mut app) = filled_run_app();
+        app.run.field = RunField::Org; // the button is far below the focused row
+        // A short window: the form is scrolled to the focus and the Run row is out of sight.
+        let screen = text_of(&draw_at(&mut app, 100, 18));
+        assert!(screen.contains("┤ ready · run on 2 devices ├"), "{screen}");
+        app.run.confirming = true;
+        assert!(text_of(&draw_at(&mut app, 100, 18)).contains("enter again to run on 2 devices"));
     }
 }

@@ -74,7 +74,23 @@ fn agent_glyph(asset: &Asset) -> (&'static str, ratatui::style::Color) {
 // ---- the form ----------------------------------------------------------------
 
 fn draw_form(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
-    let block = panel("run a script", focused);
+    // Whether a run can start, always visible in the panel's own border, because on a short window
+    // the Run button itself can be scrolled out of sight.
+    let status = {
+        let run = &app.run;
+        let devices = run.devices();
+        let count = if devices.len() == 1 { devices[0].name.clone() } else { format!("{} devices", devices.len()) };
+        if run.running {
+            theme::footer(vec![Span::styled("starting…", Style::new().fg(ACCENT))])
+        } else if run.confirming {
+            theme::footer(vec![Span::styled(format!("enter again to run on {count}"), Style::new().fg(WARN).add_modifier(Modifier::BOLD))])
+        } else if let Some(reason) = run.blocker() {
+            theme::footer(vec![Span::styled(reason, Style::new().fg(DIM))])
+        } else {
+            theme::footer(vec![Span::styled(format!("ready · run on {count}"), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))])
+        }
+    };
+    let block = panel("run a script", focused).title_bottom(status);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let width = inner.width as usize;
@@ -365,15 +381,22 @@ fn draw_devices(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
 
     let included_devices: Vec<Asset> = list.iter().filter(|r| !app.run.excluded.contains(&r.asset.id)).map(|r| r.asset.clone()).collect();
     let mismatched = RunRisks::of(&included_devices, script_language.as_deref()).wrong_os;
-    let mut summary = vec![];
+    // What matters first: the things that look risky, then how many are selected.
+    let mut parts: Vec<Span<'static>> = vec![];
+    let mut add = |text: String, style: Style| {
+        if !parts.is_empty() {
+            parts.push(Span::styled(" · ", Style::new().fg(DIM)));
+        }
+        parts.push(Span::styled(text, style));
+    };
     if offline > 0 {
-        summary.push(Span::styled(format!(" {offline} offline · "), Style::new().fg(WARN)));
+        add(format!("{offline} offline"), Style::new().fg(WARN));
     }
     if mismatched > 0 {
-        summary.push(Span::styled(format!(" {mismatched} OS? · "), Style::new().fg(WARN)));
+        add(format!("{mismatched} OS?"), Style::new().fg(WARN));
     }
-    summary.push(Span::styled(format!(" {included} of {} selected ", list.len()), Style::new().fg(DIM)));
-    let title_bottom = Line::from(summary);
+    add(format!("{included} of {} selected", list.len()), Style::new().fg(DIM));
+    let title_bottom = theme::footer(parts);
     let table = Table::new(rows, widths)
         .column_spacing(2)
         .header(Row::new(headers).style(Style::new().fg(DIM).add_modifier(Modifier::BOLD)))
@@ -416,7 +439,7 @@ pub fn draw_picker(frame: &mut Frame, area: Rect, app: &mut App) {
         .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(Style::new().fg(ACCENT))
         .title(Line::from([vec![Span::styled("┤ ", Style::new().fg(ACCENT))], title, vec![Span::styled(" ├", Style::new().fg(ACCENT))]].concat()))
-        .title_bottom(Line::styled(hints, Style::new().fg(DIM)));
+        .title_bottom(theme::footer_text(hints));
     let inner = outer.inner(popup);
     frame.render_widget(outer, popup);
 

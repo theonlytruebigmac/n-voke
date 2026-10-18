@@ -22,9 +22,11 @@ use ratatui::{
 };
 use tokio::runtime::Handle;
 
-use crate::{input::TextInput, picker::PickItem, ui};
+use crate::{input::TextInput, output_view::Viewer, picker::PickItem, ui};
 
 pub(crate) mod run;
+pub(crate) mod viewer;
+pub use viewer::TOAST_TICKS;
 pub use run::{NoticeKind, RunField, RunPane, RunState};
 
 /// Also the animation frame rate: spinners and the logo shimmer advance once per tick.
@@ -178,6 +180,12 @@ pub struct App {
     core: Arc<Core>,
     collections: Arc<Collections>,
     pub run: RunState,
+    /// The full-screen output reader.
+    pub viewer: Option<Viewer>,
+    /// Raw terminal sequences to send before the next draw (for the clipboard).
+    pub(crate) outbox: Vec<String>,
+    /// Where saved output goes (the downloads folder; tests point it somewhere disposable).
+    pub(crate) export_dir: std::path::PathBuf,
     /// N-able has refused the saved API key (expired or revoked), as far as we have seen.
     pub key_rejected: bool,
     runtime: Handle,
@@ -222,6 +230,9 @@ impl App {
             core,
             collections,
             run: RunState::default(),
+            viewer: None,
+            outbox: vec![],
+            export_dir: viewer::export_dir(),
             key_rejected: false,
             runtime,
             tx,
@@ -260,11 +271,27 @@ impl App {
         while !self.quit {
             terminal.draw(|frame| ui::draw(frame, &mut self))?;
             match self.rx.recv() {
-                Ok(event) => self.update(event),
+                Ok(event) => {
+                    self.update(event);
+                    self.flush_outbox();
+                }
                 Err(_) => break,
             }
         }
         Ok(())
+    }
+
+    /// Sends queued raw sequences (clipboard requests) to the terminal.
+    fn flush_outbox(&mut self) {
+        if self.outbox.is_empty() {
+            return;
+        }
+        use std::io::Write;
+        let mut out = io::stdout();
+        for sequence in self.outbox.drain(..) {
+            let _ = out.write_all(sequence.as_bytes());
+        }
+        let _ = out.flush();
     }
 
     /// Reading terminal events blocks, so it gets its own thread. `poll` with a
@@ -433,6 +460,9 @@ impl App {
                 self.sync_jobs();
             }
             return; // any other key cancels
+        }
+        if self.viewer.is_some() {
+            return self.on_viewer_key(key);
         }
         if self.show_dry_log {
             return self.on_dry_log_key(key);
@@ -625,6 +655,7 @@ impl App {
             (Pane::Jobs, KeyCode::PageUp) => self.move_job(-10),
             (Pane::Jobs, KeyCode::Home | KeyCode::Char('g')) => self.select_job(0),
             (Pane::Jobs, KeyCode::End | KeyCode::Char('G')) => self.select_job(self.job_list.len().saturating_sub(1)),
+            (Pane::Results, KeyCode::Enter | KeyCode::Char('o')) => self.open_viewer(),
             (Pane::Results, KeyCode::Down | KeyCode::Char('j')) => self.move_group(1),
             (Pane::Results, KeyCode::Up | KeyCode::Char('k')) => self.move_group(-1),
             (Pane::Results, KeyCode::PageDown) => self.output_scroll = self.output_scroll.saturating_add(8),
