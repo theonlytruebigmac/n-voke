@@ -61,42 +61,7 @@ fn draw_main(frame: &mut Frame, area: Rect, app: &mut App) {
         Page::Settings => draw_settings(frame, content, app, focused),
     }
 
-    let hints: &[(&str, &str)] = match (app.focus, app.page) {
-        (Focus::Sidebar, p) if p.interactive() => &[("↑↓", "page"), ("→", "open"), ("?", "help"), ("q", "quit")],
-        (Focus::Sidebar, _) => &[("↑↓", "page"), ("?", "help"), ("q", "quit")],
-        (Focus::Content, Page::Tags) if app.tag_form.as_ref().is_some_and(|f| f.editing) => &[("type", "edit"), ("enter", "done"), ("tab", "next field"), ("esc", "done")],
-        (Focus::Content, Page::Tags) if app.tag_form.is_some() && app.picker.is_none() => &[("↑↓", "field"), ("enter", "choose/edit"), ("←→", "part/switch"), ("+", "add row"), ("x", "remove row"), ("esc", "leave")],
-        (Focus::Content, Page::Tags) if app.picker.is_some() => &[("type", "search"), ("↑↓", "move"), ("enter", "add/remove"), ("esc", "done")],
-        (Focus::Content, Page::Tags) if app.tags.searching => &[("type", "filter"), ("enter", "done"), ("esc", "clear")],
-        (Focus::Content, Page::Tags) if app.tags.pane == crate::app::TagsPane::Devices => &[("↑↓", "device"), ("space", "tick"), ("a", "all"), ("x", "remove"), ("+", "add"), ("R", "run script"), ("←", "back")],
-        (Focus::Content, Page::Tags) => &[("↑↓", "tag"), ("/", "search"), ("→", "devices"), ("n", "new"), ("e", "edit"), ("+", "add devices"), ("x", "delete"), ("R", "run script"), ("←", "back")],
-        (Focus::Content, Page::Run) if app.picker.is_some() => &[("type", "search"), ("↑↓", "move"), ("enter", "choose"), ("esc", "close")],
-        (Focus::Content, Page::Run) if app.run.editing => &[("type", "edit"), ("enter", "done"), ("esc", "done"), ("tab", "next field")],
-        (Focus::Content, Page::Run) if app.run.pane == crate::app::RunPane::Devices => &[("↑↓", "device"), ("space", "include/leave out"), ("a", "all/none"), ("←", "back to form")],
-        (Focus::Content, Page::Run) => &[("↑↓", "field"), ("enter", "choose/edit"), ("→", "devices"), ("←", "back"), ("?", "help")],
-        (Focus::Content, Page::Activity) if app.pane == Pane::Results => &[("↑↓", "group"), ("enter", "read the output"), ("PgUp/PgDn", "scroll"), ("←", "back"), ("?", "help")],
-        (Focus::Content, Page::Activity) => &[("↑↓", "run"), ("→", "results"), ("s", "stop"), ("w", "watch"), ("R", "run again"), ("F", "re-run failed"), ("T", "tag devices"), ("W", "watch task"), ("x", "remove"), ("←", "back")],
-        (Focus::Content, Page::Audit) => &[("↑↓", "move"), ("PgUp/PgDn", "jump"), ("r", "refresh"), ("←", "back"), ("?", "help")],
-        (Focus::Content, _) => &[("enter", "edit"), ("←", "back"), ("?", "help"), ("q", "quit")],
-    };
-    let viewer_hints: Vec<(&str, &str)> = match &app.viewer {
-        _ if app.watch.is_some() => vec![("esc", "cancel"), ("enter", "watch"), ("paste", "the task ID")],
-        Some(v) if v.searching => vec![("esc", "cancel"), ("enter", "find"), ("type", "search")],
-        Some(v) => {
-            // Most important first: a narrow window cuts the end of the line, and what must never go is the way out.
-            let mut h = vec![("esc", "close"), ("↑↓", "scroll"), ("PgUp/PgDn", "page")];
-            if v.task_ids.len() > 1 {
-                h.push(("←→", "device"));
-            }
-            h.extend([("/", "search"), ("n/N", "next/prev"), ("w", "wrap"), ("y", "copy"), ("e", "save")]);
-            h
-        }
-        None => vec![],
-    };
-    let hints: &[(&str, &str)] = if app.viewer.is_some() || app.watch.is_some() { &viewer_hints } else { hints };
-    let dry_hint = [("d", "held-back changes")];
-    let hints: Vec<(&str, &str)> = if app.is_dry_run() { hints.iter().chain(dry_hint.iter()).copied().collect() } else { hints.to_vec() };
-    let hints = hints.as_slice();
+    let hints = crate::help::footer_hints(app);
     let flash = app.flash.as_ref().filter(|(_, at)| app.tick.saturating_sub(*at) < 50);
     if let (None, Some((notice, _))) = (&app.confirm, flash) {
         let color = if notice.kind == crate::app::NoticeKind::Error { ERR } else { ACCENT };
@@ -109,7 +74,7 @@ fn draw_main(frame: &mut Frame, area: Rect, app: &mut App) {
         ]);
         frame.render_widget(Paragraph::new(prompt), footer);
     } else {
-        frame.render_widget(Paragraph::new(theme::key_hints(hints)), footer);
+        frame.render_widget(Paragraph::new(theme::fit_hints(&hints, footer.width as usize)), footer);
     }
 
     if app.watch.is_some() {
@@ -121,7 +86,22 @@ fn draw_main(frame: &mut Frame, area: Rect, app: &mut App) {
     } else if app.show_dry_log {
         draw_dry_log(frame, area, app);
     } else if app.show_help {
-        draw_help(frame, area);
+        draw_help(frame, area, app);
+    }
+}
+
+/// Where the user is: the page, and the view inside it when there is one, so a full-screen view is never anonymous.
+pub(crate) fn breadcrumb(app: &App) -> String {
+    let page = app.page.title();
+    if app.viewer.is_some() {
+        return format!("{page} / Output");
+    }
+    match (&app.tag_form, app.page) {
+        (Some(form), Page::Tags) => match (&form.mode, &form.tag) {
+            (crate::app::FormMode::Edit, Some(tag)) => format!("{page} / Edit {}", tag.name),
+            _ => format!("{page} / New tag"),
+        },
+        _ => page.to_string(),
     }
 }
 
@@ -150,7 +130,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
         Span::raw("  "),
     ];
     left.extend("N-voke".chars().enumerate().map(|(i, c)| Span::styled(c.to_string(), bar.fg(theme::shimmer(i, app.tick)).add_modifier(Modifier::BOLD))));
-    left.push(Span::styled(format!("  /  {}", app.page.title()), bar.fg(DIM)));
+    left.push(Span::styled(format!("  /  {}", breadcrumb(app)), bar.fg(DIM)));
     if app.is_dry_run() {
         // Loud on purpose: it must be obvious at a glance that nothing is being sent.
         left.push(Span::raw("   "));
@@ -303,6 +283,8 @@ fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
                 Line::from(""),
                 Line::styled("No runs yet.", Style::new().fg(TEXT).add_modifier(Modifier::BOLD)),
                 Line::from(""),
+                Line::styled("Start one from Run (press 1), or follow a run started elsewhere with W.", Style::new().fg(TEXT)),
+                Line::from(""),
                 Line::styled("Runs started in the desktop app show up here too: both share one history.", Style::new().fg(DIM)),
             ]
         } else {
@@ -314,7 +296,8 @@ fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
 
     // Side by side when there is room, stacked otherwise.
     let [jobs_area, detail_area] = if area.width >= 100 {
-        Layout::horizontal([Constraint::Fill(3), Constraint::Fill(2)]).areas(area)
+        // Three fifths for the list, but no wider than it can use: on a very wide terminal the rest goes to the detail.
+        Layout::horizontal([Constraint::Length((area.width * 3 / 5).min(96)), Constraint::Fill(1)]).areas(area)
     } else {
         // The list only needs its rows (plus borders, header and the footer line), and the rest is for the
         // run's detail, where the output is. Never more than 40% however many runs there are.
@@ -377,26 +360,40 @@ fn draw_job_list(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
     frame.render_stateful_widget(table, area, &mut app.job_table);
 }
 
-fn count_spans(counts: &PhaseCounts) -> Vec<Span<'static>> {
-    let parts = [
+fn count_parts(counts: &PhaseCounts) -> Vec<(usize, TaskPhase, &'static str)> {
+    [
         (counts.succeeded, TaskPhase::Succeeded, "passed"),
         (counts.non_zero, TaskPhase::NonZero, "non-zero"),
         (counts.failed, TaskPhase::Failed, "didn't run"),
         (counts.running, TaskPhase::Running, "running"),
         (counts.queued, TaskPhase::Queued, "waiting"),
         (counts.stopped, TaskPhase::Stopped, "not watched"),
-    ];
-    parts
-        .iter()
-        .filter(|(n, _, _)| *n > 0)
-        .enumerate()
-        .flat_map(|(i, (n, phase, label))| {
-            // A still dot for "running": the summary doesn't animate, the list does.
-            let glyph = if *phase == TaskPhase::Running { "●" } else { phase_glyph(*phase, 0) };
-            let counted = Span::styled(format!("{glyph} {n} {label}"), Style::new().fg(phase_color(*phase)));
-            if i == 0 { vec![counted] } else { vec![Span::raw("  "), counted] }
-        })
-        .collect()
+    ]
+    .into_iter()
+    .filter(|(n, _, _)| *n > 0)
+    .collect()
+}
+
+fn count_spans(counts: &PhaseCounts) -> Vec<Span<'static>> {
+    count_spans_in(counts, usize::MAX)
+}
+
+/// The counts as coloured text, joined by " · ". With words if they fit in `max` columns, else as
+/// just a symbol and a number each (still readable: the symbols are the ones used everywhere else).
+fn count_spans_in(counts: &PhaseCounts, max: usize) -> Vec<Span<'static>> {
+    let parts = count_parts(counts);
+    let glyph = |phase: TaskPhase| if phase == TaskPhase::Running { "●" } else { phase_glyph(phase, 0) };
+    let full: Vec<String> = parts.iter().map(|(n, p, label)| format!("{} {n} {label}", glyph(*p))).collect();
+    let full_width = full.iter().map(|s| s.chars().count()).sum::<usize>() + 3 * full.len().saturating_sub(1);
+    let texts: Vec<String> = if full_width <= max { full } else { parts.iter().map(|(n, p, _)| format!("{}{n}", glyph(*p))).collect() };
+    let mut out = vec![];
+    for (i, (text, (_, phase, _))) in texts.into_iter().zip(parts.iter()).enumerate() {
+        if i > 0 {
+            out.push(Span::styled(" · ", Style::new().fg(DIM)));
+        }
+        out.push(Span::styled(text, Style::new().fg(phase_color(*phase))));
+    }
+    out
 }
 
 fn draw_job_detail(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
@@ -457,7 +454,7 @@ fn draw_job_detail(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) 
         .block({
             let block = panel("results", focused);
             // With no room for the summary, the counts live here so they are never lost.
-            if summary_h == 0 { block.title_bottom(theme::footer(count_spans(&app.counts).into_iter().filter(|s| !s.content.trim().is_empty()).collect())) } else { block }
+            if summary_h == 0 { block.title_bottom(theme::footer(count_spans_in(&app.counts, (results_area.width as usize).saturating_sub(8)))) } else { block }
         });
     frame.render_stateful_widget(table, results_area, &mut app.group_table);
 
@@ -565,6 +562,23 @@ pub(crate) fn truncate(text: &str, width: usize) -> String {
     } else {
         text.chars().take(width.saturating_sub(1)).chain(std::iter::once('…')).collect()
     }
+}
+
+/// An RFC 3339 time shown in the viewer's own time zone ("2026-10-18 14:51:19"), so it agrees with the
+/// clock in the header. Anything that doesn't parse is shown as it came.
+pub(crate) fn local_time(text: &str) -> String {
+    match parse_time(text) {
+        Some(t) => format_local(t, &Local),
+        None => text.to_string(),
+    }
+}
+
+/// A UTC time in the given zone.
+pub(crate) fn format_local<Tz: chrono::TimeZone>(t: DateTime<Utc>, zone: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    t.with_timezone(zone).format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
 pub(crate) fn parse_time(text: &str) -> Option<DateTime<Utc>> {
@@ -702,7 +716,7 @@ fn draw_audit(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
     let inner_width = table_area.width.saturating_sub(2) as usize;
     let show_action = inner_width >= 90;
     let mut widths = vec![Constraint::Length(19), Constraint::Length(1)];
-    let mut headers = vec!["When", ""];
+    let mut headers = vec!["When (local)", ""];
     if show_action {
         widths.push(Constraint::Length(16));
         headers.push("Action");
@@ -716,7 +730,7 @@ fn draw_audit(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
     let rows = log.entries.iter().map(|e| {
         let (mark, color) = if e.outcome == "ok" { ("✓", OK) } else { ("✗", ERR) };
         let mut cells = vec![
-            Cell::from(e.timestamp.replace('T', " ").trim_end_matches('Z').to_string()).style(Style::new().fg(DIM)),
+            Cell::from(local_time(&e.timestamp)).style(Style::new().fg(DIM)),
             Cell::from(mark).style(Style::new().fg(color)),
         ];
         if show_action {
@@ -748,7 +762,12 @@ fn draw_audit(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
     let label = |text: &str| Span::styled(format!("{text:<9}"), Style::new().fg(DIM));
     let mut lines = vec![];
     if let Some(entry) = app.audit_table.selected().and_then(|i| log.entries.get(i)) {
-        lines.push(Line::from(vec![label("When"), Span::raw(entry.timestamp.clone())]));
+        // Local time, and the exact UTC time the log holds too when it fits on the line (it must never wrap and push the rest out).
+        let mut when = vec![label("When"), Span::raw(local_time(&entry.timestamp))];
+        if detail_area.width >= 64 {
+            when.push(Span::styled(format!("   ({})", entry.timestamp), Style::new().fg(DIM)));
+        }
+        lines.push(Line::from(when));
         lines.push(Line::from(vec![label("User"), Span::raw(entry.user.clone())]));
         lines.push(Line::from(vec![label("Action"), Span::styled(entry.action.clone(), Style::new().fg(action_color(&entry.action)))]));
         lines.push(Line::from(vec![label("Summary"), Span::raw(entry.summary.clone())]));
@@ -763,61 +782,82 @@ fn draw_audit(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
 // ---- settings ----------------------------------------------------------------
 
 fn draw_settings(frame: &mut Frame, area: Rect, app: &App, focused: bool) {
-    let block = panel("settings", focused);
+    let block = theme::panel_padded("settings", focused);
     let Some(s) = &app.settings else {
         frame.render_widget(Paragraph::new("Loading…").block(block), area);
         return;
     };
     let yes_no = |b: bool| if b { Span::styled("● yes", Style::new().fg(OK)) } else { Span::styled("○ no", Style::new().fg(ERR)) };
-    let label = |text: &str| Span::styled(format!(" {text:<20}"), Style::new().fg(DIM));
+    let label = |text: &str| Span::styled(format!("{text:<20}"), Style::new().fg(DIM));
+    let heading = |text: &str| Line::styled(text.to_string(), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD));
     let history = if s.history_days == 0 { "not saved".to_string() } else { format!("{} days", s.history_days) };
     let mode = if app.is_dry_run() {
         Span::styled("DRY RUN: changes are held back, not sent", Style::new().fg(WARN).add_modifier(Modifier::BOLD))
     } else {
         Span::styled("live", Style::new().fg(TEXT))
     };
+    let key_status = if app.key_rejected {
+        Span::styled("✗ rejected by N-able: expired or revoked", Style::new().fg(ERR).add_modifier(Modifier::BOLD))
+    } else {
+        Span::styled("no problems seen", Style::new().fg(DIM))
+    };
+    let action = |key: &str, what: &str| Line::from(vec![Span::styled(format!("  {key:<8}"), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)), Span::styled(what.to_string(), Style::new().fg(TEXT))]);
+
     let mut lines = vec![
-        Line::from(""),
+        heading("Connection"),
         Line::from(vec![label("Mode"), mode]),
         Line::from(vec![label("API endpoint"), Span::styled(s.api_url.clone(), Style::new().fg(TEXT))]),
-        Line::from(vec![label("API key saved"), yes_no(s.has_api_key)]),
-        Line::from(vec![
-            label("API key status"),
-            if app.key_rejected { Span::styled("✗ rejected by N-able: expired or revoked", Style::new().fg(ERR).add_modifier(Modifier::BOLD)) } else { Span::styled("no problems seen", Style::new().fg(DIM)) },
-        ]),
+        Line::from(vec![label("API key"), yes_no(s.has_api_key), Span::raw("   "), key_status]),
+        Line::from(""),
+        heading("This computer"),
         Line::from(vec![label("Keep run history"), Span::styled(history, Style::new().fg(TEXT))]),
         Line::from(vec![label("Encrypted at rest"), yes_no(s.encryption_available)]),
     ];
     if let Some(error) = &s.encryption_error {
-        lines.push(Line::from(""));
-        lines.push(Line::styled(format!(" {error}"), Style::new().fg(WARN)));
+        lines.push(Line::styled(error.clone(), Style::new().fg(WARN)));
     }
     if app.key_rejected {
         lines.push(Line::from(""));
-        lines.push(Line::styled(" Create a new API-Access token in the N-able dashboard, then press enter here and paste it in.", Style::new().fg(WARN)));
+        lines.push(Line::styled("Create a new API-Access token in the N-able dashboard, then press enter and paste it in.", Style::new().fg(WARN)));
     }
-    if focused {
+    // What can be done here, always visible: the keys are not only shown once the page has focus.
+    lines.push(Line::from(""));
+    lines.push(heading("Change"));
+    lines.push(action("enter", "the endpoint, the API key, or how long run history is kept"));
+    lines.push(action("c", "clear saved run history and cached data"));
+    if !focused {
         lines.push(Line::from(""));
-        lines.push(Line::from(vec![Span::raw(" Press "), Span::styled("enter", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)), Span::raw(" to edit.")]).style(Style::new().fg(DIM)));
+        lines.push(Line::styled("Press → to work on this page.", Style::new().fg(DIM)));
     }
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }).block(block), area);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), area);
 }
 
 // ---- first launch / edit form ------------------------------------------------
 
 fn draw_form(frame: &mut Frame, area: Rect, form: &SettingsForm) {
     let title = if form.first_run { "Welcome to N-voke" } else { "Edit settings" };
-    let popup = centered(area, 72, 14);
+    // As tall as its contents, and no taller: a popup with a big empty middle looks unfinished.
+    let height = if form.first_run { 13 } else { 14 };
+    let popup = centered(area, 72, height);
     clear(frame, popup);
-    let outer = panel(title, true);
+    let outer = panel_padded(title, true);
     let inner = outer.inner(popup);
     frame.render_widget(outer, popup);
 
-    let [intro, endpoint, token, message, hints] =
-        Layout::vertical([Constraint::Length(2), Constraint::Length(3), Constraint::Length(3), Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
+    let intro_rows = if form.first_run { 3 } else { 1 };
+    let history_rows = if form.first_run { 0 } else { 3 };
+    let [intro, endpoint, token, history, message, hints] = Layout::vertical([
+        Constraint::Length(intro_rows),
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Length(history_rows),
+        Constraint::Fill(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
 
     let intro_text = if form.first_run {
-        "Paste an API-Access token from the N-able dashboard. It is stored in your system keychain."
+        "Paste an API-Access token from the N-able dashboard. It is kept in your system keychain and never shown. Use your terminal's paste shortcut (often ctrl-shift-v)."
     } else {
         "Leave the token empty to keep the saved one."
     };
@@ -825,8 +865,25 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &SettingsForm) {
 
     let cursor = draw_field(frame, endpoint, "API endpoint", &form.endpoint, form.focus == Field::Endpoint);
     let token_cursor = draw_field(frame, token, "API token", &form.token, form.focus == Field::Token);
+    if !form.first_run {
+        let focused = form.focus == Field::History;
+        let border = Style::new().fg(if focused { ACCENT } else { BORDER });
+        let block = Block::bordered().border_type(BorderType::Rounded).title(" Keep run history ").border_style(border);
+        let value = if form.history_days == 0 { "not saved".to_string() } else { format!("{} days", form.history_days) };
+        let line = Line::from(vec![
+            Span::styled("‹ ", Style::new().fg(if focused { ACCENT } else { DIM })),
+            Span::styled(value, Style::new().fg(TEXT).add_modifier(Modifier::BOLD)),
+            Span::styled(" ›", Style::new().fg(if focused { ACCENT } else { DIM })),
+            Span::styled(if focused { "   ← → to change" } else { "" }, Style::new().fg(DIM)),
+        ]);
+        frame.render_widget(Paragraph::new(line).block(block), history);
+    }
     if !form.busy {
-        frame.set_cursor_position(if form.focus == Field::Endpoint { cursor } else { token_cursor });
+        match form.focus {
+            Field::Endpoint => frame.set_cursor_position(cursor),
+            Field::Token => frame.set_cursor_position(token_cursor),
+            Field::History => {}
+        }
     }
 
     let (text, color) = match (&form.error, form.busy) {
@@ -837,7 +894,7 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &SettingsForm) {
     frame.render_widget(Paragraph::new(text).style(Style::new().fg(color)).wrap(Wrap { trim: true }), message);
 
     let esc = if form.first_run { "quit" } else { "cancel" };
-    frame.render_widget(Paragraph::new(theme::key_hints(&[("↑↓/tab", "switch field"), ("enter", "save"), ("esc", esc)])), hints);
+    frame.render_widget(Paragraph::new(theme::key_hints(&[("enter", "save"), ("↑↓/tab", "next field"), ("esc", esc)])), hints);
 }
 
 /// Draws a labelled text field and returns where the cursor goes if it has focus.
@@ -878,7 +935,8 @@ fn draw_dry_log(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let [list_area, detail_area] = Layout::horizontal([Constraint::Percentage(40), Constraint::Fill(1)]).areas(inner);
     let rows = entries.iter().map(|e| {
-        let time = e.timestamp.split('T').nth(1).unwrap_or("").trim_end_matches('Z').to_string();
+        // Local time of day, like the clock in the header.
+        let time = local_time(&e.timestamp).split_once(' ').map(|(_, t)| t.to_string()).unwrap_or_default();
         Row::new(vec![Cell::from(time).style(Style::new().fg(DIM)), Cell::from(truncate(&e.summary, (list_area.width as usize).saturating_sub(14))).style(Style::new().fg(TEXT))])
     });
     let table = Table::new(rows, [Constraint::Length(8), Constraint::Fill(1)])
@@ -926,57 +984,55 @@ fn draw_watch(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(status).wrap(Wrap { trim: false }), message);
 }
 
-fn draw_help(frame: &mut Frame, area: Rect) {
-    let popup = centered(area, 72, 46);
+fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
+    let sections = crate::help::help_sections(app);
+    let key_width = sections.iter().flat_map(|s| s.keys.iter()).map(|(k, _)| k.chars().count()).max().unwrap_or(8).clamp(8, 16);
+    let mut lines: Vec<Line> = vec![];
+    for (i, s) in sections.iter().enumerate() {
+        if i > 0 {
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::styled(format!(" {}", s.title), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)));
+        for (k, what) in &s.keys {
+            lines.push(Line::from(vec![Span::styled(format!("  {k:<w$}  ", w = key_width), Style::new().fg(TEXT).add_modifier(Modifier::BOLD)), Span::styled(what.to_string(), Style::new().fg(TEXT))]));
+        }
+    }
+    let width = area.width.saturating_sub(6).min(86);
+    let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(2));
+    let popup = centered(area, width, height);
     clear(frame, popup);
-    let key = |k: &str, what: &str| Line::from(vec![Span::styled(format!(" {k:<14}"), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)), Span::styled(what.to_string(), Style::new().fg(TEXT))]);
-    let heading = |text: &str| Line::styled(format!(" {text}"), Style::new().fg(DIM).add_modifier(Modifier::BOLD));
-    let lines = vec![
-        heading("Anywhere"),
-        key("1-5, tab", "switch page"),
-        key("?", "this help"),
-        key("q, ctrl-c", "quit"),
-        Line::from(""),
-        heading("Menu"),
-        key("↑ ↓", "choose a page"),
-        key("→ enter", "step into the page"),
-        Line::from(""),
-        heading("Run"),
-        key("↑ ↓", "field · enter chooses or edits"),
-        key("→", "devices (space leaves one out, a all/none)"),
-        key("enter ×2", "confirm and run (d lists a dry run)"),
-        Line::from(""),
-        heading("Reading output (enter on a result)"),
-        key("↑ ↓ PgUp PgDn", "scroll · home/end for the ends"),
-        key("← →", "previous / next device in the group"),
-        key("/  n  N", "search · next · previous match"),
-        key("w  < >", "wrap lines · scroll sideways when not wrapped"),
-        key("y  e", "copy to clipboard · save to a file"),
-        Line::from(""),
-        heading("Tags"),
-        key("↑ ↓  /", "choose a tag · search by name"),
-        key("→ then space", "tick devices (static tags) · a all · x remove"),
-        key("+  n  e  x", "add devices · new tag · edit · delete"),
-        key("R", "run a script on the tag's devices"),
-        Line::from(""),
-        heading("Activity"),
-        key("→ / ←", "runs ⇄ results ⇄ menu"),
-        key("s w x", "stop watching / watch / remove"),
-        key("R  F", "run again / re-run failed"),
-        key("T  W", "tag these devices · watch a task by its ID"),
-        Line::from(""),
-        heading("Inside a page"),
-        key("↑ ↓", "move (j/k work too)"),
-        key("PgUp PgDn", "jump ten rows"),
-        key("home end", "first / last (g/G)"),
-        key("← esc", "back to the menu"),
-        key("r", "refresh"),
-    ];
-    frame.render_widget(Paragraph::new(lines).block(panel("keys", true).title_bottom(theme::footer_text("any key closes"))), popup);
+    let rows = height.saturating_sub(2) as usize;
+    // The width the descriptions wrap at, to count rows honestly.
+    let text_width = width.saturating_sub(2) as usize;
+    let total: usize = lines.iter().map(|l| l.width().max(1).div_ceil(text_width.max(1))).sum();
+    let max_scroll = total.saturating_sub(rows);
+    app.help_scroll = app.help_scroll.min(max_scroll as u16);
+    let footer = if max_scroll > 0 { format!("↑↓ scroll · esc closes · {}%", if max_scroll == 0 { 100 } else { app.help_scroll as usize * 100 / max_scroll }) } else { "esc closes".to_string() };
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((app.help_scroll, 0)).block(panel("keys", true).title_bottom(theme::footer_text(&footer))), popup);
 }
 
-/// Blanks an area for a popup. `Clear` also resets the background, so it is repainted.
+/// Blanks an area for a popup, and dims everything else so the popup reads as being over the page.
+/// (Without that, the page shows through and around it, which looks broken and makes it hard to focus.)
 pub(crate) fn clear(frame: &mut Frame, area: Rect) {
+    let whole = frame.area();
+    let buffer = frame.buffer_mut();
+    for y in whole.top()..whole.bottom() {
+        for x in whole.left()..whole.right() {
+            if x >= area.left() && x < area.right() && y >= area.top() && y < area.bottom() {
+                continue;
+            }
+            let cell = &mut buffer[(x, y)];
+            cell.set_fg(theme::recede(cell.fg, 0.62));
+            if matches!(cell.bg, Color::Rgb(..)) {
+                cell.set_bg(theme::recede(cell.bg, 0.45));
+            }
+        }
+    }
+    clear_plain(frame, area);
+}
+
+/// Blanks an area without dimming anything (for a view that has its own chrome around it).
+pub(crate) fn clear_plain(frame: &mut Frame, area: Rect) {
     frame.render_widget(Clear, area);
     frame.render_widget(Block::new().style(theme::background()), area);
 }
@@ -1245,8 +1301,9 @@ mod tests {
         for expected in ["BitlockerPreChecker", "Cleanup temp files", "38/40", "3 runs · 1 running", "31 passed", "7 non-zero", "2 waiting", "Non-zero exit", "watching 1 run"] {
             assert!(screen.contains(expected), "missing {expected:?}:\n{screen}");
         }
-        // The headline doesn't fit beside the counts, so it must end in an ellipsis, not stop mid-word.
-        assert!(screen.contains("Fail - TPM…") || screen.contains("Fail - TPM n…") || screen.contains("Fail - TPM no…"), "{screen}");
+        // A headline is either shown whole or ends in an ellipsis: never cut off mid-word without one.
+        let headline = screen.lines().find_map(|l| l.find("Fail - TPM").map(|i| l[i..].trim_end_matches(['│', ' ']).to_string())).expect("the headline is shown");
+        assert!(headline.starts_with("Fail - TPM not present") || headline.contains('…'), "{headline:?}");
     }
 
     #[test]
@@ -1440,7 +1497,7 @@ mod tests {
     fn an_empty_run_form_says_what_to_do_first() {
         let (_rt, mut app) = run_tests::run_app();
         let screen = text_of(&draw_at(&mut app, 130, 30));
-        for expected in ["run a script", "choose an organization", "Run  ·  Choose an organization", "Choose who to run on and the devices appear here"] {
+        for expected in ["run a script", "choose an organization", "How a run works", "→ Choose an organization", "○ Choose a script", "○ Review the devices", "The devices appear here"] {
             assert!(screen.contains(expected), "missing {expected:?}:\n{screen}");
         }
     }
@@ -1767,6 +1824,7 @@ mod tests {
     // ---- boundaries and structure -----------------------------------------------------
 
     use crate::app::viewer::tests as viewer_tests;
+    use chrono::TimeZone;
 
     /// The text of every title "chip" on screen: runs of cells drawn on the accent colour.
     fn chips(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
@@ -2377,5 +2435,383 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ---- screenshot gallery ---------------------------------------------------------------------------
+
+    /// Writes every screen, at a few sizes, as JSON for `tools/render_screens.py` (see its docstring).
+    /// Ignored by default: it exists so a person (or a review) can look at the screens.
+    #[test]
+    #[ignore = "writes screenshots: NVOKE_SHOTS=<dir> cargo test -- --ignored gallery"]
+    fn gallery() {
+        let dir = std::env::var("NVOKE_SHOTS").unwrap_or_else(|_| std::env::temp_dir().join("nvoke-shots").display().to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+        let shot = |name: &str, app: &mut App, w: u16, h: u16| {
+            app.tick = 2; // a fixed moment of the animations, so shots are repeatable
+            let b = draw_at(app, w, h);
+            let color = |c: Color| match c {
+                Color::Rgb(r, g, b) => format!("{r},{g},{b}"),
+                _ => "none".into(),
+            };
+            let mut cells = vec![];
+            for y in 0..h {
+                for x in 0..w {
+                    let c = &b[(x, y)];
+                    cells.push(serde_json::json!([c.symbol(), color(c.fg), color(c.bg), c.modifier.contains(ratatui::style::Modifier::BOLD)]));
+                }
+            }
+            std::fs::write(format!("{dir}/{name}.json"), serde_json::json!({ "w": w, "h": h, "cells": cells }).to_string()).unwrap();
+        };
+
+        // First launch.
+        let (_rt, mut a) = app();
+        a.screen = Screen::Form(SettingsForm::new(&settings(false)));
+        shot("01_welcome", &mut a, 120, 30);
+
+        // Run.
+        let (_rt, mut a) = run_tests::run_app();
+        shot("02_run_empty", &mut a, 120, 34);
+        let (_rt, mut a) = filled_run_app();
+        a.run.values.insert("n".into(), FieldValue::Text("abc".into()));
+        a.run.show_errors = true;
+        a.run.field = RunField::Input(0);
+        shot("03_run_filled", &mut a, 120, 34);
+        shot("03b_run_filled_small", &mut a, 80, 24);
+        let (_rt, mut a) = run_tests::run_app();
+        run_tests::press(&mut a, KeyCode::Enter);
+        run_tests::pump(&mut a);
+        shot("04_run_org_picker", &mut a, 120, 34);
+        let (_rt, mut a) = filled_run_app();
+        a.run.field = RunField::Targets;
+        run_tests::press(&mut a, KeyCode::Enter);
+        run_tests::pump(&mut a);
+        shot("05_run_targets_picker", &mut a, 120, 34);
+        let (_rt, mut a) = filled_run_app();
+        a.core().set_dry_run(true);
+        a.run.field = RunField::Run;
+        run_tests::press(&mut a, KeyCode::Enter);
+        shot("06_run_confirm_dry", &mut a, 120, 34);
+
+        // Activity.
+        let (_rt, mut a) = activity_app();
+        shot("07_activity", &mut a, 120, 34);
+        shot("07b_activity_small", &mut a, 80, 24);
+        shot("07c_activity_wide", &mut a, 200, 50);
+        let (_rt, mut a) = app();
+        a.settings = Some(settings(true));
+        a.screen = Screen::Main;
+        a.page = Page::Activity;
+        a.jobs.seed(vec![]);
+        shot("08_activity_empty", &mut a, 120, 30);
+
+        // The output viewer.
+        let (_rt, mut a) = viewer_tests::viewer_app();
+        viewer_tests::open(&mut a);
+        run_tests::press(&mut a, KeyCode::Char('/'));
+        run_tests::type_text(&mut a, "tpm");
+        run_tests::press(&mut a, KeyCode::Enter);
+        shot("09_viewer_search", &mut a, 120, 34);
+        let (_rt, mut a) = bitlocker_app();
+        run_tests::press(&mut a, KeyCode::Enter);
+        shot("10_viewer_nonzero", &mut a, 120, 34);
+
+        // Tags.
+        let (_rt, mut a) = tags_tests::tags_app();
+        tags_tests::settle(&mut a);
+        shot("11_tags", &mut a, 120, 34);
+        shot("11b_tags_small", &mut a, 80, 24);
+        run_tests::press(&mut a, KeyCode::Down);
+        tags_tests::settle(&mut a);
+        shot("12_tags_dynamic", &mut a, 120, 34);
+        let (_rt, mut a) = form_tests::form_app();
+        form_tests::type_into(&mut a, TagField::Name, "Servers");
+        form_tests::choose_org(&mut a, "Acme Corp");
+        shot("13_tag_form_static", &mut a, 120, 34);
+        form_tests::form_mut(&mut a).field = TagField::Kind;
+        run_tests::press(&mut a, KeyCode::Char(' '));
+        form_tests::form_mut(&mut a).field = TagField::Condition(0);
+        form_tests::form_mut(&mut a).part = crate::app::CondPart::Value;
+        run_tests::press(&mut a, KeyCode::Enter);
+        run_tests::type_text(&mut a, "LAPTOP");
+        run_tests::press(&mut a, KeyCode::Enter);
+        let (seq, key) = form_tests::preview_ids(&a);
+        form_tests::deliver_preview(&mut a, seq, &key, Ok((vec![run_tests::device("a1", "LAPTOP-01", "CONNECTED", "Windows 11"), run_tests::device("a2", "LAPTOP-02", "DISCONNECTED", "Windows 10")], 27)));
+        shot("14_tag_form_dynamic", &mut a, 120, 34);
+
+        // Audit log, with a believable history.
+        let (_rt, mut a) = app();
+        a.settings = Some(settings(true));
+        a.screen = Screen::Main;
+        a.page = Page::Audit;
+        a.focus = Focus::Content;
+        let now = Utc::now();
+        let kinds = [("script.run", "Ran BitlockerPreChecker on 12 devices (PatchGroupTwo)"), ("tag.create", "Created static tag ScriptRunner_Test_Static"), ("tag.assign", "Added 3 devices to PatchGroupTwo"), ("tag.delete", "Deleted tag Old_Servers"), ("settings.history", "Keep run history for 30 days")];
+        let entries: Vec<AuditEntry> = (0..44)
+            .map(|i| {
+                let (action, summary) = kinds[i % kinds.len()];
+                let mut e = AuditEntry::new(action, summary, if i % 9 == 4 { Err("HTTP 500".into()) } else { Ok(()) }, Value::Null);
+                e.timestamp = (now - chrono::Duration::hours((i * i / 3 + i) as i64)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                e
+            })
+            .collect();
+        a.audit = Load::Ready(AuditLogView { path: "/home/dev/.local/share/com.fraziersystems.nable-script-runner/audit.jsonl".into(), entries });
+        a.audit_table.select(Some(1));
+        shot("15_audit", &mut a, 120, 34);
+
+        // Settings, help, the dry-run list, a rejected key, the watch box.
+        let (_rt, mut a) = app();
+        a.settings = Some(settings(true));
+        a.screen = Screen::Main;
+        a.page = Page::Settings;
+        shot("16_settings", &mut a, 120, 30);
+        a.show_help = true;
+        shot("17_help", &mut a, 120, 50);
+        let (_rt, mut a) = run_tests::run_app();
+        a.core().set_dry_run(true);
+        let _ = _rt.block_on(a.core().create_static_tag("o1", "Servers", "", ""));
+        a.show_dry_log = true;
+        a.dry_table.select(Some(0));
+        shot("18_dry_run_list", &mut a, 120, 34);
+        let (_rt, mut a) = run_tests::run_app();
+        a.key_rejected = true;
+        run_tests::press(&mut a, KeyCode::Enter);
+        let seq = a.picker.as_ref().unwrap().seq;
+        run_tests::deliver(&mut a, crate::app::Msg::PickResults { seq, result: Err("Access denied (HTTP 403): your API key is no longer active. It has expired or been revoked: create a new one in the N-able dashboard and replace it in Settings.".into()) });
+        shot("19_key_rejected", &mut a, 120, 34);
+        let (_rt, mut a) = viewer_tests::viewer_app();
+        run_tests::press(&mut a, KeyCode::Char('W'));
+        run_tests::type_text(&mut a, "MDFhMTUwMzgtM2VhMC03YWUxLWExYjktNjVlZWUwYzEyNWNm");
+        shot("20_watch", &mut a, 120, 34);
+    }
+
+    // ---- popups ------------------------------------------------------------------------------------------
+
+    #[test]
+    fn every_popup_dims_the_page_behind_it_and_leaves_its_own_contents_alone() {
+        let normal = |app: &mut App| draw_at(app, 120, 34);
+        let (_rt, mut base) = run_tests::run_app();
+        let calm = normal(&mut base);
+        assert_eq!(calm[(0, 0)].bg, theme::HEADER_BG, "the header bar is violet when nothing is open");
+        type Open = Box<dyn Fn(&mut App)>;
+        let popups: Vec<(&str, Open)> = vec![
+            ("help", Box::new(|a| a.show_help = true)),
+            ("picker", Box::new(|a| {
+                run_tests::press(a, KeyCode::Enter);
+                run_tests::pump(a);
+            })),
+            ("watch", Box::new(|a| run_tests::press(a, KeyCode::Char('W')))),
+            ("dry-run list", Box::new(|a| {
+                a.core().set_dry_run(true);
+                a.show_dry_log = true;
+            })),
+        ];
+        for (name, open) in popups {
+            let (_rt, mut app) = run_tests::run_app();
+            if name == "watch" {
+                run_tests::go_to(&mut app, Page::Activity);
+            }
+            open(&mut app);
+            let shown = draw_at(&mut app, 120, 34);
+            assert_ne!(shown[(0, 0)].bg, theme::HEADER_BG, "{name}: the header should recede behind the popup");
+            assert_ne!(shown[(119, 33)].fg, calm[(119, 33)].fg, "{name}: so should the footer's text");
+            // The middle of the screen is inside every popup, and is painted in the normal panel or page colour.
+            let middle = shown[(60, 17)].bg;
+            assert!(middle == theme::PANEL_BG || middle == theme::BG, "{name}: the popup's own cells must not be dimmed, got {middle:?}");
+        }
+    }
+
+    #[test]
+    fn the_output_viewer_keeps_the_header_and_hints_undimmed() {
+        let (_rt, mut app) = viewer_tests::viewer_app();
+        viewer_tests::open(&mut app);
+        let shown = draw_at(&mut app, 120, 34);
+        assert_eq!(shown[(0, 0)].bg, theme::HEADER_BG, "the viewer has its own frame and leaves the chrome as it is");
+    }
+
+    #[test]
+    fn dimming_moves_a_colour_towards_the_page_and_never_changes_one_it_cannot_dim() {
+        let Color::Rgb(r, g, b) = theme::recede(theme::TEXT, 0.6) else { panic!() };
+        let Color::Rgb(tr, tg, tb) = theme::TEXT else { panic!() };
+        assert!(r < tr && g < tg && b < tb, "darker");
+        assert_eq!(theme::recede(Color::Reset, 0.6), Color::Reset);
+        assert_eq!(theme::recede(theme::BG, 0.6), theme::BG, "the page colour is already as far back as it goes");
+    }
+
+    // ---- review fixes: layout, density, empty states -----------------------------------------------------
+
+    /// The row of the screen that holds `needle`, if any.
+    fn row_of(screen: &str, needle: &str) -> Option<usize> {
+        screen.lines().position(|l| l.contains(needle))
+    }
+
+    #[test]
+    fn run_and_tags_sit_side_by_side_at_a_normal_terminal_width() {
+        let (_rt, mut run) = run_tests::run_app();
+        let screen = text_of(&draw_at(&mut run, 120, 34));
+        assert_eq!(row_of(&screen, "┤ run a script"), row_of(&screen, "┤ devices"), "the form and its devices share a row at 120 columns:\n{screen}");
+        let (_rt, mut tags) = tags_tests::tags_app();
+        tags_tests::settle(&mut tags);
+        let screen = text_of(&draw_at(&mut tags, 120, 34));
+        assert_eq!(row_of(&screen, "┤ tags"), row_of(&screen, "┤ Servers"), "the list and the tag share a row:\n{screen}");
+        // A genuinely narrow window still stacks them.
+        let narrow = text_of(&draw_at(&mut run, 90, 34));
+        assert_ne!(row_of(&narrow, "┤ run a script"), row_of(&narrow, "┤ devices"), "{narrow}");
+    }
+
+    #[test]
+    fn the_counts_in_a_border_are_separated_and_switch_to_symbols_when_short_of_room() {
+        let (_rt, mut app) = activity_app();
+        let roomy = text_of(&draw_at(&mut app, 80, 24));
+        assert!(roomy.contains("31 passed · ! 7 non-zero · … 2 waiting"), "words, with separators, when they fit:\n{roomy}");
+        let tight = text_of(&draw_at(&mut app, 64, 24));
+        assert!(tight.contains("✓31 · !7 · …2"), "just symbols and numbers when they do not:\n{tight}");
+        assert!(!roomy.contains("passed!") && !tight.contains("✓31!"), "never run together");
+    }
+
+    #[test]
+    fn the_empty_run_page_shows_the_steps_and_ticks_them_off() {
+        let (_rt, mut app) = run_tests::run_app();
+        let start = text_of(&draw_at(&mut app, 120, 34));
+        assert!(start.contains("→ Choose an organization") && start.contains("○ Choose a script"), "{start}");
+        run_tests::press(&mut app, KeyCode::Enter);
+        run_tests::pump(&mut app);
+        run_tests::press(&mut app, KeyCode::Enter); // Acme Corp (the script picker follows by itself)
+        run_tests::press(&mut app, KeyCode::Esc);
+        let after = text_of(&draw_at(&mut app, 120, 34));
+        assert!(after.contains("✓ Choose an organization") && after.contains("→ Choose a script") && after.contains("○ Choose devices or tags"), "{after}");
+    }
+
+    #[test]
+    fn only_the_focused_devices_table_on_the_run_page_has_a_highlight() {
+        let (_rt, mut app) = filled_run_app();
+        // Well to the right of the form's own focus bar, which ends about two thirds across at this width.
+        let right_has_highlight = |b: &ratatui::buffer::Buffer| (85..120).any(|x| (0..34).any(|y| b[(x, y)].bg == SELECTED_BG));
+        assert!(!right_has_highlight(&draw_at(&mut app, 120, 34)), "the form is focused, so the table must not look focused");
+        run_tests::press(&mut app, KeyCode::Right);
+        assert!(right_has_highlight(&draw_at(&mut app, 120, 34)), "the focused table highlights its row");
+    }
+
+    #[test]
+    fn tags_show_their_organization_only_when_the_list_spans_more_than_one() {
+        let (_rt, mut app) = tags_tests::tags_app();
+        tags_tests::settle(&mut app);
+        let one = text_of(&draw_at(&mut app, 120, 34));
+        let (a, b) = (row_of(&one, "◆  Servers").unwrap(), row_of(&one, "↻  Windows10").unwrap());
+        assert_eq!(b - a, 1, "one line per tag when they are all in the same place:\n{one}");
+        let mut other = run_tests::tag("t9", "Zebra", false, 1);
+        other.organization = Some(nvoke_core::model::OrgRef { id: "o2".into(), name: "Beta Ltd".into() });
+        tags_tests::cache_tag(&app, other);
+        run_tests::press(&mut app, KeyCode::Char('u'));
+        tags_tests::settle(&mut app);
+        let many = text_of(&draw_at(&mut app, 120, 34));
+        let (a, b) = (row_of(&many, "◆  Servers").unwrap(), row_of(&many, "↻  Windows10").unwrap());
+        assert_eq!(b - a, 2, "two lines per tag, with the organization, when they differ:\n{many}");
+        assert!(many.contains("Beta Ltd"));
+    }
+
+    #[test]
+    fn empty_pages_say_what_to_do_next() {
+        let (_rt, mut app) = tags_tests::tags_app();
+        app.collections_seed_tags(vec![]);
+        tags_tests::settle(&mut app);
+        let tags = text_of(&draw_at(&mut app, 120, 30));
+        assert!(tags.contains("No tags yet.") && tags.contains("Press n to create") && tags.contains("Create your first tag with n"), "{tags}");
+
+        let (_rt, mut activity) = app_for_activity_empty();
+        let screen = text_of(&draw_at(&mut activity, 120, 30));
+        assert!(screen.contains("No runs yet.") && screen.contains("press 1") && screen.contains("W"), "{screen}");
+    }
+
+    fn app_for_activity_empty() -> (tokio::runtime::Runtime, App) {
+        let (rt, mut a) = app();
+        a.settings = Some(settings(true));
+        a.screen = Screen::Main;
+        a.page = Page::Activity;
+        a.jobs.seed(vec![]);
+        (rt, a)
+    }
+
+    #[test]
+    fn the_rule_editors_value_chip_does_not_swallow_the_row() {
+        let (_rt, mut app) = form_tests::form_app();
+        form_tests::form_mut(&mut app).field = TagField::Kind;
+        run_tests::press(&mut app, KeyCode::Char(' '));
+        form_tests::form_mut(&mut app).field = TagField::Condition(0);
+        form_tests::form_mut(&mut app).part = crate::app::CondPart::Value;
+        let b = draw_at(&mut app, 170, 34);
+        let longest_chip = (0..34u16).map(|y| (0..170u16).filter(|&x| b[(x, y)].bg == ACCENT && b[(x, y)].symbol() != "│").fold((0usize, 0usize), |(best, run), x| {
+            let on = b[(x, y)].bg == ACCENT;
+            let _ = x;
+            if on { (best.max(run + 1), run + 1) } else { (best, 0) }
+        }).0).max().unwrap();
+        assert!(longest_chip <= 32, "the selected part is a compact chip, not a bar across the row ({longest_chip} columns)");
+    }
+
+    // ---- settings, times and breadcrumbs ---------------------------------------------------------------------
+
+    #[test]
+    fn a_utc_time_is_shown_in_the_zone_it_is_asked_for() {
+        let t = Utc.with_ymd_and_hms(2026, 10, 18, 18, 51, 19).unwrap();
+        assert_eq!(format_local(t, &chrono::FixedOffset::east_opt(2 * 3600).unwrap()), "2026-10-18 20:51:19");
+        assert_eq!(format_local(t, &chrono::FixedOffset::west_opt(4 * 3600).unwrap()), "2026-10-18 14:51:19");
+        assert_eq!(format_local(t, &Utc), "2026-10-18 18:51:19");
+        // A day boundary moves the date, not just the hour.
+        assert_eq!(format_local(Utc.with_ymd_and_hms(2026, 10, 18, 23, 30, 0).unwrap(), &chrono::FixedOffset::east_opt(3 * 3600).unwrap()), "2026-10-19 02:30:00");
+        assert_eq!(local_time("not a time"), "not a time", "anything unparsable is shown as it came");
+    }
+
+    #[test]
+    fn the_audit_log_labels_its_times_as_local_and_the_details_keep_the_exact_utc_time() {
+        let (_rt, mut app) = audit_app();
+        let wide = text_of(&draw_at(&mut app, 120, 34));
+        assert!(wide.contains("When (local)"), "{wide}");
+        let utc = match &app.audit { Load::Ready(l) => l.entries[0].timestamp.clone(), _ => panic!() };
+        assert!(wide.contains(&format!("({utc})")), "the details keep the exact time as recorded:\n{wide}");
+    }
+
+    #[test]
+    fn the_settings_page_always_shows_what_can_be_changed_and_how() {
+        let (_rt, mut app) = app();
+        app.settings = Some(settings(true));
+        app.screen = Screen::Main;
+        app.page = Page::Settings;
+        let screen = text_of(&draw_at(&mut app, 120, 30));
+        for expected in ["Connection", "API endpoint", "This computer", "Keep run history", "30 days", "Change", "enter", "the endpoint, the API key, or how long run history is kept", "clear saved run history and cached data", "Press → to work on this page."] {
+            assert!(screen.contains(expected), "missing {expected:?}:\n{screen}");
+        }
+        app.focus = Focus::Content;
+        assert!(!text_of(&draw_at(&mut app, 120, 30)).contains("Press → to work"), "once you are in it, that is no longer said");
+    }
+
+    #[test]
+    fn the_edit_settings_form_has_a_retention_field_and_the_welcome_is_no_taller_than_it_needs() {
+        let (_rt, mut app) = app();
+        app.screen = Screen::Form(SettingsForm::new(&settings(true)));
+        let edit = text_of(&draw_at(&mut app, 120, 30));
+        for expected in ["Edit settings", "API endpoint", "API token", "Keep run history", "‹ 30 days ›"] {
+            assert!(edit.contains(expected), "missing {expected:?}:\n{edit}");
+        }
+        app.screen = Screen::Form(SettingsForm::new(&settings(false)));
+        let welcome = text_of(&draw_at(&mut app, 120, 30));
+        assert!(welcome.contains("Welcome to N-voke") && welcome.contains("never shown") && welcome.contains("terminal's paste"), "{welcome}");
+        assert!(!welcome.contains("Keep run history"), "the first launch asks only what it needs");
+        let rows = welcome.lines().filter(|l| l.contains('│') || l.contains('╭') || l.contains('╰')).count();
+        assert!(rows <= 13, "the welcome popup is {rows} rows tall");
+    }
+
+    #[test]
+    fn the_header_says_which_view_inside_a_page_you_are_in() {
+        let (_rt, mut app) = tags_tests::tags_app();
+        assert_eq!(breadcrumb(&app), "Tags");
+        run_tests::press(&mut app, KeyCode::Char('n'));
+        assert_eq!(breadcrumb(&app), "Tags / New tag");
+        assert!(text_of(&draw_at(&mut app, 120, 30)).contains("/  Tags / New tag"));
+        run_tests::press(&mut app, KeyCode::Esc);
+        tags_tests::settle(&mut app);
+        run_tests::press(&mut app, KeyCode::Char('e'));
+        assert_eq!(breadcrumb(&app), "Tags / Edit Servers");
+        let (_rt, mut viewer) = viewer_tests::viewer_app();
+        viewer_tests::open(&mut viewer);
+        assert_eq!(breadcrumb(&viewer), "Activity / Output");
     }
 }

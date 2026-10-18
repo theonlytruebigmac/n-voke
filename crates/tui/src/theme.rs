@@ -38,6 +38,14 @@ pub const SCRIPT: Color = Color::Rgb(204, 170, 255);
 /// Lines and bars (at least 3:1 against BG, the AA bar for graphics).
 pub const BORDER: Color = Color::Rgb(126, 106, 192);
 
+/// A colour pushed back towards the page background, for what sits behind a popup.
+pub fn recede(color: Color, amount: f32) -> Color {
+    match (color, BG) {
+        (Color::Rgb(r, g, b), Color::Rgb(br, bg, bb)) => mix((r as f32, g as f32, b as f32), (br as f32, bg as f32, bb as f32), amount),
+        _ => color,
+    }
+}
+
 /// The page background, unless the user asked for the terminal's own.
 pub fn background() -> Style {
     static TRANSPARENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -126,6 +134,24 @@ pub fn footer_text(text: &str) -> Line<'static> {
     footer(vec![Span::styled(text.trim().to_string(), Style::new().fg(DIM))])
 }
 
+/// Fits key hints to a width: they are given most important first, as many as fit are shown, and
+/// `? help` is always kept at the end, so a narrow window loses the least useful hints and never the help.
+pub fn fit_hints(pairs: &[(&str, &str)], width: usize) -> Line<'static> {
+    let size = |(key, what): &(&str, &str)| key.chars().count() + what.chars().count() + 4;
+    let help = ("?", "help");
+    let mut used = 1;
+    let mut shown: Vec<(&str, &str)> = vec![];
+    for pair in pairs.iter().filter(|p| p.0 != "?") {
+        if used + size(pair) + size(&help) > width {
+            break; // keep the order: never skip a hint only to show a less important one
+        }
+        used += size(pair);
+        shown.push(*pair);
+    }
+    shown.push(help);
+    key_hints(&shown)
+}
+
 /// "↑↓ move  → open  q quit": keys in the accent colour, descriptions dim.
 pub fn key_hints(pairs: &[(&str, &str)]) -> Line<'static> {
     let mut spans = vec![Span::raw(" ")];
@@ -164,6 +190,30 @@ mod tests {
                 assert!(ratio >= 4.5, "{name} on {bg_name} is only {ratio:.1}:1 (needs 4.5)");
             }
         }
+    }
+
+    fn plain(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn hints_that_do_not_fit_are_dropped_from_the_end_and_help_is_always_kept() {
+        let hints = [("↑↓", "run"), ("→", "results"), ("R", "run again"), ("T", "tag devices"), ("x", "remove"), ("←", "back")];
+        let wide = plain(&fit_hints(&hints, 200));
+        assert!(wide.contains("remove") && wide.contains("back"), "with room, every hint shows: {wide}");
+        assert!(wide.trim_end().ends_with("? help"), "and the help comes last: {wide}");
+        let narrow = plain(&fit_hints(&hints, 36));
+        assert!(narrow.contains("↑↓ run") && narrow.contains("? help"), "{narrow}");
+        assert!(!narrow.contains("back") && !narrow.contains("remove"), "the end is dropped: {narrow}");
+        assert!(narrow.chars().count() <= 36, "{narrow:?}");
+        // Order is kept: a hint is never skipped just to squeeze in a later, smaller one.
+        let order = plain(&fit_hints(&hints, 60));
+        let at = |k: &str| order.find(k);
+        assert!(at("run again").is_none() || at("results").unwrap() < at("run again").unwrap());
+        // Even a tiny width shows the help.
+        assert!(plain(&fit_hints(&hints, 10)).contains("? help"));
+        // A "?" already in the list is not shown twice.
+        assert_eq!(plain(&fit_hints(&[("a", "b"), ("?", "help")], 80)).matches('?').count(), 1);
     }
 
     #[test]

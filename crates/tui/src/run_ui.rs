@@ -23,7 +23,7 @@ use crate::{
 const LABEL_WIDTH: usize = 14;
 
 pub fn draw_run(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
-    let [form_area, devices_area] = if area.width >= 100 {
+    let [form_area, devices_area] = if area.width >= 84 {
         Layout::horizontal([Constraint::Percentage(42), Constraint::Fill(1)]).areas(area)
     } else {
         Layout::vertical([Constraint::Percentage(55), Constraint::Fill(1)]).areas(area)
@@ -176,7 +176,7 @@ fn draw_form(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
             row(&mut lines, field, &decl.name, value);
             // The reason goes on its own line, so a narrow form never wraps it mid-sentence.
             if let Some(e) = error {
-                lines.push(Line::styled(format!("{}✗ {e}", " ".repeat(2 + LABEL_WIDTH)), Style::new().fg(ERR)));
+                push_problem(&mut lines, &format!("✗ {e}"), width);
             }
         }
 
@@ -197,7 +197,7 @@ fn draw_form(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
         };
         row(&mut lines, RunField::Timeout, "Timeout", timeout);
         if let Some(e) = problems.timeout {
-            lines.push(Line::styled(format!("{}✗ use {e} seconds", " ".repeat(2 + LABEL_WIDTH)), Style::new().fg(ERR)));
+            push_problem(&mut lines, &format!("✗ use {e} seconds"), width);
         }
     }
 
@@ -222,23 +222,37 @@ fn draw_form(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
         let language = run.script.as_ref().map(|s| s.language.clone());
         let risks = RunRisks::of(&devices, language.as_deref());
         for warning in risks.warnings() {
-            lines.push(Line::styled(format!("  ⚠ {warning}"), Style::new().fg(WARN)));
+            push_wrapped(&mut lines, &format!("⚠ {warning}"), width, 2, Style::new().fg(WARN));
         }
         lines.push(Line::styled("  enter again to run · esc to cancel", Style::new().fg(DIM)));
     }
     if app.is_dry_run() {
-        lines.push(Line::styled("  dry run: it will be held back, not sent", Style::new().fg(WARN)));
+        push_wrapped(&mut lines, "dry run: it will be held back, not sent", width, 2, Style::new().fg(WARN));
     }
     if let Some(notice) = &run.notice {
         lines.push(Line::from(""));
         let color = if notice.kind == NoticeKind::Error { ERR } else { ACCENT };
-        lines.push(Line::styled(format!("  {}", notice.text), Style::new().fg(color)));
+        push_wrapped(&mut lines, &notice.text, width, 2, Style::new().fg(color));
     }
 
     // Keep the focused row on screen when the form is taller than its panel.
     let height = inner.height as usize;
     let scroll = (focus_line + 3).saturating_sub(height) as u16;
     frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)).wrap(Wrap { trim: false }), inner);
+}
+
+/// A validation message under its field, wrapped so every line stays under the value column.
+fn push_problem(lines: &mut Vec<Line<'static>>, text: &str, width: usize) {
+    push_wrapped(lines, text, width, 2 + LABEL_WIDTH, Style::new().fg(ERR));
+}
+
+/// Prose in the form: wrapped at words, every line indented, so nothing spills over the border.
+fn push_wrapped(lines: &mut Vec<Line<'static>>, text: &str, width: usize, indent: usize, style: Style) {
+    for (i, piece) in crate::output_view::wrap_words(text, width.saturating_sub(indent + 2).max(8)).into_iter().enumerate() {
+        // Continuation lines line up under the words, not under a leading mark.
+        let lead = if i == 0 { indent } else { indent + 2 };
+        lines.push(Line::styled(format!("{}{piece}", " ".repeat(lead)), style));
+    }
 }
 
 /// What looks risky about the devices a run is about to hit.
@@ -269,6 +283,33 @@ impl RunRisks {
     }
 }
 
+/// The empty devices panel: the steps of a run, ticked off as the form is filled in, with the next one pointed at.
+fn draw_steps(frame: &mut Frame, area: Rect, app: &App) {
+    let run = &app.run;
+    let has_inputs = run.script.as_ref().is_some_and(|s| s.inputs.as_ref().is_some_and(|i| !i.is_empty()));
+    let mut steps: Vec<(bool, &str)> = vec![(run.org.is_some(), "Choose an organization"), (run.script.is_some(), "Choose a script"), (!run.targets.is_empty(), "Choose devices or tags to run on")];
+    if has_inputs {
+        steps.push((run.script.is_some() && !run.problems().any() && !run.values.is_empty(), "Fill in the script's inputs (optional)"));
+    }
+    steps.push((false, "Review the devices that will run, leaving any out"));
+    steps.push((false, "Press enter twice to confirm and run"));
+    let next = steps.iter().position(|(done, _)| !done);
+    let mut lines = vec![Line::from(""), Line::styled("How a run works", Style::new().fg(TEXT).add_modifier(Modifier::BOLD)), Line::from("")];
+    for (i, (done, text)) in steps.iter().enumerate() {
+        let (mark, style) = if *done {
+            ("✓", Style::new().fg(OK))
+        } else if Some(i) == next {
+            ("→", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))
+        } else {
+            ("○", Style::new().fg(DIM))
+        };
+        lines.push(Line::from(vec![Span::styled(format!("   {mark} "), style), Span::styled((*text).to_string(), if Some(i) == next { Style::new().fg(TEXT).add_modifier(Modifier::BOLD) } else { Style::new().fg(if *done { DIM } else { TEXT }) })]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::styled("   The devices appear here as soon as you choose who to run on.", Style::new().fg(DIM)));
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(panel("devices", false)), area);
+}
+
 // ---- the devices -----------------------------------------------------------------
 
 fn draw_devices(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
@@ -276,8 +317,7 @@ fn draw_devices(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
     let message = |frame: &mut Frame, text: String, color| frame.render_widget(Paragraph::new(text).style(Style::new().fg(color)).alignment(Alignment::Center).wrap(Wrap { trim: true }).block(panel("devices", focused)), area);
 
     if app.run.targets.is_empty() {
-        let text = "\nChoose who to run on and the devices appear here, so you can leave any out before you run.".to_string();
-        return message(frame, text, DIM);
+        return draw_steps(frame, area, app);
     }
     let list: Vec<Resolved> = match &app.run.resolved {
         Load::Ready(list) => list.clone(),
@@ -400,7 +440,8 @@ fn draw_devices(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
     let table = Table::new(rows, widths)
         .column_spacing(2)
         .header(Row::new(headers).style(Style::new().fg(DIM).add_modifier(Modifier::BOLD)))
-        .row_highlight_style(Style::new().bg(SELECTED_BG).add_modifier(Modifier::BOLD))
+        // The highlight marks where you are, so only the focused panel has one.
+        .row_highlight_style(if focused { Style::new().bg(SELECTED_BG).add_modifier(Modifier::BOLD) } else { Style::new() })
         .highlight_symbol(if focused { "▌ " } else { "  " })
         .block(block.title_bottom(title_bottom));
     let table_area = if app.run.truncated {
@@ -543,6 +584,18 @@ fn pick_row(item: &PickItem, chosen: &std::collections::HashSet<String>, width: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wrapped_form_text_keeps_its_indent_on_every_line() {
+        let mut lines = vec![];
+        push_wrapped(&mut lines, "✗ expected a whole number, for example 42", 30, 14, Style::new());
+        assert!(lines.len() > 1);
+        for line in &lines {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(text.starts_with("              "), "{text:?} lost its indent");
+            assert!(text.chars().count() <= 30, "{text:?} is wider than the panel");
+        }
+    }
 
     fn dev(id: &str, status: &str, os: &str) -> Asset {
         crate::app::run::tests::device(id, id, status, os)

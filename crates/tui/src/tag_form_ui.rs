@@ -127,7 +127,7 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &TagForm, tick: u64) {
                     Span::raw(" "),
                     part(CondPart::Op, c.op.label().to_string(), 11),
                     Span::raw(" "),
-                    part(CondPart::Value, value, value_width.saturating_sub(34).max(8)),
+                    part(CondPart::Value, value, value_width.saturating_sub(34).clamp(12, 28)),
                 ]);
             }
             if matches!(form.field, TagField::Condition(_)) {

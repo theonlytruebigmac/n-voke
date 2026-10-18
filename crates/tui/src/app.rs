@@ -68,9 +68,10 @@ pub enum Msg {
     TagPreview { seq: u64, key: String, result: Result<(Vec<nvoke_core::model::Asset>, i64), String> },
     TagFormDone(Result<Saved, nvoke_core::tags::CreateFailure>),
     Watched(Result<Box<nvoke_core::jobs::Job>, String>),
+    DataCleared(Result<(), String>),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
     Run,
     Activity,
@@ -119,10 +120,22 @@ pub enum Focus {
     Content,
 }
 
-#[derive(PartialEq, Eq, Clone, Copy)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum Field {
     Endpoint,
     Token,
+    /// How long run history is kept (not asked for on first launch).
+    History,
+}
+
+/// The retention choices: days, with 0 meaning "don't save history".
+pub const HISTORY_CHOICES: [u32; 4] = [7, 30, 90, 0];
+
+/// The next (or previous) retention choice, wrapping round. A value that isn't one of the choices starts from 30.
+pub fn step_history(current: u32, forward: bool) -> u32 {
+    let at = HISTORY_CHOICES.iter().position(|d| *d == current).unwrap_or(1) as isize;
+    let next = (at + if forward { 1 } else { -1 }).rem_euclid(HISTORY_CHOICES.len() as isize) as usize;
+    HISTORY_CHOICES[next]
 }
 
 /// The first-launch screen and the settings editor are the same form.
@@ -130,6 +143,7 @@ pub struct SettingsForm {
     pub endpoint: TextInput,
     pub token: TextInput,
     pub focus: Field,
+    pub history_days: u32,
     pub error: Option<String>,
     pub busy: bool,
     /// No API key yet: the token is required and Esc quits instead of going back.
@@ -142,16 +156,30 @@ impl SettingsForm {
             endpoint: TextInput::new(&settings.api_url, false),
             token: TextInput::new("", true),
             focus: if settings.has_api_key { Field::Endpoint } else { Field::Token },
+            history_days: settings.history_days,
             error: None,
             busy: false,
             first_run: !settings.has_api_key,
         }
     }
 
-    pub fn focused(&mut self) -> &mut TextInput {
+    /// The fields shown, top to bottom.
+    pub fn fields(&self) -> Vec<Field> {
+        if self.first_run { vec![Field::Endpoint, Field::Token] } else { vec![Field::Endpoint, Field::Token, Field::History] }
+    }
+
+    fn step(&mut self, delta: isize) {
+        let fields = self.fields();
+        let at = fields.iter().position(|f| *f == self.focus).unwrap_or(0) as isize;
+        self.focus = fields[(at + delta).rem_euclid(fields.len() as isize) as usize];
+    }
+
+    /// The text field with focus, if the focus is on one.
+    pub fn focused(&mut self) -> Option<&mut TextInput> {
         match self.focus {
-            Field::Endpoint => &mut self.endpoint,
-            Field::Token => &mut self.token,
+            Field::Endpoint => Some(&mut self.endpoint),
+            Field::Token => Some(&mut self.token),
+            Field::History => None,
         }
     }
 }
@@ -167,6 +195,8 @@ pub enum Pane {
 pub enum Confirm {
     RemoveJob(String),
     Tag(TagConfirm),
+    /// Clear saved run history and cached data.
+    ClearData,
 }
 
 impl Confirm {
@@ -174,6 +204,7 @@ impl Confirm {
     pub fn prompt(&self) -> String {
         match self {
             Confirm::RemoveJob(_) => "Remove this run from your history?".into(),
+            Confirm::ClearData => "Clear saved run history and cached data? Runs still being watched are kept; the audit log and your settings are not touched.".into(),
             Confirm::Tag(t) => t.prompt(),
         }
     }
@@ -246,6 +277,8 @@ pub struct App {
     pub dry_scroll: u16,
     pub focus: Focus,
     pub show_help: bool,
+    /// How far the help overlay is scrolled.
+    pub help_scroll: u16,
     /// Counts ticks since start; animations are a function of it.
     pub tick: u64,
     quit: bool,
@@ -295,6 +328,7 @@ impl App {
             dry_scroll: 0,
             focus: Focus::Sidebar,
             show_help: false,
+            help_scroll: 0,
             tick: 0,
             quit: false,
         }
@@ -425,6 +459,14 @@ impl App {
             Msg::TagPreview { seq, key, result } => self.on_tag_preview(seq, key, result),
             Msg::TagFormDone(result) => self.on_tag_form_done(result),
             Msg::Watched(result) => self.on_watched(result),
+            Msg::DataCleared(result) => match result {
+                Ok(()) => {
+                    self.jobs.clear_finished();
+                    self.sync_jobs();
+                    self.flash(NoticeKind::Info, "Cleared saved run history and cached data.");
+                }
+                Err(e) => self.flash(NoticeKind::Error, e),
+            },
         }
     }
 
@@ -475,22 +517,28 @@ impl App {
                     self.screen = Screen::Main;
                 }
             }
-            KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down => {
-                form.focus = if form.focus == Field::Endpoint { Field::Token } else { Field::Endpoint };
+            KeyCode::Tab | KeyCode::Down => form.step(1),
+            KeyCode::BackTab | KeyCode::Up => form.step(-1),
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if form.focus == Field::History => {
+                form.history_days = step_history(form.history_days, key.code != KeyCode::Left);
             }
             KeyCode::Enter => {
                 if form.first_run && form.token.value.trim().is_empty() {
                     form.error = Some("Paste your N-able API-Access token to continue.".into());
+                    form.focus = Field::Token;
                     return;
                 }
                 form.busy = true;
                 form.error = None;
                 let endpoint = form.endpoint.value.clone();
                 let token = Some(form.token.value.clone()).filter(|t| !t.trim().is_empty());
-                self.spawn(|core| async move { Msg::Saved(core.save_settings(endpoint, token, None).await) });
+                let history = (!form.first_run).then_some(form.history_days);
+                self.spawn(move |core| async move { Msg::Saved(core.save_settings(endpoint, token, history).await) });
             }
             _ => {
-                form.focused().handle_key(key);
+                if let Some(input) = form.focused() {
+                    input.handle_key(key);
+                }
             }
         }
     }
@@ -509,6 +557,7 @@ impl App {
                         self.sync_jobs();
                     }
                     Confirm::Tag(tag) => self.run_tag_confirmed(tag),
+                    Confirm::ClearData => self.spawn(|core| async move { Msg::DataCleared(core.clear_local_data().await) }),
                 }
             }
             return; // any other key cancels
@@ -526,8 +575,19 @@ impl App {
             return self.on_run_modal_key(key);
         }
         if self.show_help {
-            // Any key closes the help overlay.
-            self.show_help = false;
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('?' | 'q') | KeyCode::F(1) => {
+                    self.show_help = false;
+                    self.help_scroll = 0;
+                }
+                KeyCode::Down | KeyCode::Char('j') => self.help_scroll = self.help_scroll.saturating_add(1),
+                KeyCode::Up | KeyCode::Char('k') => self.help_scroll = self.help_scroll.saturating_sub(1),
+                KeyCode::PageDown | KeyCode::Char(' ') => self.help_scroll = self.help_scroll.saturating_add(8),
+                KeyCode::PageUp | KeyCode::Char('b') => self.help_scroll = self.help_scroll.saturating_sub(8),
+                KeyCode::Home => self.help_scroll = 0,
+                KeyCode::End => self.help_scroll = u16::MAX, // the drawing clamps it to the end
+                _ => {} // other keys do nothing: the help is modal, and nothing leaks to the page behind it
+            }
             return;
         }
         match key.code {
@@ -579,6 +639,7 @@ impl App {
         }
         match self.page {
             Page::Audit => self.on_audit_key(key),
+            Page::Settings if key.code == KeyCode::Char('c') => self.confirm = Some(Confirm::ClearData),
             Page::Settings => {
                 if let (true, Some(settings)) = (matches!(key.code, KeyCode::Enter | KeyCode::Char('e')), &self.settings) {
                     let mut form = SettingsForm::new(settings);
@@ -782,6 +843,12 @@ impl App {
         self.output_scroll = 0;
     }
 
+    /// Goes to a page, for tests of code that depends on where the user is.
+    #[cfg(test)]
+    pub(crate) fn go_to_for_tests(&mut self, page: Page) {
+        self.go(page);
+    }
+
     fn go(&mut self, page: Page) {
         self.page = page;
         if !page.interactive() {
@@ -903,13 +970,30 @@ mod tests {
     }
 
     #[test]
-    fn question_mark_toggles_help_and_any_key_closes_it() {
+    fn the_help_is_modal_scrolls_and_closes_with_esc_or_question_mark() {
         let (_rt, mut app) = app();
         press(&mut app, KeyCode::Char('?'));
         assert!(app.show_help);
-        press(&mut app, KeyCode::Char('x'));
+        // Other keys do nothing: the help is a popup, so nothing leaks to the page behind it.
+        for c in ['x', '1', 'd', 'R'] {
+            press(&mut app, KeyCode::Char(c));
+        }
+        assert!(app.show_help && !app.quit && app.page == Page::Run);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::PageDown);
+        assert_eq!(app.help_scroll, 9);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.help_scroll, 8);
+        press(&mut app, KeyCode::Home);
+        assert_eq!(app.help_scroll, 0);
+        press(&mut app, KeyCode::Char('?'));
+        assert!(!app.show_help && !app.quit, "the key that closes help must not also act");
+        press(&mut app, KeyCode::Char('?'));
+        press(&mut app, KeyCode::Esc);
         assert!(!app.show_help);
-        assert!(!app.quit, "the key that closes help must not also act");
+        press(&mut app, KeyCode::Char('?'));
+        press(&mut app, KeyCode::Char('q'));
+        assert!(!app.show_help && !app.quit, "q closes the help, it does not quit the app");
     }
 
     // ---- activity -----------------------------------------------------------
@@ -1072,5 +1156,121 @@ mod tests {
         assert_eq!(app.dry_table.selected(), Some(2), "stops at the last entry");
         press(&mut app, KeyCode::Up);
         assert_eq!(app.dry_table.selected(), Some(1));
+    }
+
+    // ---- settings --------------------------------------------------------------------------------
+
+    fn open_settings_form(app: &mut App) {
+        app.settings = Some(Settings { api_url: "https://api.n-able.com/graphql".into(), has_api_key: true, history_days: 30, encryption_available: true, encryption_error: None });
+        app.screen = Screen::Main;
+        app.go(Page::Settings);
+        app.focus = Focus::Content;
+        press(app, KeyCode::Enter);
+    }
+
+    #[test]
+    fn the_first_launch_form_asks_only_for_the_endpoint_and_token_but_editing_also_asks_how_long_to_keep_history() {
+        let first = SettingsForm::new(&Settings { api_url: String::new(), has_api_key: false, history_days: 30, encryption_available: true, encryption_error: None });
+        assert_eq!(first.fields(), [Field::Endpoint, Field::Token]);
+        let edit = SettingsForm::new(&Settings { api_url: String::new(), has_api_key: true, history_days: 30, encryption_available: true, encryption_error: None });
+        assert_eq!(edit.fields(), [Field::Endpoint, Field::Token, Field::History]);
+        assert_eq!(edit.history_days, 30, "it starts at what is saved");
+    }
+
+    #[test]
+    fn the_retention_steps_through_its_choices_and_wraps_round_both_ways() {
+        assert_eq!(step_history(7, true), 30);
+        assert_eq!(step_history(30, true), 90);
+        assert_eq!(step_history(90, true), 0, "never saved comes last");
+        assert_eq!(step_history(0, true), 7, "and wraps");
+        assert_eq!(step_history(7, false), 0);
+        assert_eq!(step_history(0, false), 90);
+        assert_eq!(step_history(14, true), 90, "a value that isn't a choice starts from 30");
+    }
+
+    #[test]
+    fn tab_and_arrows_move_through_the_settings_fields_and_the_retention_field_takes_arrows_not_typing() {
+        let (_rt, mut app) = app();
+        open_settings_form(&mut app);
+        let focus = |app: &App| match &app.screen { Screen::Form(f) => f.focus, _ => panic!("no form") };
+        assert!(focus(&app) == Field::Endpoint);
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Down);
+        assert!(focus(&app) == Field::History);
+        press(&mut app, KeyCode::Down);
+        assert!(focus(&app) == Field::Endpoint, "wraps round");
+        press(&mut app, KeyCode::Up);
+        assert!(focus(&app) == Field::History);
+        let Screen::Form(before) = &app.screen else { panic!() };
+        let (endpoint, token) = (before.endpoint.value.clone(), before.token.value.clone());
+        for c in "abc".chars() {
+            press(&mut app, KeyCode::Char(c)); // letters mean nothing on the retention field
+        }
+        press(&mut app, KeyCode::Right);
+        let Screen::Form(f) = &app.screen else { panic!() };
+        assert_eq!((f.endpoint.value.clone(), f.token.value.clone()), (endpoint, token), "typing did not leak into the text fields");
+        assert_eq!(f.history_days, 90);
+        press(&mut app, KeyCode::Left);
+        press(&mut app, KeyCode::Left);
+        let Screen::Form(f) = &app.screen else { panic!() };
+        assert_eq!(f.history_days, 7);
+    }
+
+    #[test]
+    fn saving_a_new_retention_takes_effect_and_is_remembered() {
+        let (_rt, mut app) = app();
+        open_settings_form(&mut app);
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Right); // 90 days
+        press(&mut app, KeyCode::Enter);
+        for _ in 0..40 {
+            if let Ok(event) = app.rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                app.update(event);
+            }
+            if matches!(app.screen, Screen::Main) {
+                break;
+            }
+        }
+        assert!(matches!(app.screen, Screen::Main), "the form closed after saving");
+        assert_eq!(app.settings.as_ref().unwrap().history_days, 90);
+    }
+
+    #[test]
+    fn c_on_settings_asks_before_clearing_saved_data_and_says_what_is_kept() {
+        let (_rt, mut app) = app();
+        app.settings = Some(Settings { api_url: "https://x/graphql".into(), has_api_key: true, history_days: 30, encryption_available: true, encryption_error: None });
+        app.screen = Screen::Main;
+        app.go(Page::Settings);
+        app.focus = Focus::Content;
+        press(&mut app, KeyCode::Char('c'));
+        let prompt = app.confirm.as_ref().unwrap().prompt();
+        assert!(prompt.starts_with("Clear saved run history and cached data?") && prompt.contains("still being watched are kept") && prompt.contains("audit log"), "{prompt}");
+        press(&mut app, KeyCode::Char('n'));
+        assert!(app.confirm.is_none() && app.flash.is_none(), "anything but y cancels");
+    }
+
+    #[test]
+    fn clearing_removes_finished_runs_but_keeps_the_ones_still_being_watched() {
+        let (_rt, mut app) = app();
+        app.settings = Some(Settings { api_url: "https://x/graphql".into(), has_api_key: true, history_days: 30, encryption_available: true, encryption_error: None });
+        app.screen = Screen::Main;
+        let mut done = nvoke_core::task_state::JobTask::new("t1", None, "PC", 0);
+        done.watching = false;
+        let running = nvoke_core::task_state::JobTask::new("t2", None, "PC", 0);
+        let job = |id: &str, task| nvoke_core::jobs::Job { id: id.into(), name: id.into(), script_id: None, script: None, script_name: id.into(), org_id: None, org_name: None, target_label: "PC".into(), created_at: "2026-10-17T12:00:00.000Z".into(), timeout_seconds: 0, warnings: None, tasks: vec![task] };
+        app.jobs.seed(vec![job("finished", done), job("running", running)]);
+        app.sync_jobs();
+        app.go(Page::Settings);
+        app.focus = Focus::Content;
+        press(&mut app, KeyCode::Char('c'));
+        press(&mut app, KeyCode::Char('y'));
+        for _ in 0..10 {
+            if let Ok(event) = app.rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                app.update(event);
+            }
+        }
+        assert_eq!(app.job_list.iter().map(|j| j.id.as_str()).collect::<Vec<_>>(), ["running"]);
+        assert_eq!(app.flash.as_ref().unwrap().0.text, "Cleared saved run history and cached data.");
     }
 }

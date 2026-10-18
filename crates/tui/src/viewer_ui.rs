@@ -12,13 +12,13 @@ use crate::{
     app::{App, TOAST_TICKS},
     output_view::{self, Kind, OutLine, Visual},
     theme::{self, ACCENT, BG, BORDER, DIM, ERR, TEXT, WARN, panel_padded},
-    ui::{centered, clear, truncate},
+    ui::{centered, clear_plain, truncate},
 };
 
 pub fn draw_viewer(frame: &mut Frame, area: Rect, app: &mut App) {
     // Everything between the header bar and the key hints.
     let popup = Rect { x: area.x, y: area.y + 1, width: area.width, height: area.height.saturating_sub(2) };
-    clear(frame, popup);
+    clear_plain(frame, popup);
 
     let Some(task) = app.viewer_task().cloned() else {
         let text = Paragraph::new("This run is no longer in the list.\n\nPress esc to close.").style(Style::new().fg(DIM)).alignment(Alignment::Center).block(panel_padded("output", true));

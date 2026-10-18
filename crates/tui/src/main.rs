@@ -2,6 +2,7 @@
 //! history with the desktop app through `nvoke-core`.
 
 mod app;
+mod help;
 mod input;
 mod output_view;
 mod picker;

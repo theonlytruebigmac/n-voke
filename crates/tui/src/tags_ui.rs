@@ -17,7 +17,7 @@ use crate::{
 };
 
 pub fn draw_tags(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
-    let [list_area, detail_area] = if area.width >= 90 {
+    let [list_area, detail_area] = if area.width >= 84 {
         let list_width = (area.width * 36 / 100).clamp(30, 46);
         Layout::horizontal([Constraint::Length(list_width), Constraint::Fill(1)]).areas(area)
     } else {
@@ -72,8 +72,8 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
             return;
         }
         Load::Ready(list) if list.is_empty() => {
-            let text = if state.term.value.is_empty() { "No tags yet." } else { "No matching tags." };
-            frame.render_widget(Paragraph::new(text).style(Style::new().fg(DIM)).alignment(Alignment::Center), rows_area);
+            let text = if state.term.value.is_empty() { "No tags yet. Press n to create the first." } else { "No matching tags." };
+            frame.render_widget(Paragraph::new(text).style(Style::new().fg(DIM)).alignment(Alignment::Center).wrap(Wrap { trim: true }), rows_area);
             return;
         }
         Load::Ready(_) => {}
@@ -85,20 +85,25 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
 
     let width = rows_area.width as usize;
     let name_width = width.saturating_sub(10);
+    // The organization is only worth a second line when the list spans more than one: when every tag
+    // is in the same place, it is noise, and one line per tag fits twice as many.
+    let orgs: std::collections::HashSet<&str> = state.tags().iter().filter_map(|t| t.organization.as_ref().map(|o| o.id.as_str())).collect();
+    let show_org = orgs.len() > 1;
     let rows: Vec<Row> = state
         .tags()
         .iter()
         .map(|t| {
             let count = t.asset_count.unwrap_or(0).to_string();
+            let mut name = vec![Line::styled(truncate(&t.name, name_width), Style::new().fg(TEXT))];
+            if show_org {
+                name.push(Line::styled(truncate(t.organization.as_ref().map_or("", |o| o.name.as_str()), name_width), Style::new().fg(DIM)));
+            }
             Row::new(vec![
                 Cell::from(kind_glyph(t)).style(Style::new().fg(if t.is_dynamic() { WARN } else { DIM })),
-                Cell::from(vec![
-                    Line::styled(truncate(&t.name, name_width), Style::new().fg(TEXT)),
-                    Line::styled(truncate(t.organization.as_ref().map_or("", |o| o.name.as_str()), name_width), Style::new().fg(DIM)),
-                ]),
+                Cell::from(name),
                 Cell::from(Line::styled(count, Style::new().fg(DIM)).alignment(Alignment::Right)),
             ])
-            .height(2)
+            .height(if show_org { 2 } else { 1 })
         })
         .collect();
     let table = Table::new(rows, [Constraint::Length(2), Constraint::Fill(1), Constraint::Length(5)])
@@ -111,9 +116,10 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
 fn draw_detail(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
     let tick = app.tick;
     let Some(tag) = app.tags.shown().cloned() else {
+        let empty = matches!(app.tags.all, Load::Ready(ref l) if l.is_empty()) && app.tags.term.value.is_empty();
         let text = vec![
             Line::from(""),
-            Line::styled("Select a tag", Style::new().fg(TEXT).add_modifier(Modifier::BOLD)),
+            Line::styled(if empty { "Create your first tag with n" } else { "Select a tag" }, Style::new().fg(TEXT).add_modifier(Modifier::BOLD)),
             Line::from(""),
             Line::styled("Static tags hold the devices you choose.", Style::new().fg(DIM)),
             Line::styled("Dynamic tags fill themselves from rules.", Style::new().fg(DIM)),
