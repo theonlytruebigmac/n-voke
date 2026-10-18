@@ -37,7 +37,7 @@ A release is created by pushing a version tag. The **Release** workflow (`.githu
 
 4. **Watch the run** under the repository's Actions tab. A full release takes roughly 15 to 25 minutes, mostly the first Rust compile on each platform.
 
-5. **Check the published release.** It appears at `https://github.com/theonlytruebigmac/n-able-scripting-demo/releases` with the installers attached. Edit the generated notes if you want to add context.
+5. **Check the published release.** It appears at `https://github.com/theonlytruebigmac/n-voke/releases` with the installers attached. Edit the generated notes if you want to add context.
 
 ## What the workflow does
 

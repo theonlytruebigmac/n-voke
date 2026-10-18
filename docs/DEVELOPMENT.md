@@ -11,8 +11,8 @@ Requirements:
 - The [Tauri system prerequisites](https://tauri.app/start/prerequisites/) for your OS (Xcode command line tools on macOS, WebView2 and the MSVC build tools on Windows, `libwebkit2gtk-4.1-dev` and friends on Linux)
 
 ```sh
-git clone https://github.com/theonlytruebigmac/n-able-scripting-demo.git
-cd n-able-scripting-demo
+git clone https://github.com/theonlytruebigmac/n-voke.git
+cd n-voke
 npm install
 npm run tauri dev
 ```
