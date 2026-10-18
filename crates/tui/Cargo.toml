@@ -1,0 +1,19 @@
+[package]
+name = "nvoke-tui"
+version = "0.1.0"
+license = "MIT"
+description = "Terminal interface for N-voke"
+authors = ["theonlytruebigmac"]
+edition = "2024"
+
+[[bin]]
+name = "nvoke"
+path = "src/main.rs"
+
+[dependencies]
+nvoke-core = { path = "../core" }
+ratatui = "0.30"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+
+[dev-dependencies]
+serde_json = "1"
