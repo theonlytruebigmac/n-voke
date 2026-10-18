@@ -31,6 +31,7 @@ npm install
 npm run tauri dev     # run the app with hot reload
 npm test              # frontend unit tests
 cargo test --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path crates/core/Cargo.toml
 npm run tauri build   # build an installer for the current platform
 ```
 
@@ -40,9 +41,10 @@ See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full guide: setup, debugg
 
 | Path | What's there |
 |---|---|
-| `src-tauri/src/lib.rs` | Native side: keychain storage, settings file, and the `graphql` command that sends every API request |
-| `src-tauri/src/audit.rs` | Audit log: every mutation is recorded automatically by the `graphql` command |
-| `src-tauri/src/vault.rs` | Encryption at rest (data key in the OS keychain) |
+| `crates/core/src/lib.rs` | Shared core: keychain storage, settings file, and the `graphql` call that sends every API request |
+| `crates/core/src/audit.rs` | Audit log: every mutation is recorded automatically by `graphql` |
+| `crates/core/src/vault.rs` | Encryption at rest (data key in the OS keychain) |
+| `src-tauri/src/lib.rs` | Desktop app: exposes the core to the web view as Tauri commands |
 | `src/lib/api.ts` | GraphQL queries and mutations |
 | `src/lib/jobs.ts` | Jobs (one run on many devices): batched polling and persistence |
 | `src/lib/taskState.ts` | Per-device task phases and grouping results by outcome |

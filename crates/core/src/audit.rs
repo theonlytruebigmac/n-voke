@@ -13,7 +13,6 @@ use crate::vault::{self, Vault};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use tauri::{AppHandle, Manager};
 
 const FILE_NAME: &str = "audit.jsonl";
 /// Past this size the log is rotated to `audit.1.jsonl` (one previous file kept).
@@ -63,21 +62,22 @@ impl AuditEntry {
 pub struct AuditLog {
     lock: Mutex<()>,
     vault: Arc<Vault>,
+    /// The app data directory the log file lives in.
+    dir: PathBuf,
 }
 
 impl AuditLog {
-    pub fn new(vault: Arc<Vault>) -> Self {
-        Self { lock: Mutex::new(()), vault }
+    pub fn new(vault: Arc<Vault>, dir: PathBuf) -> Self {
+        Self { lock: Mutex::new(()), vault, dir }
     }
 
-    pub fn path(app: &AppHandle) -> Result<PathBuf, String> {
-        let dir = app.path().app_data_dir().map_err(|e| format!("No data directory: {e}"))?;
-        Ok(dir.join(FILE_NAME))
+    pub fn path(&self) -> PathBuf {
+        self.dir.join(FILE_NAME)
     }
 
     /// Appends an entry. Failures are reported but never block the action itself.
-    pub fn append(&self, app: &AppHandle, entry: &AuditEntry) {
-        if let Err(e) = self.try_append(app, entry) {
+    pub fn append(&self, entry: &AuditEntry) {
+        if let Err(e) = self.try_append(entry) {
             eprintln!("audit log write failed: {e}");
         }
     }
@@ -97,9 +97,9 @@ impl AuditLog {
         serde_json::from_str(&json).ok()
     }
 
-    fn try_append(&self, app: &AppHandle, entry: &AuditEntry) -> Result<(), String> {
+    fn try_append(&self, entry: &AuditEntry) -> Result<(), String> {
         let _guard = self.lock.lock().unwrap();
-        let path = Self::path(app)?;
+        let path = self.path();
         if let Some(dir) = path.parent() {
             vault::create_private_dir(dir)?;
         }
@@ -112,9 +112,9 @@ impl AuditLog {
     }
 
     /// Most recent entries first (current file only).
-    pub fn read(&self, app: &AppHandle, limit: usize) -> Result<Vec<AuditEntry>, String> {
+    pub fn read(&self, limit: usize) -> Result<Vec<AuditEntry>, String> {
         let _guard = self.lock.lock().unwrap();
-        let path = Self::path(app)?;
+        let path = self.path();
         let text = match fs::read_to_string(&path) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
@@ -124,12 +124,12 @@ impl AuditLog {
     }
 
     /// Re-writes any plain-JSON lines (from older versions) encrypted. Runs at startup.
-    pub fn encrypt_existing(&self, app: &AppHandle) {
+    pub fn encrypt_existing(&self) {
         if self.vault.status().is_err() {
             return;
         }
         let _guard = self.lock.lock().unwrap();
-        let Ok(path) = Self::path(app) else { return };
+        let path = self.path();
         for file in [path.clone(), path.with_file_name("audit.1.jsonl")] {
             let Ok(text) = fs::read_to_string(&file) else { continue };
             if !text.lines().any(|l| l.trim_start().starts_with('{')) {

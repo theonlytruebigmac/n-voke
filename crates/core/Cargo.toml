@@ -1,0 +1,18 @@
+[package]
+name = "nvoke-core"
+version = "0.1.0"
+license = "MIT"
+description = "Shared core of N-voke: API client, settings, keychain, encrypted local storage and audit log"
+authors = ["theonlytruebigmac"]
+edition = "2024"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+keyring = "4"
+reqwest = { version = "0.13", features = ["json"] }
+tokio = { version = "1", features = ["rt"] }
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+chacha20poly1305 = "0.11.0"
+base64 = "0.23.1"
+dirs = "6"
