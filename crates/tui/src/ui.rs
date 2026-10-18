@@ -361,80 +361,23 @@ fn draw_job_list(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
     frame.render_stateful_widget(table, area, &mut app.job_table);
 }
 
-fn count_parts(counts: &PhaseCounts) -> Vec<(usize, TaskPhase, &'static str)> {
-    [
-        (counts.succeeded, TaskPhase::Succeeded, "passed"),
-        (counts.non_zero, TaskPhase::NonZero, "non-zero"),
-        (counts.failed, TaskPhase::Failed, "didn't run"),
-        (counts.running, TaskPhase::Running, "running"),
-        (counts.queued, TaskPhase::Queued, "waiting"),
-        (counts.stopped, TaskPhase::Stopped, "not watched"),
-    ]
-    .into_iter()
-    .filter(|(n, _, _)| *n > 0)
-    .collect()
-}
-
-fn count_spans(counts: &PhaseCounts) -> Vec<Span<'static>> {
-    count_spans_in(counts, usize::MAX)
-}
-
-/// The counts as coloured text, joined by " · ". With words if they fit in `max` columns, else as
-/// just a symbol and a number each (still readable: the symbols are the ones used everywhere else).
-fn count_spans_in(counts: &PhaseCounts, max: usize) -> Vec<Span<'static>> {
-    let parts = count_parts(counts);
-    let glyph = |phase: TaskPhase| if phase == TaskPhase::Running { "●" } else { phase_glyph(phase, 0) };
-    let full: Vec<String> = parts.iter().map(|(n, p, label)| format!("{} {n} {label}", glyph(*p))).collect();
-    let full_width = full.iter().map(|s| s.chars().count()).sum::<usize>() + 3 * full.len().saturating_sub(1);
-    let texts: Vec<String> = if full_width <= max { full } else { parts.iter().map(|(n, p, _)| format!("{}{n}", glyph(*p))).collect() };
-    let mut out = vec![];
-    for (i, (text, (_, phase, _))) in texts.into_iter().zip(parts.iter()).enumerate() {
-        if i > 0 {
-            out.push(Span::styled(" · ", Style::new().fg(DIM)));
-        }
-        out.push(Span::styled(text, Style::new().fg(phase_color(*phase))));
-    }
-    out
-}
-
 fn draw_job_detail(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
     let Some(job) = app.current_job().cloned() else { return };
-    let now = Utc::now();
 
-    // The output is what people come here to read, so it gets priority: on a small window the summary
-    // shrinks, then goes, and the results table gets shorter, but the output keeps at least MIN_OUTPUT rows.
-    const MIN_OUTPUT: u16 = 7;
-    let summary_h: u16 = if area.height >= 32 { 5 } else if area.height >= 24 { 4 } else { 0 };
-    let results_max: u16 = if area.height >= 34 { 9 } else if area.height >= 24 { 6 } else { 5 };
-    let group_rows = (app.groups.len() as u16 + if area.height >= 24 { 3 } else { 2 }).clamp(3, results_max);
-    let group_rows = group_rows.min(area.height.saturating_sub(summary_h + MIN_OUTPUT)).max(3);
-    let [summary_area, results_area, output_area] = Layout::vertical([Constraint::Length(summary_h), Constraint::Length(group_rows), Constraint::Fill(1)]).areas(area);
-
-    // Which run this is, and how it stands.
-    let started = parse_time(&job.created_at).map(|t| ago(t, now)).unwrap_or_default();
-    let org = job.org_name.clone().map(|o| format!("{o} · ")).unwrap_or_default();
-    let mut lines = vec![
-        Line::from(vec![Span::styled(job.script_name.clone(), Style::new().fg(TEXT).add_modifier(Modifier::BOLD)), Span::styled(format!("  →  {}", job.target_label), Style::new().fg(DIM))]),
-        Line::styled(format!("{org}started {started}"), Style::new().fg(DIM)),
-        Line::from(count_spans(&app.counts)),
-    ];
-    if job.warnings.as_ref().is_some_and(|w| !w.is_empty()) {
-        lines.truncate(2);
-        lines.push(Line::styled(format!("{} warning(s) when it was created", job.warnings.as_ref().map_or(0, Vec::len)), Style::new().fg(WARN)));
-    }
-    if summary_h >= 5 {
-        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(theme::panel_padded("run", false)), summary_area);
-    } else if summary_h > 0 {
-        // Two lines: which run, and how it stands. (The organization and start time go first.)
-        let head = Line::from(vec![Span::styled(job.script_name.clone(), Style::new().fg(TEXT).add_modifier(Modifier::BOLD)), Span::styled(format!("  →  {}", job.target_label), Style::new().fg(DIM))]);
-        frame.render_widget(Paragraph::new(vec![head, Line::from(count_spans(&app.counts))]).wrap(Wrap { trim: false }).block(theme::panel_padded("run", false)), summary_area);
-    }
+    // One panel instead of three: the groups on top (their counts are the first column), what they printed below.
+    // The output is what people come here to read, so it keeps at least MIN_OUTPUT rows however many groups there are.
+    const MIN_OUTPUT: u16 = 5;
+    let base = panel("results", focused);
+    let inner = base.inner(area);
+    let group_rows = (app.groups.len() as u16).clamp(1, 8).min(inner.height.saturating_sub(MIN_OUTPUT + 1)).max(1);
+    let [groups_area, rule_area, output_area] = Layout::vertical([Constraint::Length(group_rows), Constraint::Length(1), Constraint::Fill(1)]).areas(inner);
+    let output_area = Rect { x: output_area.x + 1, width: output_area.width.saturating_sub(2), ..output_area };
 
     // The groups: devices with the same result read as one line.
     let tasks = job.tasks.clone();
     let tick = app.tick;
     // What the count and label columns (and the gaps and marker) leave for the headline.
-    let headline_width = (results_area.width as usize).saturating_sub(2 + 2 + 5 + 16 + 4);
+    let headline_width = (groups_area.width as usize).saturating_sub(2 + 2 + 5 + 16 + 4);
     let rows: Vec<Row> = app
         .groups
         .iter()
@@ -451,13 +394,7 @@ fn draw_job_detail(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) 
     let table = Table::new(rows, [Constraint::Length(5), Constraint::Length(16), Constraint::Fill(1)])
         .column_spacing(2)
         .row_highlight_style(Style::new().bg(SELECTED_BG).add_modifier(Modifier::BOLD))
-        .highlight_symbol(if focused { "▌ " } else { "  " })
-        .block({
-            let block = panel("results", focused);
-            // With no room for the summary, the counts live here so they are never lost.
-            if summary_h == 0 { block.title_bottom(theme::footer(count_spans_in(&app.counts, (results_area.width as usize).saturating_sub(8)))) } else { block }
-        });
-    frame.render_stateful_widget(table, results_area, &mut app.group_table);
+        .highlight_symbol(if focused { "▌ " } else { "  " });
 
     // Which devices, and what they printed.
     let mut out: Vec<Line> = vec![];
@@ -500,20 +437,27 @@ fn draw_job_detail(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) 
         }
     }
     // Don't scroll past the end, and say when there is more than fits.
-    let text_width = output_area.width.saturating_sub(4).max(1) as usize; // borders and the padding inside them
-    let rows = output_area.height.saturating_sub(2) as usize;
+    if job.warnings.as_ref().is_some_and(|w| !w.is_empty()) {
+        out.insert(0, Line::styled(format!("{} warning(s) when it was created", job.warnings.as_ref().map_or(0, Vec::len)), Style::new().fg(WARN)));
+    }
+    let text_width = output_area.width.max(1) as usize;
+    let rows = output_area.height as usize;
     let total: usize = out.iter().map(|l| l.width().max(1).div_ceil(text_width)).sum();
     let max_scroll = total.saturating_sub(rows);
     app.output_scroll = app.output_scroll.min(max_scroll as u16);
-    // Part of the results pane but not where focus is shown: one title chip at a time, so it is clear where you are.
-    let mut block = theme::panel_padded("devices & output", false);
-    if total > rows {
-        let at = app.output_scroll as usize;
-        let hint = format!(" lines {}–{} of {total} · enter opens the full view ", at + 1, (at + rows).min(total));
-        block = block.title_bottom(theme::footer(vec![Span::styled(hint.trim().to_string(), Style::new().fg(WARN))]));
+    let hint = (total > rows).then(|| format!("lines {}–{} of {total}", app.output_scroll as usize + 1, (app.output_scroll as usize + rows).min(total)));
+    let mut block = base;
+    if let Some(hint) = hint {
+        block = block.title_bottom(theme::footer(vec![Span::styled(hint, Style::new().fg(WARN))]));
     }
-    let output = Paragraph::new(out).wrap(Wrap { trim: false }).scroll((app.output_scroll, 0)).block(block);
-    frame.render_widget(output, output_area);
+    frame.render_widget(block, area);
+    frame.render_stateful_widget(table, groups_area, &mut app.group_table);
+
+    // A rule that joins the two halves to the panel's own border.
+    let edge = Style::new().fg(if focused { ACCENT } else { BORDER });
+    let rule = format!("├{}┤", "─".repeat((area.width as usize).saturating_sub(2)));
+    frame.render_widget(Paragraph::new(Line::styled(rule, edge)), Rect { x: area.x, width: area.width, ..rule_area });
+    frame.render_widget(Paragraph::new(out).wrap(Wrap { trim: false }).scroll((app.output_scroll, 0)), output_area);
 }
 
 fn plural_devices(n: usize) -> String {
@@ -1299,7 +1243,7 @@ mod tests {
     fn activity_lists_runs_with_progress_and_groups_results_by_outcome() {
         let (_rt, mut app) = activity_app();
         let screen = text_of(&draw_at(&mut app, 130, 34));
-        for expected in ["BitlockerPreChecker", "Cleanup temp files", "38/40", "3 runs · 1 running", "31 passed", "7 non-zero", "2 waiting", "Non-zero exit", "watching 1 run"] {
+        for expected in ["BitlockerPreChecker", "Cleanup temp files", "38/40", "3 runs · 1 running", "31 ×", "7 ×", "2 ×", "Non-zero exit", "watching 1 run"] {
             assert!(screen.contains(expected), "missing {expected:?}:\n{screen}");
         }
         // A headline is either shown whole or ends in an ellipsis: never cut off mid-word without one.
@@ -2700,13 +2644,19 @@ mod tests {
     }
 
     #[test]
-    fn the_counts_in_a_border_are_separated_and_switch_to_symbols_when_short_of_room() {
+    fn a_runs_results_and_output_share_one_panel() {
         let (_rt, mut app) = activity_app();
-        let roomy = text_of(&draw_at(&mut app, 80, 24));
-        assert!(roomy.contains("31 passed · ! 7 non-zero · … 2 waiting"), "words, with separators, when they fit:\n{roomy}");
-        let tight = text_of(&draw_at(&mut app, 64, 24));
-        assert!(tight.contains("✓31 · !7 · …2"), "just symbols and numbers when they do not:\n{tight}");
-        assert!(!roomy.contains("passed!") && !tight.contains("✓31!"), "never run together");
+        for (width, height) in [(130, 34), (100, 28), (80, 24)] {
+            let screen = text_of(&draw_at(&mut app, width, height));
+            // Three boxes became one: no separate summary or output box, and the group counts are the first column.
+            assert_eq!(screen.matches("┤ results ├").count(), 1, "{screen}");
+            assert!(!screen.contains("devices & output") && !screen.contains("┤ run ├"), "{screen}");
+            for expected in ["31 ×", "7 ×", "2 ×", "Passed", "Waiting", "2 devices:"] {
+                assert!(screen.contains(expected), "missing {expected:?} at {width}x{height}:\n{screen}");
+            }
+            // The rule between the groups and the output joins the panel's border on both sides.
+            assert!(screen.lines().any(|l| l.contains("├────────") && l.contains("────┤")), "{screen}");
+        }
     }
 
     #[test]
