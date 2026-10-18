@@ -16,7 +16,7 @@ A small desktop app for running N-able repository scripts on devices, or on whol
 cargo run --release --manifest-path crates/tui/Cargo.toml
 ```
 
-Arrow keys move around: `↑`/`↓` choose a page, `→` steps into it, `←` steps back out. Press `?` for every key. The app paints its own background so text stays readable on any terminal theme; set `NVOKE_TRANSPARENT=1` to use the terminal's own instead. It needs a terminal with 24-bit colour.
+Arrow keys move around: `↑`/`↓` choose a page, `→` steps into it, `←` steps back out. Press `?` for every key. The colours come from the logo (deep violet, white and cyan); success, warning and failure stay green, amber and red. The app paints its own background so text stays readable on any terminal theme; set `NVOKE_TRANSPARENT=1` to use the terminal's own instead. It needs a terminal with 24-bit colour.
 
 Run `nvoke --dry-run` (or set `NVOKE_DRY_RUN=1`) to try things without consequences: reads work as normal, but nothing that would change N-able is ever sent. Each change is held back instead, and `d` lists them with the exact request that would have gone out (passwords redacted). Nothing is written to the audit log or the shared run history either. The mode is chosen at launch and a banner shows it for the whole session. It only covers N-able: saving your own settings still works.
 

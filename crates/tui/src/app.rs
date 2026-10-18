@@ -519,6 +519,7 @@ impl App {
         self.group_table.select(selected);
     }
 
+    #[cfg(test)]
     pub fn core(&self) -> &Arc<Core> {
         &self.core
     }

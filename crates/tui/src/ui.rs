@@ -97,19 +97,30 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     let clock = Local::now().format("%H:%M:%S").to_string();
     let right = format!("{host}  {clock} ");
 
+    // The bar is the logo's violet, edge to edge.
+    let bar = Style::new().bg(theme::HEADER_BG).fg(TEXT);
+    frame.render_widget(Block::new().style(bar), area);
     let [left_area, right_area] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(right.chars().count() as u16)]).areas(area);
 
-    // The logo's colours drift along the letters as the ticks advance.
-    let mut left = vec![Span::styled(" ◢◤ ", Style::new().fg(ACCENT))];
-    left.extend("N-voke".chars().enumerate().map(|(i, c)| Span::styled(c.to_string(), Style::new().fg(theme::shimmer(i, app.tick)).add_modifier(Modifier::BOLD))));
-    left.push(Span::styled(format!("  /  {}", app.page.title()), Style::new().fg(DIM)));
+    // The logo's mark: a white N, a cyan prompt and a blinking cursor. The wordmark's
+    // colours drift between cyan and white as the ticks advance.
+    let cursor = if theme::cursor_visible(app.tick) { "_" } else { " " };
+    let mut left = vec![
+        Span::raw(" "),
+        Span::styled("N", bar.fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::styled(">", bar.fg(ACCENT).add_modifier(Modifier::BOLD)),
+        Span::styled(cursor, bar.fg(ACCENT).add_modifier(Modifier::BOLD)),
+        Span::raw("  "),
+    ];
+    left.extend("N-voke".chars().enumerate().map(|(i, c)| Span::styled(c.to_string(), bar.fg(theme::shimmer(i, app.tick)).add_modifier(Modifier::BOLD))));
+    left.push(Span::styled(format!("  /  {}", app.page.title()), bar.fg(DIM)));
     if app.is_dry_run() {
         // Loud on purpose: it must be obvious at a glance that nothing is being sent.
         left.push(Span::raw("   "));
         left.push(Span::styled(" DRY RUN · nothing is sent ", Style::new().fg(theme::BG).bg(WARN).add_modifier(Modifier::BOLD)));
     }
-    frame.render_widget(Paragraph::new(Line::from(left)), left_area);
-    frame.render_widget(Paragraph::new(right).style(Style::new().fg(DIM)).alignment(Alignment::Right), right_area);
+    frame.render_widget(Paragraph::new(Line::from(left)).style(bar), left_area);
+    frame.render_widget(Paragraph::new(right).style(bar.fg(DIM)).alignment(Alignment::Right), right_area);
 }
 
 fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
@@ -639,12 +650,16 @@ fn draw_audit(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
         .block(panel("audit log", focused).title_bottom(Line::styled(format!(" {total} entries "), Style::new().fg(DIM))));
     frame.render_stateful_widget(table, table_area, &mut app.audit_table);
 
-    let mut scroll = ScrollbarState::new(total).position(app.audit_table.selected().unwrap_or(0));
-    frame.render_stateful_widget(
-        Scrollbar::new(ScrollbarOrientation::VerticalRight).begin_symbol(None).end_symbol(None).track_symbol(None).style(Style::new().fg(BORDER)),
-        table_area.inner(ratatui::layout::Margin { vertical: 1, horizontal: 0 }),
-        &mut scroll,
-    );
+    // Only when there is something to scroll: otherwise it is a column of blocks that means nothing.
+    let visible_rows = table_area.height.saturating_sub(3) as usize; // borders and the header row
+    if total > visible_rows {
+        let mut scroll = ScrollbarState::new(total).position(app.audit_table.selected().unwrap_or(0));
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight).begin_symbol(None).end_symbol(None).track_symbol(None).style(Style::new().fg(BORDER)),
+            table_area.inner(ratatui::layout::Margin { vertical: 1, horizontal: 0 }),
+            &mut scroll,
+        );
+    }
 
     // Details of the selected entry.
     let label = |text: &str| Span::styled(format!("{text:<9}"), Style::new().fg(DIM));
@@ -1252,5 +1267,23 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_audit_scrollbar_appears_only_when_there_is_something_to_scroll() {
+        let edge_has_blocks = |app: &mut App| {
+            let buffer = draw_at(app, 110, 30);
+            let x = buffer.area.width - 1;
+            (0..buffer.area.height).any(|y| buffer[(x, y)].symbol() == "█")
+        };
+        let (_rt, mut few) = audit_app(); // two entries, plenty of room
+        assert!(!edge_has_blocks(&mut few), "a scrollbar for two rows is noise");
+        let (_rt2, mut many) = audit_app();
+        if let Load::Ready(log) = &mut many.audit {
+            for i in 0..60 {
+                log.entries.push(AuditEntry::new("tag.create", &format!("Entry {i}"), Ok(()), Value::Null));
+            }
+        }
+        assert!(edge_has_blocks(&mut many), "a long list needs its scrollbar");
     }
 }
