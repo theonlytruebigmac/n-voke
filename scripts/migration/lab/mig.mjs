@@ -1,6 +1,6 @@
 // Phase 0 test 0.10: one real migration, driven by the built endpoint script.
 //   node mig.mjs publish                 publish/refresh dist/nvoke-migration.ps1 in both Ecoverse tenants
-//   node mig.mjs launch <assetId> <destOrgUnitId>
+//   node mig.mjs launch <assetId> <destOrgUnitId> [full|none] [destSide=dst] [launchSide=src]
 //   node mig.mjs action <src|dst> <assetId> <Status|Cleanup>
 //   node mig.mjs watch                   log every stage signal until healthy (Ctrl-C to stop)
 import { SIDES as LAB, secret } from "./lab-config.mjs";
@@ -91,16 +91,17 @@ if (cmd === "publish") {
   save();
 } else if (cmd === "launch") {
   const [assetId, destOrgUnit] = [process.argv[3], process.argv[4]];
-  const destSide = process.argv[6] ?? "dst"; // "src" = same-server reinstall
+  const destSide = process.argv[6] ?? "dst"; // server the device moves to
+  const launchSide = process.argv[7] ?? "src"; // Ecoverse tenant the device is in now
   const tok = (await rest(destSide, `/api/org-units/${destOrgUnit}/registration-token`)).json.data;
   if (!tok?.registrationToken) throw new Error(`No registration token for destination org unit ${destOrgUnit}`);
   console.log(`destination ${destOrgUnit}: token ${tok.registrationToken.length} chars, expires ${tok.registrationTokenExpiryDate}`);
-  const id = await runScript("src", assetId, [
+  const id = await runScript(launchSide, assetId, [
     input("Action", "Launch"), input("DestServer", SIDES[destSide].host), input("DestCustomerId", destOrgUnit),
-    input("RegistrationToken", tok.registrationToken), input("MigrationId", destSide === "src" ? "lab/0.12" : "lab/0.10"), input("LauncherVersion", built.version),
+    input("RegistrationToken", tok.registrationToken), input("MigrationId", `lab/${launchSide}-to-${destSide}`), input("LauncherVersion", built.version),
     input("TaskRepeatMinutes", 15), input("TaskExpiryDays", 14), input("CleanMode", process.argv[5] ?? "full"),
   ], "N-voke migration Launch");
-  state.launch = { assetId, destOrgUnit, destSide, taskId: id, at: new Date().toISOString() };
+  state.launch = { assetId, destOrgUnit, destSide, launchSide, taskId: id, at: new Date().toISOString() };
   save();
 } else if (cmd === "action") {
   const [side, assetId, action] = process.argv.slice(3);

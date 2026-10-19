@@ -309,6 +309,33 @@ VM-B reinstalled on `source.example.com` into its own site (Demo - GlobalRetail 
 | **Take Control's credential provider stays locked** (`MSPACredentialProvider_*.dll` and its `fips.dll`/`libcrypto` are loaded by the logon process) | Left in place on purpose: scheduling them for deletion at reboot could delete files of the same name from the newly installed Take Control. Known leftover until the next reboot / Take Control update |
 | Full history in `StatusJson` (30 entries) shows every cleanup step | Kept |
 
+## Reverse move (destination → source, 2026-10-19)
+
+VM-C moved back from `destination.example.com` (agent 2026.4.1.11) to `source.example.com` (2026.4.0.25), launched through the **destination** Ecoverse tenant, `CleanMode=full`. This is the direction an upgrade-style install would treat as a downgrade.
+
+| Time (UTC) | Event |
+|---|---|
+| 23:29:17 → 23:29:29 | Launch from the destination tenant → **Staged** (`mode move`, from the destination server) |
+| 23:31:34 → 23:31:47 | First task run; installer downloaded (BITS, 133.1 MB in 9 s) |
+| 23:33:36 | Cleanup: Windows Agent uninstall → 0; MSP Core Agent → 1605 (already removed by the agent's uninstall) |
+| 23:33:42 – 23:34:33 | **All folders and both registry keys removed**, Take Control included (`GetSupportService_N-Central` after ~50 s of retries) |
+| 23:33:50 | Destination Ecoverse asset `DISCONNECTED` |
+| 23:34:33 → 23:35:24 | Install, exit 0 (51 s) |
+| 23:34:54 | New source device record (a new device ID) |
+| 23:40:18 | First source check-in |
+| 23:42:29 → 23:42:50 | **New asset in the source tenant**, `CONNECTED` (UFA provisioned ~2 minutes after the check-in, no restart needed) |
+| 23:46:40 | Second task run: **healthy**; task removed itself |
+| ~23:55 | `Cleanup` through the source tenant: `Cleaned=true` |
+| 23:55:47 | **Destination record retired** (`DELETE …?removeAgents=false` → 204, then 404); the stale destination asset disappeared within ~20 s |
+
+| Finding | Effect |
+|---|---|
+| ✅ The reverse direction and a **downgrade** work identically with full cleanup | The version relationship no longer matters |
+| ✅ Launching from the destination tenant works (the harness and the design are symmetric) | — |
+| Delays this run: launch → healthy ~17 min; check-in → asset ~2 min (was ~4) | Within the tracker's thresholds |
+| The old destination asset's device link flickered (empty, then set) for a few minutes after the uninstall | Don't rely on `ncentralDevice` of a disconnected asset |
+| Both lab servers are back to their pre-test state | — |
+
 ## Status of Phase 0 tests
 
 | # | Status |
