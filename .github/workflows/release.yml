@@ -115,9 +115,15 @@ jobs:
             prerelease=false
             if [[ "$TAG" == *-* ]]; then prerelease=true; fi
 
+            # Shown above the generated notes, so it is clear which file is which.
+            desktop='**Desktop app:** `N-voke_*` installers (`.msi` / `.exe` for Windows, `.dmg` for macOS, `.AppImage` / `.deb` / `.rpm` for Linux).'
+            terminal='**Terminal app:** `nvoke-tui-*` archives with a `.sha256` checksum each (Windows, macOS, Linux). Unpack and run `nvoke`.'
+            body=$(printf '%s\n\n%s' "$desktop" "$terminal")
+
             id=$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
               -f tag_name="$TAG" \
               -f name="N-voke $TAG" \
+              -f body="$body" \
               -F draft=true \
               -F prerelease=$prerelease \
               -F generate_release_notes=true \
@@ -251,7 +257,7 @@ jobs:
 
       - name: Package
         run: |
-          name="nvoke-$TAG-${{ matrix.asset }}"
+          name="nvoke-tui-$TAG-${{ matrix.asset }}"
           mkdir -p "dist/$name"
           bin=nvoke
           if [ "${{ matrix.platform }}" = "windows-latest" ]; then bin=nvoke.exe; fi
@@ -270,7 +276,7 @@ jobs:
       - name: Upload to the draft release
         run: |
           cd dist
-          for file in nvoke-*.${{ matrix.archive }} nvoke-*.${{ matrix.archive }}.sha256; do
+          for file in nvoke-tui-*.${{ matrix.archive }} nvoke-tui-*.${{ matrix.archive }}.sha256; do
             # A re-run replaces the file from the earlier attempt instead of failing on it.
             old=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --paginate \
               --jq ".[] | select(.name == \"$file\") | .id")

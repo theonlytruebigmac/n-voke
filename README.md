@@ -22,7 +22,7 @@ A small desktop app for running N-able repository scripts on devices, or on whol
 
 ![nvoke Activity page with a run's results grouped by outcome](docs/screenshots/tui-activity.png)
 
-Download it from the [releases page](https://github.com/theonlytruebigmac/n-voke/releases) (`nvoke-<version>-windows-x86_64.zip`, `-macos-universal.tar.gz` or `-linux-x86_64.tar.gz`, each with a `.sha256` checksum), unpack it and run `nvoke`. Or build it from source:
+Download it from the [releases page](https://github.com/theonlytruebigmac/n-voke/releases) (the `nvoke-tui-<version>-…` files: `windows-x86_64.zip`, `macos-universal.tar.gz` or `linux-x86_64.tar.gz`, each with a `.sha256` checksum; the `N-voke_…` files are the desktop app), unpack it and run `nvoke`. Or build it from source:
 
 ```sh
 cargo run --release --manifest-path crates/tui/Cargo.toml

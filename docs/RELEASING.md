@@ -44,7 +44,7 @@ A release is created by pushing a version tag. The **Release** workflow (`.githu
 | Job | Purpose |
 |---|---|
 | **Verify** | Fails unless the tag equals `v<app version>` in every file that carries it (the app, the core crate and the terminal app). Then runs the frontend build, frontend tests and Rust tests, so a tag on a broken commit never ships. |
-| **Draft release** | Creates a draft release for the tag with notes generated from merged pull requests, or reuses the draft if one exists. Tags containing a hyphen are marked as pre-releases. |
+| **Draft release** | Creates a draft release for the tag with a note on which files are the desktop app and which the terminal app, followed by notes generated from merged pull requests, or reuses the draft if one exists. Tags containing a hyphen are marked as pre-releases. |
 | **Build** | Runs once each on Windows, macOS and Linux and uploads the installers to the draft. |
 | **Terminal app** | Runs alongside Build, once per platform: compiles `nvoke` in release mode, packs it with the licence into an archive and a `.sha256` checksum, and uploads both to the same draft. A re-run replaces the files from the earlier attempt. |
 | **Publish release** | Runs only if every build succeeded. Flips the draft to public and marks it Latest (stable releases only). |
@@ -59,13 +59,13 @@ Installers produced:
 | macOS | universal `.dmg` for Apple Silicon and Intel |
 | Linux | `.AppImage`, `.deb`, `.rpm` |
 
-The terminal app, `nvoke`, comes as a plain archive per platform, each with a `.sha256` file:
+The terminal app comes as a plain archive per platform, each with a `.sha256` file. The files start with `nvoke-tui-` so they read apart from the desktop installers (`N-voke_*`); the program inside is still `nvoke`. The release notes open with a line saying which is which:
 
 | Platform | File |
 |---|---|
-| Windows | `nvoke-<tag>-windows-x86_64.zip` |
-| macOS | `nvoke-<tag>-macos-universal.tar.gz` (Apple Silicon and Intel) |
-| Linux | `nvoke-<tag>-linux-x86_64.tar.gz` |
+| Windows | `nvoke-tui-<tag>-windows-x86_64.zip` |
+| macOS | `nvoke-tui-<tag>-macos-universal.tar.gz` (Apple Silicon and Intel) |
+| Linux | `nvoke-tui-<tag>-linux-x86_64.tar.gz` |
 
 ## Pre-releases
 
