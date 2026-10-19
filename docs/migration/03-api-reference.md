@@ -32,7 +32,7 @@ Authentication: `Authorization: Bearer <API-Access token>`. Introspection is dis
 |---|---|---|
 | `scriptCreate(input: ScriptCreateMutationInput!)` | Publish the launcher. Input: `organizationId`, `name` (≤64), `description` (≤1024), `language` (`POWERSHELL` …), `isWindowsCompatible`, `isLinuxCompatible`, `isDarwinCompatible`, `content` (plain text), `timeoutSeconds` (0–3600, 0 = 3600), `inputs` (`name`, `variable` ≤48 chars each, `type` STRING/PASSWORD/BOOLEAN/INT/FLOAT/DATE_TIME, default `value`), `outputs` (`name`, `variable`, `type`) | ✅ (lab). Payload `item { id }`. Inputs are prepended to the script as typed PowerShell assignments; outputs are read from variables after the script ends, so the script must not `exit`, and every output must be one non-blank line. `exitCode` is always null; `$host.SetShouldExit(n)` yields `FAILED` with `exit status n` in `errorMessage`. See [Phase 0 findings](10-phase0-findings.md#ecoverse-script-runs-tests-01-02-04-2026-10-19) |
 | `scriptUpdate` | Refresh the launcher. **Full replace**: every field of the create input plus `scriptId` is required | ✅ (lab) |
-| `scriptsDelete` | Remove the launcher | 🔶 |
+| `scriptsDelete(input: { scriptIds })` | Remove the launcher. Response `items { id }` plus `errors` | ✅ (lab) |
 | `assetsScriptRun(input: { assetIds, configuration: { scriptId, name ≤128, timeoutSeconds, credential, inputs, shouldRunWhenOnline } })` | Launch on devices with per-run inputs. Returns `items { id }` (one task per device) and typed `errors` | ✅ (lab) |
 | `shouldRunWhenOnline: true` | Queue the launch for offline devices. **Required** for a disconnected device: without it the run is refused (`ScriptRunValidationError: "Device is offline."`). A queued task is `IN_PROGRESS` with no execution, outlives `timeoutSeconds`, and runs shortly after the device reconnects | ✅ (lab) |
 | `scriptTasksCancel(input: { taskIds })` | Cancel queued launches. Select only `errors`: selecting `items { … }` returns null items with `INTERNAL_SERVER_ERROR`, although the cancel succeeds. Tasks then report `CANCELED` | ✅ (lab) |
@@ -82,7 +82,7 @@ Authentication: `POST /api/auth/authenticate` with `Authorization: Bearer <user 
 | `POST /api/scheduled-tasks/direct` | Run a repository item on one device. Body: `name`, `itemId`, `taskType` (`AutomationPolicy`, `Script`, `MacScript`), `customerId`, `deviceId`, `credential` (`LocalSystem`), `parameters[]`. For `taskType: "Script"` the inputs go in one parameter, `{ "name": "CommandLine", "value": "-Action Launch …" }` | ✅ in spec |
 | `GET /api/scheduled-tasks/{id}`, `/status`, `/status/details` | Task result per device: `status`, `output`, `message`; **no separate exit code** | ✅ in spec |
 | `GET /api/devices/{id}/scheduled-tasks` | Tasks for a device | ✅ in spec |
-| `DELETE /api/devices/{id}?removeAgents=false` | Remove the old device record from the source after migration | ✅ in spec |
+| `DELETE /api/devices/{id}?removeAgents=false` | Remove the old device record from the source after migration (*Retired*). Returns 204; the record then 404s, and the device's stale source Ecoverse asset disappears within about 20 s. `removeAgents` defaults to false (record only; nothing is sent to the device) | ✅ (lab) |
 | `POST /api/device`, `GET /api/devices/{id}/activation-key` | Pre-create the destination device and get an activation key (optional variant) | ✅ in spec |
 | Upload or list repository items | — | **Not in the 2026.4 REST API.** The REST path's script is uploaded by hand and the operator enters its item ID |
 

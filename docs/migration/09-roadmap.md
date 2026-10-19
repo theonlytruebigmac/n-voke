@@ -32,7 +32,7 @@ flowchart LR
 | 0.9b | Generate a missing token with `POST /api/customers/{id}/software/installers`; then call it again on a customer that already has an unexpired token | A token appears (**done**); a second call keeps the valid token and its expiry unchanged (**done**) |
 | 0.10 | Full run on VM 1: launcher → scheduled task → install to the destination | Device healthy on the destination; `status.json` complete |
 | 0.11 | Ecoverse asset fields `systemInfo` (serial, MAC, host name) and whether the asset ID survives the move | Matching rules confirmed |
-| 0.12 | Same-server reinstall on VM 2 | Healthy again on the same server; matching picks the new device ID |
+| 0.12 | Same-server reinstall on VM 2 | Healthy again on the same server (**passed** 2026-10-19: same device and asset IDs are kept) |
 
 **Exit:** a short findings note added to this folder, and [API reference](03-api-reference.md) statuses updated.
 

@@ -248,7 +248,7 @@ VM-C (Windows 11, 2 GB RAM, about 90% memory in use) was moved from `source.exam
 | **A normal uninstall leaves N-able folders behind** | After uninstalling the agent and the UFA on VM-C, these remained and had to be deleted by hand before a clean reinstall: `Program Files (x86)\N-able Technologies`, `ProgramData\{MspAgent, MspPlatform, N-Able Technologies, GetSupportService_N-Central, GetSupportService_Common_N-Central}` | Exactly the full cleanup's folder list. Removing the products isn't enough; the folders carry the old identity |
 | **With the folders removed, the reinstalled UFA starts clean but waits to be provisioned** | After deleting the leftover folders and reinstalling the source agent (a new device ID, first check-in about 22:12Z), `Msp Agent` came back with a `deprovision.log` (6:10 PM local) but no `provision.log`. Its log no longer shows `400 The SSL certificate error`; instead `vault … amazonRoot / chain: element not found` and `certificate chain missing` on each MQTT attempt (every ~2 min) | The stale-identity problem is gone. A fresh UFA needs N-central/Ecoverse to provision it (its config points at `localhost`). ❓ How long provisioning takes, and what triggers it. Its `deprovision.log` shows a startup check, *reset the agent if its GUID doesn't match the certificate CN*, skipped here because it isn't provisioned yet |
 | **The clean UFA provisions only after a restart** | Timeline (UTC): new device created 22:07:22; UFA installed ~22:09:42 and logging `certificate chain missing`; first Windows Agent check-in 22:12:17; nothing until a **reboot** ~22:20; then `provision.log`: provisioning required → X.509 fetch **200** → config saved (`organization`, `customerId`, `host`, `level`, `parentCustomerId`, `serverGuid`) at 22:20:42; **new asset `asset-2`** visible 22:25:16, `CONNECTED` 22:25:58 | The UFA starts before the new Windows Agent has registered and doesn't provision until it's restarted. The installer restarts `MspAgent` once the Windows Agent is healthy, then waits for a successful provisioning. The provisioned identity carries the provisioning server's GUID and customer, which is what ties it to that server's Ecoverse tenant |
-| **The Ecoverse asset ID does not survive a reinstall** (Q5) | Old asset `asset-1` (original device ID) → new asset `asset-2` (new device ID) | Matching uses serial number and MAC address, never the asset ID |
+| **The Ecoverse asset ID does not survive a new device record** (Q5; see [0.12](#same-server-reinstall-test-012-2026-10-19) for the same-server case, where it does) | Old asset `asset-1` (original device ID) → new asset `asset-2` (new device ID) | Matching uses serial number and MAC address, never the asset ID |
 | **The Ecoverse asset follows the N-central device record** | When the original source record was removed at about 21:59:52Z, the asset `asset-1` disappeared from the source tenant at 22:00:54Z (gone, not disconnected). The reinstall registered under a new device ID | Deleting old source records (the optional *Retired* step) also clears the old Ecoverse asset; a migrated device gets a new asset ID, so matching must use serial and MAC (Q5) |
 | Source `lastApplianceCheckinTime` is unreliable around the move (reported recent, then jumped to an hour old) | Agent removed relies on the destination appearance plus a quiet source, not one source reading |
 
@@ -279,8 +279,35 @@ VM-C, freshly reinstalled on the source (new device ID, asset `asset-2`), moved 
 | The fresh UFA provisioned by itself here (it didn't on the earlier source reinstall); the restart step is a safety net | Keep the restart, but only when not yet provisioned |
 | **A new asset can't run scripts for a few minutes** after it shows `CONNECTED` (`ScriptRunAssetNotFoundError` for ~4 minutes) | The tracker retries this error for newly registered assets instead of falling back to REST |
 | **A new asset's inventory is empty at first** (no serial, manufacturer, model or hostname in the Ecoverse UI right after registration) | Matching waits for inventory, or uses the destination N-central record's assets in the meantime |
+| **Retiring the source record works through the API** | After the move, `DELETE /api/devices/{id}?removeAgents=false` on the source returned 204, the record then returned 404, and the stale source Ecoverse asset disappeared within about 20 s | The *Retired* stage can be automatic (after approval), so no manual clean-up in the source UI |
 | `GetSupportService_N-Central` can be locked during cleanup | Retry the leftover folder on the next run, or after the new agent installs |
 | The status summary returns only the last 10 history entries, which hides the uninstall results | Return the full history (or the uninstall entries) in `StatusJson` |
+
+## Same-server reinstall (test 0.12, 2026-10-19)
+
+VM-B reinstalled on `source.example.com` into its own site (Demo - GlobalRetail Downtown) with build 0.1.0+3db4bba, `CleanMode=full`, launched through the source Ecoverse tenant.
+
+| Time (UTC) | Event |
+|---|---|
+| 23:05:28 → 23:05:43 | Launch → **Staged, `mode reinstall`** (the agent already pointed at the target server) |
+| 23:07:44 → 23:07:57 | First task run; installer downloaded (BITS, 133.1 MB in 8 s, signature valid) |
+| 23:09:45 | Cleanup: **Windows Agent uninstall → 0** (about 1 min 48 s) |
+| 23:09:47 | **MSP Core Agent → 1605 (not installed)**: the Windows Agent's normal uninstall had already removed the UFA, Patch Management, Request Handler and File Cache |
+| 23:09:52 | Leftover Take Control updater service deleted |
+| 23:10:04 | Source Ecoverse asset `DISCONNECTED` |
+| 23:10:53 | `BeAnywhere Support Express` **partly left**: `MSPACredentialProvider_…dll`, `fips.dll`, `libcrypto-3-x64.dll` in use; the other folders and both registry keys removed |
+| 23:10:53 → 23:11:36 | Reinstall, exit 0 (43 s) |
+| 23:19:14 | **Same asset ID back `CONNECTED`**, linked to the **same** N-central device ID |
+| 23:22:50 | Second task run: **healthy** (reinstall mode accepted health only after its own install; UFA present, running, provisioned); task removed itself |
+| ~23:25 | `Cleanup`: `Cleaned=true` |
+
+| Finding | Effect |
+|---|---|
+| ✅ Reinstall mode works: detected automatically, and health is only accepted after the installer's own install | As designed |
+| **On a same-server reinstall N-central keeps the device record, so the Ecoverse asset ID survives too** | Refines Q5: the asset ID changes only when the N-central device record changes (move to another server, or the record deleted). Serial and MAC matching covers both |
+| **A normal Windows Agent uninstall takes the companions with it** (UFA, Patch Management, Request Handler, File Cache, most of Take Control); the separate uninstalls then return 1605 | Expected and harmless; the cleanup's own uninstalls cover devices where the agent's uninstall didn't |
+| **Take Control's credential provider stays locked** (`MSPACredentialProvider_*.dll` and its `fips.dll`/`libcrypto` are loaded by the logon process) | Left in place on purpose: scheduling them for deletion at reboot could delete files of the same name from the newly installed Take Control. Known leftover until the next reboot / Take Control update |
+| Full history in `StatusJson` (30 entries) shows every cleanup step | Kept |
 
 ## Status of Phase 0 tests
 
@@ -299,4 +326,4 @@ VM-C, freshly reinstalled on the source (new device ID, asset `asset-2`), moved 
 | 0.7 | ✅ Pass/fail from `/status/details`; full output and **Exit Code** in the unauthenticated output zip; stderr replaces stdout |
 | 0.8 | ✅ A direct task to an offline device is accepted, shows `Pending`, and runs about 40 s after the device reconnects |
 | 0.10 | ✅ First run: N-central moved, but the UFA stayed in the source tenant (in-place upgrade). **Rerun with full cleanup: complete move** (N-central and Ecoverse), healthy, cleaned up; ~18 min launch to healthy |
-| 0.12 | Not started. 0.5 and 0.6 now test a hand-uploaded `.ps1`, not an AMP |
+| 0.12 | ✅ Same-server reinstall with full cleanup: reinstall mode, healthy after its own install, same device and asset IDs, cleaned up | 0.5 and 0.6 now test a hand-uploaded `.ps1`, not an AMP |

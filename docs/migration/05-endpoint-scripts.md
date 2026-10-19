@@ -108,7 +108,7 @@ An in-place upgrade (destination agent newer than the source's) only re-points t
 | 5 | Folders | `Program Files (x86)\{N-able Technologies, Msp Agent, MspPlatform, BeAnywhere Support Express}`; `ProgramData\{N-able Technologies, MspAgent, MspPlatform, GetSupportService_N-Central, GetSupportService_Common_N-Central}`; SYSTEM's `MSPScriptExecution` |
 | 6 | Registry | `HKLM\SOFTWARE\N-able Technologies` (64-bit and `WOW6432Node`) |
 
-Products are matched by exact display name and paths are a fixed list; nothing is removed by wildcard. Each uninstall has a 20-minute limit. Every action and its result goes into `status.json`. The new agent then installs into a clean machine, and the destination deploys its own UFA and components. `CleanMode=none` skips all of this (plain install over the top).
+Products are matched by exact display name and paths are a fixed list; nothing is removed by wildcard. In practice the Windows Agent's own uninstall already removes the companions (the others then return 1605, "not installed"). Take Control's credential provider DLL stays locked by the logon process and is deliberately left until the next reboot: scheduling it for deletion could remove same-named files of the newly installed Take Control. Each uninstall has a 20-minute limit. Every action and its result goes into `status.json`. The new agent then installs into a clean machine, and the destination deploys its own UFA and components. `CleanMode=none` skips all of this (plain install over the top).
 
 ## `status.json`
 

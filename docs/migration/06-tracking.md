@@ -64,7 +64,7 @@ stateDiagram-v2
 | → Registered | Ecoverse asset whose `ncentralDevice.server.origin` is the destination and whose identity (serial, MAC) matches; it is a **new asset ID** in the destination's tenant, and appears only after the UFA provisions there (minutes after the installer restarts it) | `GET /api/org-units/{id}/devices` on the mapped destination customer, matched by identity |
 | Registered → Healthy | Destination `lastApplianceCheckinTime` within 2 × the check-in interval; optionally `agentConnection = CONNECTED` too | The same via REST |
 | Healthy → Cleaned up | Cleanup task output `Cleaned = true`; `StatusJson` stored | `Cleaned` and `StatusJson` from the `NVOKE-RESULT {json}` line (the script must be uploaded to the destination server too) |
-| Cleaned up → Retired | Source asset tagged `nvoke:migrated`; optional `DELETE /api/devices/{id}?removeAgents=false` on the source | The same |
+| Cleaned up → Retired | Optional (approval needed): `DELETE /api/devices/{id}?removeAgents=false` on the source (confirmed: record removed, and its stale Ecoverse asset disappears within seconds). Without it, the source asset is tagged `nvoke:migrated` and the record is left for the operator | The same |
 
 ## Matching the new device to the old one
 
