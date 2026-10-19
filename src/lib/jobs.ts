@@ -7,8 +7,12 @@ import type { Execution, Script } from "./types";
 
 const POLL_INTERVAL_MS = 5000;
 const MAX_POLL_FAILURES = 5;
-/** Tasks fetched per request (aliased into one GraphQL query). */
-const POLL_BATCH_SIZE = 20;
+/**
+ * Tasks fetched per request (aliased into one GraphQL query). The API allows at
+ * most 5 aliases and 130 fields per operation; a task selects about 30 fields,
+ * so 5 already exceeds the field limit (`MAX_HEIGHT_LIMIT`).
+ */
+const POLL_BATCH_SIZE = 4;
 /** Name in the encrypted store (see secureStore.ts). */
 const STORE_NAME = "jobs";
 /** Plain-text localStorage keys used by earlier versions; migrated once, then deleted. */
