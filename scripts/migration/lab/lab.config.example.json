@@ -1,0 +1,17 @@
+{
+  "keychainService": "nvoke-lab",
+  "src": {
+    "host": "source.example.com",
+    "serviceOrgName": "N-voke Demo Source",
+    "serviceOrgId": 0,
+    "ecoverseOrgId": "00000000-0000-0000-0000-000000000000",
+    "apiUser": "api-user@example.com"
+  },
+  "dst": {
+    "host": "destination.example.com",
+    "serviceOrgName": "N-voke Demo Destination",
+    "serviceOrgId": 0,
+    "ecoverseOrgId": "00000000-0000-0000-0000-000000000000",
+    "apiUser": "api-user@example.com"
+  }
+}

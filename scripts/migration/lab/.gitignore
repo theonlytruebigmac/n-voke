@@ -1,0 +1,10 @@
+# Real lab settings and everything the harness writes.
+lab.config.json
+*.log
+*-state.json
+task-*.json
+rest-task-*.json
+out-*/
+spec/
+*.zip
+*.txt

@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Temp Folder
+n-central-agent-redeployment-via-windows-scheduled-task/
