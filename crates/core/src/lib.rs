@@ -91,7 +91,30 @@ pub(crate) fn response_body(status: u16, text: &str) -> Result<Value, String> {
     if status == 401 || status == 403 {
         return Ok(json!({ "errors": [{ "message": snippet }] }));
     }
+    if status == 429 {
+        // The gateway's own plain-text refusal ("N-query Rate Limiting"); it says nothing a reader can act on.
+        return Err(RATE_LIMITED.into());
+    }
     Err(format!("HTTP {status}: the API returned a non-JSON response: {snippet}"))
+}
+
+/// What a rate-limited request (HTTP 429) reports once the retries are used up.
+const RATE_LIMITED: &str = "HTTP 429: N-able is rate limiting requests. Wait a moment and try again.";
+
+/// A 429 means the request was refused unprocessed, so asking again is safe, mutations included.
+const RATE_LIMIT_RETRIES: u32 = 2;
+const MAX_RETRY_WAIT_SECS: u64 = 10;
+
+/// Whether `error` is the rate-limit refusal, so callers can hold off instead of asking again at once.
+pub fn is_rate_limited(error: &str) -> bool {
+    error.starts_with("HTTP 429")
+}
+
+/// How long to wait before retry number `attempt` (from 0): the server's `Retry-After` seconds if it gave
+/// them, otherwise 2s then 4s. Never more than `MAX_RETRY_WAIT_SECS`, never nothing.
+fn retry_wait(retry_after: Option<&str>, attempt: u32) -> Duration {
+    let secs = retry_after.and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(2u64 << attempt.min(4));
+    Duration::from_secs(secs.clamp(1, MAX_RETRY_WAIT_SECS))
 }
 
 /// What a mutation returns in dry-run mode, in place of being sent. Callers treat it as a
@@ -417,17 +440,26 @@ impl Core {
             eprintln!("[graphql] {op}");
         }
 
-        let response = self
-            .http
-            .post(&url)
-            .bearer_auth(key)
-            .json(&json!({ "query": query, "variables": variables }))
-            .send()
-            .await
-            .map_err(|e| format!("Request to {url} failed: {e}"))?;
-
-        let status = response.status().as_u16();
-        let text = response.text().await.map_err(|e| format!("Could not read the response: {e}"))?;
+        let mut attempt = 0;
+        let (status, text) = loop {
+            let response = self
+                .http
+                .post(&url)
+                .bearer_auth(&key)
+                .json(&json!({ "query": query, "variables": variables }))
+                .send()
+                .await
+                .map_err(|e| format!("Request to {url} failed: {e}"))?;
+            let status = response.status().as_u16();
+            if status == 429 && attempt < RATE_LIMIT_RETRIES {
+                let wait = retry_wait(response.headers().get(reqwest::header::RETRY_AFTER).and_then(|v| v.to_str().ok()), attempt);
+                attempt += 1;
+                tokio::time::sleep(wait).await;
+                continue;
+            }
+            let text = response.text().await.map_err(|e| format!("Could not read the response: {e}"))?;
+            break (status, text);
+        };
         let body = response_body(status, &text)?;
         Ok(GraphQlResponse { status, body })
     }
@@ -525,6 +557,25 @@ mod tests {
         // Through the usual interpretation it reads as access denied, not as a parse failure.
         let error = api::interpret(403, &body, false).unwrap_err();
         assert!(api::is_access_denied(&error), "{error}");
+    }
+
+    #[test]
+    fn a_rate_limit_refusal_says_so_plainly() {
+        let error = response_body(429, "N-able N-query Rate Limiting").unwrap_err();
+        assert!(is_rate_limited(&error), "{error}");
+        assert!(!error.contains("non-JSON"), "{error}");
+        assert!(!is_rate_limited("HTTP 502: the API returned a non-JSON response: x"));
+    }
+
+    #[test]
+    fn a_rate_limited_request_waits_as_told_or_a_little_longer_each_time() {
+        assert_eq!(retry_wait(Some("3"), 0), Duration::from_secs(3));
+        assert_eq!(retry_wait(Some(" 3 "), 1), Duration::from_secs(3));
+        assert_eq!(retry_wait(None, 0), Duration::from_secs(2));
+        assert_eq!(retry_wait(None, 1), Duration::from_secs(4));
+        assert_eq!(retry_wait(Some("0"), 0), Duration::from_secs(1), "never a busy loop");
+        assert_eq!(retry_wait(Some("600"), 0), Duration::from_secs(MAX_RETRY_WAIT_SECS), "a long wait is not worth blocking on");
+        assert_eq!(retry_wait(Some("Wed, 21 Oct 2026 07:28:00 GMT"), 0), Duration::from_secs(2), "a date is not understood, so the default applies");
     }
 
     #[test]

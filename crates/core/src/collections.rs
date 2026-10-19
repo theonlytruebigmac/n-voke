@@ -28,6 +28,8 @@ const TAGS_STALE: i64 = 30_000;
 const SCRIPTS_STALE: i64 = 2 * MINUTE;
 const ORGS_STALE: i64 = 10 * MINUTE;
 const QUERY_STALE: i64 = MINUTE;
+/// After N-able refuses a request as rate limited, don't ask for the same thing again for this long.
+const RATE_LIMIT_COOLDOWN: i64 = 15_000;
 
 /// The encrypted file the lists are kept in between runs.
 pub(crate) const CACHE_NAME: &str = "collections-cache";
@@ -209,6 +211,11 @@ pub struct Collections {
     assets: Mutex<HashMap<OrgKey, Fresh<Vec<Asset>>>>,
     members: Mutex<HashMap<OrgKey, Fresh<Devices>>>,
     tag_details: Mutex<HashMap<String, Fresh<Option<Tag>>>>,
+    /// One list refresh at a time. A picker searches on every keystroke, so without this a cold or
+    /// stale list would be fetched once per key typed, all at once.
+    refresh: tokio::sync::Mutex<()>,
+    /// What was last refused as rate limited, by what was asked for: when, and the error to repeat.
+    cooling: Mutex<HashMap<String, (i64, String)>>,
 }
 
 impl Collections {
@@ -221,6 +228,8 @@ impl Collections {
             assets: Mutex::new(HashMap::new()),
             members: Mutex::new(HashMap::new()),
             tag_details: Mutex::new(HashMap::new()),
+            refresh: tokio::sync::Mutex::new(()),
+            cooling: Mutex::new(HashMap::new()),
         })
     }
 
@@ -272,52 +281,107 @@ impl Collections {
         self.assets.lock().unwrap().clear();
         self.members.lock().unwrap().clear();
         self.tag_details.lock().unwrap().clear();
+        self.cooling.lock().unwrap().clear();
         let _ = self.core.store_remove(CACHE_NAME).await;
     }
 
-    pub async fn organizations(&self, term: &str) -> Result<Vec<Organization>, String> {
-        let now = now_ms();
-        let cached = self.orgs.lock().unwrap().as_ref().map(|f| (f.value.clone(), f.is_fresh(ORGS_STALE, now)));
-        let dir = match cached {
-            Some((dir, true)) => dir,
-            other => {
-                let fresh = refresh_organizations(other.map(|(d, _)| d), now, || self.core.count_organizations(), || self.core.fetch_all_organizations()).await?;
-                *self.orgs.lock().unwrap() = Some(Fresh { value: fresh.clone(), checked_at: now });
-                self.persist().await;
-                fresh
+    /// The error to repeat, if what `key` names was refused as rate limited a moment ago.
+    fn cooling_down(&self, key: &str, now: i64) -> Option<String> {
+        self.cooling.lock().unwrap().get(key).filter(|(at, _)| now - at < RATE_LIMIT_COOLDOWN).map(|(_, error)| error.clone())
+    }
+
+    /// Remembers a rate-limit refusal for `key` (and forgets it on success). Other errors aren't held against it.
+    fn note_outcome<T>(&self, key: &str, result: &Result<T, String>) {
+        let mut cooling = self.cooling.lock().unwrap();
+        match result {
+            Ok(_) => {
+                cooling.remove(key);
             }
+            Err(error) if crate::is_rate_limited(error) => {
+                cooling.insert(key.to_string(), (now_ms(), error.clone()));
+            }
+            Err(_) => {}
+        }
+    }
+
+    async fn org_directory(&self) -> Result<OrgDirectory, String> {
+        let fresh_copy = || {
+            let now = now_ms();
+            self.orgs.lock().unwrap().as_ref().filter(|f| f.is_fresh(ORGS_STALE, now)).map(|f| f.value.clone())
         };
-        Ok(search_organizations(&dir.items, term))
+        if let Some(dir) = fresh_copy() {
+            return Ok(dir);
+        }
+        let _turn = self.refresh.lock().await;
+        // A search typed a moment ago may have refreshed it while this one waited.
+        if let Some(dir) = fresh_copy() {
+            return Ok(dir);
+        }
+        let now = now_ms();
+        if let Some(error) = self.cooling_down("orgs", now) {
+            return Err(error);
+        }
+        let prev = self.orgs.lock().unwrap().as_ref().map(|f| f.value.clone());
+        let result = refresh_organizations(prev, now, || self.core.count_organizations(), || self.core.fetch_all_organizations()).await;
+        self.note_outcome("orgs", &result);
+        let dir = result?;
+        *self.orgs.lock().unwrap() = Some(Fresh { value: dir.clone(), checked_at: now });
+        self.persist().await;
+        Ok(dir)
+    }
+
+    pub async fn organizations(&self, term: &str) -> Result<Vec<Organization>, String> {
+        Ok(search_organizations(&self.org_directory().await?.items, term))
     }
 
     pub async fn scripts(&self, org_id: &str, term: &str) -> Result<Vec<Script>, String> {
-        let now = now_ms();
-        let cached = self.scripts.lock().unwrap().get(org_id).map(|f| (f.value.clone(), f.is_fresh(SCRIPTS_STALE, now)));
-        let collection = match cached {
-            Some((c, true)) => c,
-            other => {
-                let fresh = sync_collection(other.map(|(c, _)| c), now, || self.core.fetch_all_scripts(org_id), |since| async move { self.core.fetch_scripts_changed_since(org_id, &since).await }).await?;
-                self.scripts.lock().unwrap().insert(org_id.to_string(), Fresh { value: fresh.clone(), checked_at: now });
-                self.persist().await;
-                fresh
-            }
+        let fresh_copy = || {
+            let now = now_ms();
+            self.scripts.lock().unwrap().get(org_id).filter(|f| f.is_fresh(SCRIPTS_STALE, now)).map(|f| f.value.clone())
         };
-        Ok(search_scripts(&collection.items, term))
+        if let Some(c) = fresh_copy() {
+            return Ok(search_scripts(&c.items, term));
+        }
+        let _turn = self.refresh.lock().await;
+        if let Some(c) = fresh_copy() {
+            return Ok(search_scripts(&c.items, term));
+        }
+        let (now, key) = (now_ms(), format!("scripts:{org_id}"));
+        if let Some(error) = self.cooling_down(&key, now) {
+            return Err(error);
+        }
+        let prev = self.scripts.lock().unwrap().get(org_id).map(|f| f.value.clone());
+        let result = sync_collection(prev, now, || self.core.fetch_all_scripts(org_id), |since| async move { self.core.fetch_scripts_changed_since(org_id, &since).await }).await;
+        self.note_outcome(&key, &result);
+        let fresh = result?;
+        self.scripts.lock().unwrap().insert(org_id.to_string(), Fresh { value: fresh.clone(), checked_at: now });
+        self.persist().await;
+        Ok(search_scripts(&fresh.items, term))
     }
 
     pub async fn tags(&self, term: &str, prefer_org: Option<&str>) -> Result<Vec<Tag>, String> {
-        let now = now_ms();
-        let cached = self.tags.lock().unwrap().as_ref().map(|f| (f.value.clone(), f.is_fresh(TAGS_STALE, now)));
-        let collection = match cached {
-            Some((c, true)) => c,
-            other => {
-                let fresh = sync_collection(other.map(|(c, _)| c), now, || self.core.fetch_all_tags(), |since| async move { self.core.fetch_tags_changed_since(&since).await }).await?;
-                *self.tags.lock().unwrap() = Some(Fresh { value: fresh.clone(), checked_at: now });
-                self.persist().await;
-                fresh
-            }
+        let fresh_copy = || {
+            let now = now_ms();
+            self.tags.lock().unwrap().as_ref().filter(|f| f.is_fresh(TAGS_STALE, now)).map(|f| f.value.clone())
         };
-        Ok(search_tags(&collection.items, term, prefer_org))
+        if let Some(c) = fresh_copy() {
+            return Ok(search_tags(&c.items, term, prefer_org));
+        }
+        let _turn = self.refresh.lock().await;
+        if let Some(c) = fresh_copy() {
+            return Ok(search_tags(&c.items, term, prefer_org));
+        }
+        let now = now_ms();
+        if let Some(error) = self.cooling_down("tags", now) {
+            return Err(error);
+        }
+        let prev = self.tags.lock().unwrap().as_ref().map(|f| f.value.clone());
+        let result = sync_collection(prev, now, || self.core.fetch_all_tags(), |since| async move { self.core.fetch_tags_changed_since(&since).await }).await;
+        self.note_outcome("tags", &result);
+        let fresh = result?;
+        *self.tags.lock().unwrap() = Some(Fresh { value: fresh.clone(), checked_at: now });
+        self.persist().await;
+        Ok(search_tags(&fresh.items, term, prefer_org))
     }
 
     /// Devices can number in the thousands, so they're searched on the server, with each search cached.
@@ -327,7 +391,13 @@ impl Collections {
         if let Some(hit) = self.assets.lock().unwrap().get(&key).filter(|f| f.is_fresh(QUERY_STALE, now)) {
             return Ok(hit.value.clone());
         }
-        let found = self.core.search_assets(org_id, &key.1).await?;
+        let cool_key = format!("assets:{}:{}", key.0, key.1);
+        if let Some(error) = self.cooling_down(&cool_key, now) {
+            return Err(error);
+        }
+        let result = self.core.search_assets(org_id, &key.1).await;
+        self.note_outcome(&cool_key, &result);
+        let found = result?;
         self.assets.lock().unwrap().insert(key, Fresh { value: found.clone(), checked_at: now });
         Ok(found)
     }
@@ -698,6 +768,31 @@ mod tests {
         next.seed(vec![], vec![tag_named("t9", "Newer")], vec![]);
         next.load_persisted().await;
         assert_eq!(next.tags.lock().unwrap().as_ref().unwrap().value.items[0].name, "Newer");
+    }
+
+    #[tokio::test]
+    async fn after_a_rate_limit_refusal_the_same_ask_is_not_repeated_straight_away() {
+        let core = Core::for_tests("cooling");
+        let c = Collections::new(core);
+        let refused = "HTTP 429: N-able is rate limiting requests. Wait a moment and try again.";
+        c.cooling.lock().unwrap().insert("orgs".into(), (now_ms(), refused.into()));
+        c.cooling.lock().unwrap().insert("tags".into(), (now_ms() - RATE_LIMIT_COOLDOWN - 1, refused.into()));
+        // Cooling down: the refusal is repeated and nothing is sent (a real send would fail to connect instead).
+        assert_eq!(c.organizations("a").await.unwrap_err(), refused);
+        // Cooled off: it asks again (and here fails to connect, since nothing listens).
+        assert_ne!(c.tags("a", None).await.unwrap_err(), refused);
+    }
+
+    #[test]
+    fn only_rate_limit_refusals_are_held_against_a_request() {
+        let c = Collections::new(Core::for_tests("outcome"));
+        c.note_outcome::<()>("k", &Err("Request to x failed".into()));
+        assert!(c.cooling_down("k", now_ms()).is_none());
+        c.note_outcome::<()>("k", &Err("HTTP 429: N-able is rate limiting requests.".into()));
+        assert!(c.cooling_down("k", now_ms()).is_some());
+        assert!(c.cooling_down("k", now_ms() + RATE_LIMIT_COOLDOWN).is_none());
+        c.note_outcome("k", &Ok(()));
+        assert!(c.cooling_down("k", now_ms()).is_none());
     }
 
     #[tokio::test]
