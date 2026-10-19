@@ -3,7 +3,10 @@
 //! Pure logic; `viewer_ui.rs` draws it and the app wires the keys.
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
-use nvoke_core::task_state::{JobTask, TaskPhase, is_generic_exit_message, outcome_explanation, task_outcome, task_phase, task_status_word};
+use nvoke_core::{
+    poll::MAX_POLL_FAILURES,
+    task_state::{JobTask, StopReason, TaskPhase, is_generic_exit_message, outcome_explanation, task_outcome, task_phase, task_status_word},
+};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,6 +83,32 @@ pub struct Meaning {
     pub problem: Option<String>,
 }
 
+/// Why a task has no result to show yet.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pending {
+    /// Still waiting, or no longer being watched and why.
+    pub headline: String,
+    /// Whether it is still being checked on (as opposed to given up on).
+    pub watching: bool,
+    /// The last trouble checking on it (a rate limit, a lost connection, "not found"), so a stall isn't silent.
+    pub problem: Option<String>,
+}
+
+pub fn pending(task: &JobTask) -> Pending {
+    let watching = task_phase(task) != TaskPhase::Stopped;
+    let headline = match (watching, task.stop_reason) {
+        (true, _) => "Waiting for results…",
+        (false, Some(StopReason::Timeout)) => "Stopped watching: it didn't finish within the watch time.",
+        (false, Some(StopReason::Errors)) => "Stopped watching after repeated errors checking on it.",
+        (false, _) => "Not being watched.",
+    };
+    let problem = task.last_error.as_deref().map(|e| match task.poll_failures {
+        0 => format!("N-able said: {e}"),
+        n => format!("Checking on it failed ({n} of {MAX_POLL_FAILURES}): {e}"),
+    });
+    Pending { headline: headline.into(), watching, problem }
+}
+
 pub fn meaning(task: &JobTask) -> Option<Meaning> {
     let outcome = task_outcome(task)?;
     let explanation = outcome_explanation(&outcome)?;
@@ -153,7 +182,13 @@ pub fn build(task: &JobTask) -> Vec<OutLine> {
 
     let has_text = out.iter().any(|l| matches!(l.kind, Kind::Stdout | Kind::Stderr | Kind::Message | Kind::Explain));
     match task_phase(task) {
-        TaskPhase::Queued | TaskPhase::Running => out.push(OutLine::new(Kind::Note, "Waiting for results…")),
+        TaskPhase::Queued | TaskPhase::Running | TaskPhase::Stopped => {
+            let p = pending(task);
+            out.push(OutLine::new(Kind::Note, &p.headline));
+            if let Some(problem) = &p.problem {
+                out.push(OutLine::new(Kind::Message, problem));
+            }
+        }
         _ if !has_text => out.push(OutLine::new(Kind::Note, "No output.")),
         _ => {}
     }
@@ -552,6 +587,36 @@ mod tests {
         assert_eq!(build(&quiet).last().unwrap().text, "No output.");
         let waiting = JobTask::new("t", None, "PC", 0);
         assert_eq!(build(&waiting).last().unwrap().text, "Waiting for results…");
+    }
+
+    #[test]
+    fn a_stall_says_why_instead_of_waiting_in_silence() {
+        let mut t = JobTask::new("t", None, "PC", 0);
+        assert_eq!(pending(&t).problem, None);
+        t.last_error = Some("HTTP 429: N-able is rate limiting requests.".into());
+        t.poll_failures = 2;
+        let p = pending(&t);
+        assert!(p.watching && p.headline == "Waiting for results…");
+        assert_eq!(p.problem.as_deref(), Some("Checking on it failed (2 of 5): HTTP 429: N-able is rate limiting requests."));
+        assert_eq!(build(&t).last().unwrap().text, p.problem.unwrap());
+        // A note from N-able (not a failed check) reads differently.
+        t.poll_failures = 0;
+        t.last_error = Some("output not readable yet".into());
+        assert_eq!(pending(&t).problem.as_deref(), Some("N-able said: output not readable yet"));
+    }
+
+    #[test]
+    fn a_task_nobody_is_watching_says_so_and_why() {
+        let mut t = JobTask::new("t", None, "PC", 0);
+        t.watching = false;
+        t.stop_reason = Some(StopReason::Timeout);
+        let p = pending(&t);
+        assert!(!p.watching && p.headline.starts_with("Stopped watching: it didn't finish"), "{p:?}");
+        assert!(build(&t).iter().any(|l| l.text == p.headline));
+        t.stop_reason = Some(StopReason::Errors);
+        assert!(pending(&t).headline.contains("repeated errors"));
+        t.stop_reason = None;
+        assert_eq!(pending(&t).headline, "Not being watched.");
     }
 
     #[test]

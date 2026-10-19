@@ -433,7 +433,18 @@ fn draw_job_detail(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) 
             }
         } else {
             out.push(Line::from(""));
-            out.push(Line::styled(format!("{} Waiting for results…", spinner(tick)), Style::new().fg(ACCENT)));
+            if let Some(p) = g.tasks.first().map(|&i| crate::output_view::pending(&tasks[i])) {
+                if p.watching {
+                    out.push(Line::styled(format!("{} {}", spinner(tick), p.headline), Style::new().fg(ACCENT)));
+                } else {
+                    out.push(Line::styled(p.headline, Style::new().fg(WARN)));
+                    out.push(Line::styled("Press w to watch it again.", Style::new().fg(DIM)));
+                }
+                if let Some(problem) = p.problem {
+                    out.push(Line::from(""));
+                    out.push(Line::styled(problem, Style::new().fg(WARN)));
+                }
+            }
         }
     }
     // Don't scroll past the end, and say when there is more than fits.
