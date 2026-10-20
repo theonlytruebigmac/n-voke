@@ -23,6 +23,7 @@ pub const LEASE_TTL: Duration = Duration::seconds(120);
 
 /// What the project list shows.
 #[derive(Serialize, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "ProjectSummary.ts"))]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectSummary {
     pub id: String,
@@ -37,7 +38,7 @@ pub struct ProjectSummary {
 }
 
 impl ProjectSummary {
-    fn of(project: &Project) -> Self {
+    pub fn of(project: &Project) -> Self {
         Self {
             id: project.id.clone(),
             name: project.name.clone(),
@@ -146,6 +147,17 @@ impl Core {
         Ok(summaries)
     }
 
+    /// One project's summary, for a header.
+    pub async fn migration_summary(&self, id: &str) -> Result<ProjectSummary, String> {
+        self.migration_load(id).await?.map(|p| ProjectSummary::of(&p)).ok_or_else(|| "That project no longer exists.".to_string())
+    }
+
+    /// The name of a project that uses this server as its source or destination, if any. Such a server can't be
+    /// removed: the project would lose it.
+    pub async fn migration_project_using_server(&self, server_id: &str) -> Result<Option<String>, String> {
+        Ok(self.migration_list().await?.into_iter().find(|p| p.source_server_id == server_id || p.dest_server_id == server_id).map(|p| p.name))
+    }
+
     /// Deletes a project's local history. The audit log keeps its entries.
     pub async fn migration_delete(&self, id: &str) -> Result<(), String> {
         let name = self.migration_load(id).await?.map(|p| p.name).ok_or("That project no longer exists.")?;
@@ -247,6 +259,27 @@ mod tests {
         assert!(core.migration_delete(&second.id).await.is_err());
         let log = core.audit_log(None).unwrap().entries;
         assert!(log.iter().any(|e| e.action == "migration.project.delete" && e.summary == "Deleted migration project Globex move"));
+    }
+
+    #[tokio::test]
+    async fn a_server_in_use_is_named_and_a_free_one_is_not() {
+        let (core, src, dst) = core_with_servers().await;
+        let other = core.save_ncentral_server(None, "Spare", "spare.example.com", Some("j3".into()), None).await.unwrap().id;
+        let project = core.migration_create("Acme move", &src, &dst, DestEcoverse::NotLinked).await.unwrap();
+        assert_eq!(core.migration_project_using_server(&src).await.unwrap().as_deref(), Some("Acme move"));
+        assert_eq!(core.migration_project_using_server(&dst).await.unwrap().as_deref(), Some("Acme move"));
+        assert_eq!(core.migration_project_using_server(&other).await.unwrap(), None);
+        core.migration_delete(&project.id).await.unwrap();
+        assert_eq!(core.migration_project_using_server(&src).await.unwrap(), None, "free again once the project is gone");
+    }
+
+    #[tokio::test]
+    async fn one_project_has_a_summary_and_a_missing_one_says_so() {
+        let (core, src, dst) = core_with_servers().await;
+        let project = core.migration_create("Acme move", &src, &dst, DestEcoverse::NotLinked).await.unwrap();
+        let summary = core.migration_summary(&project.id).await.unwrap();
+        assert_eq!((summary.name.as_str(), summary.devices), ("Acme move", 0));
+        assert_eq!(core.migration_summary("mig-nothere").await.unwrap_err(), "That project no longer exists.");
     }
 
     #[tokio::test]

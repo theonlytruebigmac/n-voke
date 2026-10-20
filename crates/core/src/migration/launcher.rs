@@ -245,7 +245,7 @@ impl Core {
                 inputs,
                 run_when_online: true,
             };
-            let result = self.run_script(&input).await;
+            let result = self.with_ecoverse(&project.source_server_id, self.run_script(&input)).await;
             let missing: Vec<(usize, Missing)> = match result {
                 Ok(run) => {
                     let (launched, missing) = match_tasks(&requested, &run);

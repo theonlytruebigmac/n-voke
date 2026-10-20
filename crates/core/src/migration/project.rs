@@ -17,6 +17,7 @@ use super::{
 
 /// A device's place in the migration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "Stage.ts"))]
 #[serde(rename_all = "camelCase")]
 pub enum Stage {
     Planned,
@@ -190,6 +191,7 @@ impl ProjectDevice {
 
 /// How the destination relates to Ecoverse, which decides how devices are tracked after the move.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "DestEcoverse.ts"))]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum DestEcoverse {
     /// The usual case for a new server: devices leave Ecoverse until it's linked.
@@ -207,6 +209,18 @@ pub enum CleanMode {
     None,
 }
 
+/// How devices are reached to start the migration. Ecoverse is the usual way in; REST is the fallback.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "Delivery.ts"))]
+#[serde(rename_all = "camelCase")]
+pub enum Delivery {
+    /// Use Ecoverse for the devices it reaches, and N-central REST for the rest.
+    #[default]
+    EcoverseFirst,
+    /// Everything goes over N-central REST; Ecoverse isn't read or used.
+    RestOnly,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectOptions {
@@ -216,11 +230,13 @@ pub struct ProjectOptions {
     pub task_expiry_days: u32,
     pub wave_size: u32,
     pub retire_source_records: bool,
+    #[serde(default)]
+    pub delivery: Delivery,
 }
 
 impl Default for ProjectOptions {
     fn default() -> Self {
-        Self { review_days: 7, clean_mode: CleanMode::Full, task_repeat_minutes: 15, task_expiry_days: 14, wave_size: 50, retire_source_records: false }
+        Self { review_days: 7, clean_mode: CleanMode::Full, task_repeat_minutes: 15, task_expiry_days: 14, wave_size: 50, retire_source_records: false, delivery: Delivery::EcoverseFirst }
     }
 }
 
@@ -308,6 +324,15 @@ impl Project {
     }
 
     /// A reinstall on the same server rather than a move.
+    /// The server whose Ecoverse key reads the destination's Ecoverse assets: the source's when the destination is in
+    /// the same tenant, otherwise the destination's own.
+    pub fn dest_ecoverse_server(&self) -> &str {
+        match self.dest_ecoverse {
+            DestEcoverse::SameTenant => &self.source_server_id,
+            _ => &self.dest_server_id,
+        }
+    }
+
     pub fn is_reinstall(&self) -> bool {
         self.source_server_id == self.dest_server_id
     }

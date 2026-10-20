@@ -27,6 +27,7 @@ pub(crate) fn lenient_opt_id<'de, D: Deserializer<'de>>(d: D) -> Result<Option<S
 
 /// `GET /api/server-info`: needs a bearer token.
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "ServerInfo.ts"))]
 pub struct ServerInfo {
     /// N-central's own version, for example `2026.4.0.25`.
     pub ncentral: String,

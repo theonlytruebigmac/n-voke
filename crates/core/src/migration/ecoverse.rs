@@ -197,7 +197,11 @@ impl ScriptDefinition {
 
 impl Core {
     /// Every asset in the organizations, with the fields that identify it. Follows pagination.
+    /// With no organizations, every asset the key can see; callers pick their server's devices by host.
     pub async fn eco_devices(&self, org_ids: &[String]) -> Result<Vec<EcoDevice>, String> {
+        if org_ids.is_empty() {
+            return self.fetch_all_pages::<EcoDevice>("assetSearch", "", ECO_DEVICE_FIELDS, json!({}), "").await;
+        }
         self.fetch_all_pages::<EcoDevice>("assetSearch", "inOrganizations: $orgIds", ECO_DEVICE_FIELDS, json!({ "orgIds": org_ids }), ", $orgIds: [ID!]!").await
     }
 

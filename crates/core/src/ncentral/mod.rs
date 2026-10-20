@@ -8,7 +8,22 @@ pub mod rest;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::{Core, audit::AuditEntry, blocking, credentials::ncentral_account};
+use crate::{Core, ECO_KEY, audit::AuditEntry, blocking, credentials::{ecoverse_account, ncentral_account}};
+
+/// Which Ecoverse key a server's devices are reached with. Ecoverse is the preferred way to launch and track,
+/// with N-central REST (the JWT) as the fallback.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "EcoCredential.ts"))]
+#[serde(rename_all = "camelCase")]
+pub enum EcoCredential {
+    /// The app's own Ecoverse key (Settings): the usual case when the server is in the tenant that key belongs to.
+    #[default]
+    AppKey,
+    /// A token saved for this server (keychain account `ecoverse:<server id>`): another Ecoverse tenant.
+    Own,
+    /// The server isn't used through Ecoverse; its devices are reached over REST only.
+    None,
+}
 
 /// One N-central server, as saved in `config.json`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -21,10 +36,14 @@ pub struct ServerConfig {
     /// The Ecoverse tenant this server is linked to, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ecoverse_tenant: Option<String>,
+    /// Which Ecoverse key reaches its devices.
+    #[serde(default)]
+    pub ecoverse: EcoCredential,
 }
 
 /// A server as shown to the user: never includes the JWT, only whether one is saved.
 #[derive(Serialize, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "ServerView.ts"))]
 #[serde(rename_all = "camelCase")]
 pub struct ServerView {
     pub id: String,
@@ -32,6 +51,9 @@ pub struct ServerView {
     pub host: String,
     pub ecoverse_tenant: Option<String>,
     pub has_jwt: bool,
+    pub ecoverse: EcoCredential,
+    /// A token of its own is saved for this server (only meaningful when `ecoverse` is `own`).
+    pub has_ecoverse_token: bool,
 }
 
 /// Turns what a person typed into the plain host name used everywhere else.
@@ -68,8 +90,7 @@ impl Core {
         let servers = self.load_config().ncentral_servers;
         let mut views = Vec::with_capacity(servers.len());
         for server in servers {
-            let has_jwt = self.ncentral_jwt(&server.host).await?.is_some();
-            views.push(ServerView { id: server.id, label: server.label, host: server.host, ecoverse_tenant: server.ecoverse_tenant, has_jwt });
+            views.push(self.server_view(server).await?);
         }
         Ok(views)
     }
@@ -113,6 +134,7 @@ impl Core {
             label,
             host: host.clone(),
             ecoverse_tenant,
+            ecoverse: previous.as_ref().map(|p| p.ecoverse).unwrap_or_default(),
         };
 
         let secrets = self.secrets.clone();
@@ -159,8 +181,85 @@ impl Core {
                 self.rest.forget(&old.host);
             }
         }
-        let has_jwt = self.ncentral_jwt(&host).await?.is_some();
-        Ok(ServerView { id: server.id, label: server.label, host: server.host, ecoverse_tenant: server.ecoverse_tenant, has_jwt })
+        self.server_view(server).await
+    }
+
+    async fn server_view(&self, server: ServerConfig) -> Result<ServerView, String> {
+        let has_jwt = self.ncentral_jwt(&server.host).await?.is_some();
+        let has_ecoverse_token = if server.ecoverse == EcoCredential::Own {
+            let secrets = self.secrets.clone();
+            let account = ecoverse_account(&server.id);
+            blocking(move || secrets.get(&account)).await?.is_some()
+        } else {
+            false
+        };
+        Ok(ServerView {
+            id: server.id,
+            label: server.label,
+            host: server.host,
+            ecoverse_tenant: server.ecoverse_tenant,
+            has_jwt,
+            ecoverse: server.ecoverse,
+            has_ecoverse_token,
+        })
+    }
+
+    /// Chooses which Ecoverse key reaches a server's devices. `Own` needs a token: the one given now, or one saved
+    /// before. Leaving `Own` deletes the saved token, so none is left behind in the keychain.
+    pub async fn set_server_ecoverse(&self, id: &str, mode: EcoCredential, token: Option<String>) -> Result<ServerView, String> {
+        let mut config = self.load_config();
+        let index = config.ncentral_servers.iter().position(|s| s.id == id).ok_or("That server no longer exists.")?;
+        let host = config.ncentral_servers[index].host.clone();
+        let token = token.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+
+        let secrets = self.secrets.clone();
+        let account = ecoverse_account(id);
+        let result = match (mode, token) {
+            (EcoCredential::Own, Some(token)) => blocking(move || secrets.set(&account, &token)).await,
+            (EcoCredential::Own, None) => match blocking({
+                let (secrets, account) = (secrets.clone(), account.clone());
+                move || secrets.get(&account)
+            })
+            .await?
+            {
+                Some(_) => Ok(()),
+                None => Err("Paste the Ecoverse token for this server.".to_string()),
+            },
+            (_, _) => blocking(move || secrets.delete(&account)).await,
+        };
+        let summary = match mode {
+            EcoCredential::AppKey => format!("Set {host} to use the app's Ecoverse key"),
+            EcoCredential::Own => format!("Set {host} to use its own Ecoverse token"),
+            EcoCredential::None => format!("Set {host} to not use Ecoverse (REST only)"),
+        };
+        self.record(&AuditEntry::new("settings.ncentral_server", &summary, result.clone(), json!({ "host": host, "ecoverse": format!("{mode:?}") })));
+        result?;
+
+        config.ncentral_servers[index].ecoverse = mode;
+        let server = config.ncentral_servers[index].clone();
+        self.save_config(&config)?;
+        self.server_view(server).await
+    }
+
+    /// Whether this server's devices can be reached through Ecoverse at all.
+    pub(crate) fn server_uses_ecoverse(&self, server_id: &str) -> bool {
+        self.ncentral_server(server_id).is_ok_and(|s| s.ecoverse != EcoCredential::None)
+    }
+
+    /// Runs an Ecoverse call with the key that belongs to `server_id`: the app's key, a token saved for the
+    /// server, or an error when the server isn't used through Ecoverse. Only the one call sees the saved token.
+    pub(crate) async fn with_ecoverse<T>(&self, server_id: &str, call: impl std::future::Future<Output = Result<T, String>>) -> Result<T, String> {
+        let server = self.ncentral_server(server_id)?;
+        match server.ecoverse {
+            EcoCredential::AppKey => call.await,
+            EcoCredential::None => Err(format!("Ecoverse isn't used for {}. Choose a key for it under Manage servers to use Ecoverse.", server.label)),
+            EcoCredential::Own => {
+                let secrets = self.secrets.clone();
+                let account = ecoverse_account(&server.id);
+                let token = blocking(move || secrets.get(&account)).await?.ok_or_else(|| format!("No Ecoverse token is saved for {}. Add one under Manage servers.", server.label))?;
+                ECO_KEY.scope(token, call).await
+            }
+        }
     }
 
     /// Forgets a server and its JWT. Projects that used it keep their history.
@@ -168,7 +267,8 @@ impl Core {
         let server = self.ncentral_server(id)?;
         let secrets = self.secrets.clone();
         let account = ncentral_account(&server.host);
-        let result = blocking(move || secrets.delete(&account)).await;
+        let eco_account = ecoverse_account(&server.id);
+        let result = blocking(move || secrets.delete(&account).and_then(|()| secrets.delete(&eco_account))).await;
         self.record(&AuditEntry::new("settings.ncentral_server", &format!("Removed N-central server {}", server.host), result.clone(), json!({ "host": server.host })));
         result?;
         let mut config = self.load_config();
@@ -232,5 +332,98 @@ mod tests {
         core.save_ncentral_server(Some(added.id), "S", "new.example.com", Some("jwt-2".into()), None).await.unwrap();
         assert_eq!(core.ncentral_jwt("old.example.com").await.unwrap(), None);
         assert_eq!(core.ncentral_jwt("new.example.com").await.unwrap().as_deref(), Some("jwt-2"));
+    }
+
+    async fn server(core: &Core, host: &str) -> ServerView {
+        core.save_ncentral_server(None, "", host, Some("jwt".into()), None).await.unwrap()
+    }
+
+    /// Makes one Ecoverse request and returns the key it was sent with.
+    async fn key_used(core: &Core) -> String {
+        core.set_graphql_fake(|_, _| (200, r#"{"data":{}}"#.to_string()));
+        core.graphql("query Q { x }", &serde_json::json!({}), None).await.unwrap();
+        core.last_key_used.lock().unwrap().clone().unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_server_uses_the_apps_ecoverse_key_until_told_otherwise() {
+        let core = Core::for_tests("eco-default");
+        let s = server(&core, "old.example.com").await;
+        assert_eq!((s.ecoverse, s.has_ecoverse_token), (EcoCredential::AppKey, false));
+        assert!(core.server_uses_ecoverse(&s.id));
+        assert_eq!(core.with_ecoverse(&s.id, async { Ok(key_used(&core).await) }).await.unwrap(), "test-key-not-real");
+    }
+
+    #[tokio::test]
+    async fn a_server_with_its_own_token_makes_its_calls_with_that_token_and_nobody_elses_do() {
+        let core = Core::for_tests("eco-own");
+        let a = server(&core, "a.example.com").await;
+        let b = server(&core, "b.example.com").await;
+        let saved = core.set_server_ecoverse(&b.id, EcoCredential::Own, Some("  tenant-b-token \n".into())).await.unwrap();
+        assert_eq!((saved.ecoverse, saved.has_ecoverse_token), (EcoCredential::Own, true));
+        assert!(!serde_json::to_string(&saved).unwrap().contains("tenant-b-token"), "the token never goes out in a view");
+
+        assert_eq!(core.with_ecoverse(&b.id, async { Ok(key_used(&core).await) }).await.unwrap(), "tenant-b-token");
+        assert_eq!(core.with_ecoverse(&a.id, async { Ok(key_used(&core).await) }).await.unwrap(), "test-key-not-real");
+        assert_eq!(key_used(&core).await, "test-key-not-real", "outside the scope the app's key is used again");
+    }
+
+    #[tokio::test]
+    async fn scopes_nest_so_a_call_for_another_server_inside_one_uses_that_servers_key() {
+        let core = Core::for_tests("eco-nest");
+        let a = server(&core, "a.example.com").await;
+        let b = server(&core, "b.example.com").await;
+        core.set_server_ecoverse(&a.id, EcoCredential::Own, Some("token-a".into())).await.unwrap();
+        core.set_server_ecoverse(&b.id, EcoCredential::Own, Some("token-b".into())).await.unwrap();
+        let both = core
+            .with_ecoverse(&a.id, async {
+                let outer = key_used(&core).await;
+                let inner = core.with_ecoverse(&b.id, async { Ok(key_used(&core).await) }).await?;
+                Ok((outer, inner, key_used(&core).await))
+            })
+            .await
+            .unwrap();
+        assert_eq!(both, ("token-a".to_string(), "token-b".to_string(), "token-a".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_server_not_used_through_ecoverse_refuses_the_call_and_says_how_to_change_it() {
+        let core = Core::for_tests("eco-none");
+        let s = server(&core, "rest-only.example.com").await;
+        core.set_server_ecoverse(&s.id, EcoCredential::None, None).await.unwrap();
+        assert!(!core.server_uses_ecoverse(&s.id));
+        let err = core.with_ecoverse(&s.id, async { Ok(key_used(&core).await) }).await.unwrap_err();
+        assert!(err.contains("Ecoverse isn't used for rest-only.example.com") && err.contains("Manage servers"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn its_own_token_is_needed_before_it_can_be_chosen_and_is_deleted_when_no_longer_used() {
+        let core = Core::for_tests("eco-lifecycle");
+        let s = server(&core, "a.example.com").await;
+        let err = core.set_server_ecoverse(&s.id, EcoCredential::Own, None).await.unwrap_err();
+        assert!(err.contains("Paste the Ecoverse token"), "{err}");
+        assert_eq!(core.ncentral_servers().await.unwrap()[0].ecoverse, EcoCredential::AppKey, "a refused choice changes nothing");
+
+        core.set_server_ecoverse(&s.id, EcoCredential::Own, Some("tok".into())).await.unwrap();
+        // Choosing Own again without a token keeps the saved one.
+        assert!(core.set_server_ecoverse(&s.id, EcoCredential::Own, None).await.unwrap().has_ecoverse_token);
+        // Editing the server doesn't lose the choice.
+        let edited = core.save_ncentral_server(Some(s.id.clone()), "Renamed", "a.example.com", None, None).await.unwrap();
+        assert_eq!((edited.ecoverse, edited.has_ecoverse_token), (EcoCredential::Own, true));
+
+        let back = core.set_server_ecoverse(&s.id, EcoCredential::AppKey, None).await.unwrap();
+        assert_eq!((back.ecoverse, back.has_ecoverse_token), (EcoCredential::AppKey, false), "no token left behind");
+    }
+
+    #[tokio::test]
+    async fn removing_a_server_removes_its_ecoverse_token_and_the_audit_log_never_holds_it() {
+        let core = Core::for_tests("eco-remove");
+        let s = server(&core, "a.example.com").await;
+        core.set_server_ecoverse(&s.id, EcoCredential::Own, Some("secret-eco-token".into())).await.unwrap();
+        core.remove_ncentral_server(&s.id).await.unwrap();
+        let secrets = core.secrets.clone();
+        let account = ecoverse_account(&s.id);
+        assert_eq!(blocking(move || secrets.get(&account)).await.unwrap(), None);
+        assert!(!serde_json::to_string(&core.audit_log(None).unwrap().entries).unwrap().contains("secret-eco-token"));
     }
 }

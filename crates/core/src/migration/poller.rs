@@ -127,7 +127,7 @@ impl Core {
             .collect();
         for chunk in eco_tasks.chunks(TASKS_PER_REQUEST) {
             let ids: Vec<String> = chunk.iter().map(|(_, id)| id.clone()).collect();
-            match self.get_tasks(&ids).await {
+            match self.with_ecoverse(&project.source_server_id, self.get_tasks(&ids)).await {
                 Ok(fetch) => {
                     for (i, id) in chunk {
                         if let Some(Some(snapshot)) = fetch.tasks.get(id) {
@@ -172,7 +172,7 @@ impl Core {
             let wants_source_eco = device.path == Some(DeliveryPath::Ecoverse) && matches!(device.stage, Stage::Launched | Stage::NotPickedUp | Stage::Staged | Stage::StuckStaged) && !project.source_ecoverse_org_ids.is_empty();
             if wants_source_eco {
                 if shared.eco_source.is_none() {
-                    let fetched = self.eco_devices(&project.source_ecoverse_org_ids).await.map(|d| d.into_iter().map(|a| (a.id.clone(), a)).collect());
+                    let fetched = self.with_ecoverse(&project.source_server_id, self.eco_devices(&project.source_ecoverse_org_ids)).await.map(|d| d.into_iter().map(|a| (a.id.clone(), a)).collect());
                     shared.eco_source = Some(fetched);
                 }
                 match shared.eco_source.as_ref() {
@@ -213,9 +213,9 @@ impl Core {
             }
             if linked && matches!(device.stage, Stage::Registered | Stage::Healthy) {
                 let dest_id = found.dest_device_id.clone().or_else(|| device.dest_device_id.clone());
-                if !project.dest_ecoverse_org_ids.is_empty() {
+                if project.dest_ecoverse != DestEcoverse::NotLinked {
                     if shared.eco_dest.is_none() {
-                        let fetched = self.eco_devices(&project.dest_ecoverse_org_ids).await.map(|d| index_by_ncentral_id(&d, &dest_host).into_iter().map(|(k, v)| (k, v.connected)).collect());
+                        let fetched = self.with_ecoverse(project.dest_ecoverse_server(), self.eco_devices(&project.dest_ecoverse_org_ids)).await.map(|d| index_by_ncentral_id(&d, &dest_host).into_iter().map(|(k, v)| (k, v.connected)).collect());
                         shared.eco_dest = Some(fetched);
                     }
                     obs.dest_ecoverse_connected = match (shared.eco_dest.as_ref(), dest_id) {

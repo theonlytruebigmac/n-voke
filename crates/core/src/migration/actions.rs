@@ -80,8 +80,8 @@ impl Core {
                 let dest_id = device.dest_device_id.clone().ok_or("The device hasn't been found on the destination yet.")?;
                 let dest_host = self.ncentral_server(&project.dest_server_id)?.host;
                 if project.dest_ecoverse == DestEcoverse::SameTenant
-                    && let (Some(script), false) = (&project.ecoverse_script_id, project.source_ecoverse_org_ids.is_empty())
-                    && let Ok(assets) = self.eco_devices(&project.source_ecoverse_org_ids).await
+                    && let Some(script) = &project.ecoverse_script_id
+                    && let Ok(assets) = self.with_ecoverse(&project.source_server_id, self.eco_devices(&project.source_ecoverse_org_ids)).await
                     && let Some(asset) = index_by_ncentral_id(&assets, &dest_host).remove(&dest_id)
                     && asset.connected
                 {
@@ -122,9 +122,15 @@ impl Core {
                     inputs: params.ecoverse_inputs()?,
                     run_when_online: true,
                 };
-                let run = self.run_script(&input).await?;
-                let task_id = run.tasks.first().map(|(id, _)| id.clone()).ok_or("Ecoverse created no task.")?;
-                ("Ecoverse".to_string(), self.wait_for_ecoverse_report(&task_id, wait).await?)
+                let source_server = project.source_server_id.clone();
+                let report = self
+                    .with_ecoverse(&source_server, async {
+                        let run = self.run_script(&input).await?;
+                        let task_id = run.tasks.first().map(|(id, _)| id.clone()).ok_or("Ecoverse created no task.")?;
+                        self.wait_for_ecoverse_report(&task_id, wait).await
+                    })
+                    .await?;
+                ("Ecoverse".to_string(), report)
             }
             Route::Rest { server_id, item_id, device_id, customer_id } => {
                 let command_line = params.command_line()?;

@@ -12,7 +12,7 @@ use super::{
     ecoverse::{index_by_ncentral_id, is_linked},
     mapping::{MappingEntry, MappingStatus, apply_overrides, auto_map, normalize_name},
     planner::{DeliveryPath, PlanInput, PlanOptions, PlanSummary, PlannedDevice, plan, summarize, token_targets},
-    project::Project,
+    project::{Delivery, Project},
 };
 use crate::{
     Core,
@@ -22,7 +22,7 @@ use crate::{
 /// A token that ends within this long is reported as expiring.
 const TOKEN_WARNING: Duration = Duration::days(7);
 /// What N-voke was tested against: N-central 2026.4 and later.
-const TESTED_RELEASE: (u32, u32) = (2026, 4);
+pub(crate) const TESTED_RELEASE: (u32, u32) = (2026, 4);
 
 pub struct SurveyOptions {
     pub source_server_id: String,
@@ -114,15 +114,25 @@ impl Core {
             }
         }
 
-        let (eco, ecoverse_linked) = if options.ecoverse_org_ids.is_empty() {
+        // Ecoverse is read when the project wants it and the source server uses it. A failed read isn't fatal: every
+        // device is then planned on the REST path and the report says why.
+        let use_ecoverse = self.server_uses_ecoverse(&source.id) && project.is_none_or(|p| p.options.delivery == Delivery::EcoverseFirst);
+        let (eco, ecoverse_linked) = if !use_ecoverse {
             (HashMap::new(), None)
         } else {
-            let assets = self.eco_devices(&options.ecoverse_org_ids).await?;
-            let linked = is_linked(&assets, &source.host);
-            if !linked {
-                warnings.push(format!("Ecoverse doesn't show any device of {} in those organizations, so every device is planned on the REST path.", source.host));
+            match self.with_ecoverse(&source.id, self.eco_devices(&options.ecoverse_org_ids)).await {
+                Ok(assets) => {
+                    let linked = is_linked(&assets, &source.host);
+                    if !linked {
+                        warnings.push(format!("Ecoverse doesn't show any device of {}, so every device is planned on the REST path.", source.host));
+                    }
+                    (index_by_ncentral_id(&assets, &source.host), Some(linked))
+                }
+                Err(error) => {
+                    warnings.push(format!("Ecoverse couldn't be read ({error}), so every device is planned on the REST path."));
+                    (HashMap::new(), None)
+                }
             }
-            (index_by_ncentral_id(&assets, &source.host), Some(linked))
         };
 
         let no_overrides = HashMap::new();
@@ -240,6 +250,7 @@ mod tests {
 
     async fn setup() -> (std::sync::Arc<Core>, String, String, std::sync::Arc<Fake>) {
         let core = Core::for_tests("survey");
+        core.set_empty_ecoverse();
         let src = core.save_ncentral_server(None, "Old", "src.example.com", Some("j1".into()), None).await.unwrap();
         let dst = core.save_ncentral_server(None, "New", "dst.example.com", Some("j2".into()), None).await.unwrap();
         let fake = Fake::new(lab);

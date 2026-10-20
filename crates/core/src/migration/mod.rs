@@ -5,6 +5,7 @@
 pub mod ecoverse;
 pub mod endpoint_result;
 pub mod actions;
+pub mod connect;
 pub mod launcher;
 pub mod mapping;
 pub mod packager;

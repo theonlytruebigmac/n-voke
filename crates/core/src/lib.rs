@@ -205,6 +205,11 @@ fn read_stored_key() -> Result<Option<String>, String> {
 
 type GraphQlFake = Arc<dyn Fn(&str, &Value) -> (u16, String) + Send + Sync>;
 
+tokio::task_local! {
+    /// An Ecoverse key that applies to the current call only, instead of the app's key (see `Core::with_ecoverse`).
+    pub(crate) static ECO_KEY: String;
+}
+
 pub struct Core {
     paths: Paths,
     http: reqwest::Client,
@@ -219,6 +224,9 @@ pub struct Core {
     rest: ncentral::rest::RestState,
     /// Answers every GraphQL request itself, for tests of code built on the client.
     graphql_override: Mutex<Option<GraphQlFake>>,
+    /// The key the last GraphQL request used, so tests can check which key a call was made with.
+    #[cfg(test)]
+    pub(crate) last_key_used: Mutex<Option<String>>,
     /// Dry run: reads work as normal, but nothing that changes N-able is sent.
     dry_run: AtomicBool,
     dry_run_log: Mutex<Vec<DryRunEntry>>,
@@ -247,9 +255,11 @@ impl Core {
             api_key: Mutex::new(None),
             vault,
             audit,
-            secrets: Arc::new(credentials::KeyringStore),
+            secrets: Arc::new(credentials::BundleStore::new(credentials::KeyringStore)),
             rest: Default::default(),
             graphql_override: Mutex::new(None),
+            #[cfg(test)]
+            last_key_used: Mutex::new(None),
             dry_run: AtomicBool::new(dry_run),
             dry_run_log: Mutex::new(vec![]),
         })
@@ -278,6 +288,12 @@ impl Core {
     #[doc(hidden)]
     pub fn set_graphql_fake(&self, fake: impl Fn(&str, &Value) -> (u16, String) + Send + Sync + 'static) {
         *self.graphql_override.lock().unwrap() = Some(Arc::new(fake));
+    }
+
+    /// Makes Ecoverse answer every asset search with no assets, so a test that doesn't care about Ecoverse doesn't wait on a connection.
+    #[doc(hidden)]
+    pub fn set_empty_ecoverse(&self) {
+        self.set_graphql_fake(|_, _| (200, json!({ "data": { "page": { "totalCount": 0, "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [] } } }).to_string()));
     }
 
     pub fn set_dry_run(&self, on: bool) {
@@ -462,7 +478,14 @@ impl Core {
     }
 
     async fn send_graphql(&self, query: &str, variables: &Value) -> Result<GraphQlResponse, String> {
-        let key = self.current_key().await?.ok_or("No API key is configured. Add one in Settings.")?;
+        let key = match ECO_KEY.try_with(|k| k.clone()) {
+            Ok(scoped) => scoped,
+            Err(_) => self.current_key().await?.ok_or("No API key is configured. Add one in Settings.")?,
+        };
+        #[cfg(test)]
+        {
+            *self.last_key_used.lock().unwrap() = Some(key.clone());
+        }
         let url = self.load_config().api_url;
 
         // Developer aid: NVOKE_LOG_REQUESTS=1 prints one line per API request.

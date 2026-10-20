@@ -194,7 +194,7 @@ impl Core {
     /// Publishes the endpoint script to Ecoverse (unless it is already there at this version) and remembers its ID.
     pub async fn migration_publish(&self, project: &mut Project, package: &Package, organization_id: Option<&str>) -> Result<Published, String> {
         let org = organization_id.map(String::from).or_else(|| project.source_ecoverse_org_ids.first().cloned()).ok_or("Name the Ecoverse organization to publish the script in.")?;
-        let published = self.publish_migration_script(package, &org).await?;
+        let published = self.with_ecoverse(&project.source_server_id, self.publish_migration_script(package, &org)).await?;
         project.ecoverse_script_id = Some(published.script_id.clone());
         project.ecoverse_script_version = Some(package.version.clone());
         Ok(published)
@@ -233,7 +233,7 @@ impl Core {
                 }
                 // A launch still waiting in Ecoverse is cancelled first, so the retry can't run twice.
                 if let (Stage::NotPickedUp, DeliveryPath::Ecoverse, Some(task)) = (stage, current, device.task_id.clone()) {
-                    self.cancel_script_tasks(&[task]).await?;
+                    self.with_ecoverse(&project.source_server_id, self.cancel_script_tasks(&[task])).await?;
                 }
                 let device = &mut project.devices[index];
                 device.path = Some(path);
@@ -304,6 +304,7 @@ mod tests {
 
     async fn setup() -> (std::sync::Arc<Core>, Project) {
         let core = Core::for_tests("workflow");
+        core.set_empty_ecoverse();
         let src = core.save_ncentral_server(None, "Old", "src.example.com", Some("j1".into()), None).await.unwrap();
         let dst = core.save_ncentral_server(None, "New", "dst.example.com", Some("j2".into()), None).await.unwrap();
         let fake = Fake::new(|req, _| {
@@ -451,10 +452,18 @@ mod tests {
         assert!(core.migration_device_op(&mut p, 9, DeviceOp::Resolve).await.is_err());
     }
 
+    async fn use_a_saved_source(core: &Core, p: &mut Project) {
+        let server = core.save_ncentral_server(None, "Old", "src.example.com", Some("jwt".into()), None).await.unwrap();
+        let script = p.rest_scripts.remove("src").unwrap();
+        p.rest_scripts.insert(server.id.clone(), script);
+        p.source_server_id = server.id;
+    }
+
     #[tokio::test]
     async fn retrying_an_unpicked_ecoverse_launch_cancels_it_first_and_changes_nothing_if_it_cant() {
         let core = Core::for_tests("retry3");
         let mut p = device_project();
+        use_a_saved_source(&core, &mut p).await;
         p.devices[0].stage = Stage::NotPickedUp;
         p.devices[0].task_id = Some("task-1".into());
         // The cancel can't be sent (no API reachable): the device must stay as it is, still owning its task.
@@ -477,6 +486,7 @@ mod tests {
         let core = Core::for_tests("retry4");
         core.set_dry_run(true);
         let mut p = device_project();
+        use_a_saved_source(&core, &mut p).await;
         p.devices[0].stage = Stage::NotPickedUp;
         p.devices[0].task_id = Some("task-1".into());
         let error = core.migration_device_op(&mut p, 0, DeviceOp::Retry { other_path: false, checked: false }).await.unwrap_err();
@@ -584,6 +594,7 @@ mod tests {
     async fn missing_tokens_are_generated_valid_ones_left_alone_and_expired_ones_reported() {
         use crate::ncentral::rest::{Method, RestRequest, testing::{Fake, auth_ok, ok, status}};
         let core = Core::for_tests("tokens");
+        core.set_empty_ecoverse();
         let src = core.save_ncentral_server(None, "Old", "src.example.com", Some("j1".into()), None).await.unwrap();
         let dst = core.save_ncentral_server(None, "New", "dst.example.com", Some("j2".into()), None).await.unwrap();
         let generated = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
