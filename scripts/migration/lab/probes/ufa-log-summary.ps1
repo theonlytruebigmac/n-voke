@@ -23,6 +23,7 @@ $counts = @{ ok200 = 0; ssl400 = 0; timeout = 0; reset = 0; other = 0 }
 $jwt = New-Object System.Collections.Generic.List[object]
 $lastOk = $null; $firstFail = $null
 $lastSslAt = $null; $lastFailedFetch = $null; $synced = $null; $provisioned = $null
+$cdn = @{ denied = 0; ok = 0; firstDenied = $null; lastDenied = $null; lastOk = $null }
 
 function Add-Event($at, $what) { $events.Add([pscustomobject]@{ At = $at; What = $what }) }
 function Short($dto) { $dto.ToString('HH:mm:ss') }
@@ -50,13 +51,17 @@ foreach ($line in [IO.File]::ReadLines($LogPath)) {
         $counts.reset++; if (-not $firstFail) { $firstFail = $at }
         $jwt.Add([pscustomobject]@{ At = $at; Result = 'connection reset by the remote side' })
     }
+    elseif ($line -match 'components::doRequestWithRetry received invalid status: ''403''') {
+        $cdn.denied++; $cdn.lastDenied = $at; if (-not $cdn.firstDenied) { $cdn.firstDenied = $at }
+    }
+    elseif ($line -match 'components::Download Successfully downloaded') { $cdn.ok++; $cdn.lastOk = $at }
     elseif ($line -match 'configservice::FetchAllConfigurations failed to fetch configuration data') {
         $lastFailedFetch = $at; Add-Event $at 'configuration fetch FAILED'
     }
     elseif ($line -match 'scheduler::Run \(configGUID=Check For Updates\) Executing job') {
         Add-Event $at 'hourly "Check For Updates" runs'
     }
-    elseif ($line -match 'components::Download Successfully downloaded .*(generic-asset-interrogator|osquery|log-collector|software-management-service-requirements)') {
+    if ($line -match 'components::Download Successfully downloaded .*(generic-asset-interrogator|osquery|log-collector|software-management-service-requirements)') {
         $name = $Matches[1]
         if ($name -eq 'generic-asset-interrogator' -and -not $synced) { $synced = $at }
         Add-Event $at "component downloaded: $name"
@@ -71,6 +76,7 @@ $state =
     if ($synced -and (-not $lastFailedFetch -or $synced -gt $lastFailedFetch)) { 'synced' }
     elseif ($lastFailedFetch -and $lastOk -and $lastOk -gt $lastFailedFetch) { 'stalled (login works again, nothing delivered: a service restart fetches it now)' }
     elseif ($lastSslAt -and (-not $lastOk -or $lastOk -lt $lastSslAt)) { 'rejected (the cloud refuses the agent''s login; a restart does not help)' }
+    elseif ($cdn.denied -ge 5 -and (-not $cdn.lastOk -or $cdn.lastOk -lt $cdn.lastDenied)) { 'denied (the component CDN answers the agent with 403 and nothing has downloaded since; a plain curl to the CDN works)' }
     elseif ($lastFailedFetch) { 'blocked (the cloud does not answer yet)' }
     else { 'waiting (no fault, no inventory components yet)' }
 
@@ -83,6 +89,9 @@ $out.Add('')
 $out.Add('Login-token results (counts):')
 $out.Add(('  accepted (200): {0}   400 SSL certificate error: {1}   timeouts: {2}   connection resets: {3}' -f $counts.ok200, $counts.ssl400, $counts.timeout, $counts.reset))
 $out.Add(('  first failure: {0}   last accepted: {1}' -f $(if ($firstFail) { Short $firstFail } else { '-' }), $(if ($lastOk) { Short $lastOk } else { 'never' })))
+$out.Add('')
+$out.Add('Component downloads:')
+$out.Add(('  succeeded: {0}   refused with 403 (final failures): {1}   first refusal: {2}   last refusal: {3}   last success: {4}' -f $cdn.ok, $cdn.denied, $(if ($cdn.firstDenied) { Short $cdn.firstDenied } else { '-' }), $(if ($cdn.lastDenied) { Short $cdn.lastDenied } else { '-' }), $(if ($cdn.lastOk) { Short $cdn.lastOk } else { '-' })))
 $out.Add('')
 $out.Add('Last 12 login attempts:')
 foreach ($j in @($jwt | Select-Object -Last 12)) { $out.Add(('  {0}  {1}' -f (Short $j.At), $j.Result)) }
