@@ -44,6 +44,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 }
 
+/// The footer question, with a reminder when answering yes will send nothing.
+fn confirm_text(confirm: &crate::app::Confirm, dry_run: bool) -> String {
+    let text = confirm.prompt();
+    if dry_run && matches!(confirm, crate::app::Confirm::Migrate(_)) { format!("{text} (dry run: nothing is sent)") } else { text }
+}
+
 fn draw_main(frame: &mut Frame, area: Rect, app: &mut App) {
     let [header, body, footer] = Layout::vertical([Constraint::Length(1), Constraint::Fill(1), Constraint::Length(1)]).areas(area);
     let [sidebar, content] = Layout::horizontal([Constraint::Length(22), Constraint::Fill(1)]).areas(body);
@@ -56,6 +62,7 @@ fn draw_main(frame: &mut Frame, area: Rect, app: &mut App) {
         Page::Run => crate::run_ui::draw_run(frame, content, app, focused),
         Page::Tags if app.tag_form.is_some() => crate::tag_form_ui::draw_tag_form(frame, content, app),
         Page::Tags => crate::tags_ui::draw_tags(frame, content, app, focused),
+        Page::Migrate => crate::migrate_ui::draw_migrate(frame, content, app, focused),
         Page::Activity => draw_activity(frame, content, app, focused),
         Page::Audit => draw_audit(frame, content, app, focused),
         Page::Settings => draw_settings(frame, content, app, focused),
@@ -68,7 +75,7 @@ fn draw_main(frame: &mut Frame, area: Rect, app: &mut App) {
         frame.render_widget(Paragraph::new(Line::styled(format!(" {}", notice.text), Style::new().fg(color).add_modifier(Modifier::BOLD))), footer);
     } else if let Some(confirm) = &app.confirm {
         let prompt = Line::from(vec![
-            Span::styled(format!(" {} ", confirm.prompt()), Style::new().fg(WARN).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" {} ", confirm_text(confirm, app.is_dry_run())), Style::new().fg(WARN).add_modifier(Modifier::BOLD)),
             Span::styled("y", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)),
             Span::styled(" to confirm, any other key cancels", Style::new().fg(DIM)),
         ]);
@@ -96,6 +103,9 @@ pub(crate) fn breadcrumb(app: &App) -> String {
     let page = app.page.title();
     if app.viewer.is_some() {
         return format!("{page} / Output");
+    }
+    if let (Page::Migrate, Some(open)) = (app.page, &app.migrate.open) {
+        return format!("{page} / {}", open.project.name);
     }
     match (&app.tag_form, app.page) {
         (Some(form), Page::Tags) => match (&form.mode, &form.tag) {
@@ -854,7 +864,7 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &SettingsForm) {
 }
 
 /// Draws a labelled text field and returns where the cursor goes if it has focus.
-fn draw_field(frame: &mut Frame, area: Rect, label: &str, input: &TextInput, focused: bool) -> (u16, u16) {
+pub(crate) fn draw_field(frame: &mut Frame, area: Rect, label: &str, input: &TextInput, focused: bool) -> (u16, u16) {
     let border = Style::new().fg(if focused { ACCENT } else { BORDER });
     let block = Block::bordered().border_type(BorderType::Rounded).title(format!(" {label} ")).border_style(border);
     let inner = block.inner(area);
@@ -1364,6 +1374,7 @@ mod tests {
             name: "Run Cleanup".into(),
             timeout_seconds: 120,
             inputs: vec![RunInput { name: "Pass".into(), variable: "pw".into(), kind: InputType::Password, value: InputValue { string_value: Some("hunter2-secret".into()), ..Default::default() } }],
+            run_when_online: false,
         };
         let result = rt.block_on(app.core().run_script(&input));
         assert_eq!(result.err().as_deref(), Some(nvoke_core::DRY_RUN_ERROR));

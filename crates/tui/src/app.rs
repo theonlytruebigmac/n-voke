@@ -29,6 +29,8 @@ use crate::{
     ui,
 };
 
+pub(crate) mod migrate;
+pub(crate) mod servers;
 pub(crate) mod run;
 pub(crate) mod tag_form;
 pub(crate) mod watch;
@@ -40,6 +42,7 @@ use tag_form::Saved;
 pub use tag_form::{CondPart, FormMode, TagField, TagForm};
 pub(crate) mod viewer;
 pub use viewer::TOAST_TICKS;
+pub use migrate::{MigrateConfirm, MigrateState};
 pub use run::{NoticeKind, RunField, RunPane, RunState};
 
 /// Also the animation frame rate: spinners and the logo shimmer advance once per tick.
@@ -69,6 +72,7 @@ pub enum Msg {
     TagFormDone(Result<Saved, nvoke_core::tags::CreateFailure>),
     Watched(Result<Box<nvoke_core::jobs::Job>, String>),
     DataCleared(Result<(), String>),
+    Migrate(Box<migrate::MigrateMsg>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,18 +80,20 @@ pub enum Page {
     Run,
     Activity,
     Tags,
+    Migrate,
     Audit,
     Settings,
 }
 
 impl Page {
-    pub const ALL: [Page; 5] = [Page::Run, Page::Activity, Page::Tags, Page::Audit, Page::Settings];
+    pub const ALL: [Page; 6] = [Page::Run, Page::Activity, Page::Tags, Page::Migrate, Page::Audit, Page::Settings];
 
     pub fn title(self) -> &'static str {
         match self {
             Page::Run => "Run",
             Page::Activity => "Activity",
             Page::Tags => "Tags",
+            Page::Migrate => "Migrate",
             Page::Audit => "Audit log",
             Page::Settings => "Settings",
         }
@@ -95,7 +101,7 @@ impl Page {
 
     /// Whether the page has anything to move around in (so focus can enter it).
     pub fn interactive(self) -> bool {
-        matches!(self, Page::Run | Page::Activity | Page::Tags | Page::Audit | Page::Settings)
+        matches!(self, Page::Run | Page::Activity | Page::Tags | Page::Migrate | Page::Audit | Page::Settings)
     }
 
     pub fn index(self) -> usize {
@@ -185,6 +191,7 @@ pub enum Pane {
 pub enum Confirm {
     RemoveJob(String),
     Tag(TagConfirm),
+    Migrate(MigrateConfirm),
     /// Clear saved run history and cached data.
     ClearData,
 }
@@ -193,6 +200,7 @@ impl Confirm {
     /// The question shown in the footer.
     pub fn prompt(&self) -> String {
         match self {
+            Confirm::Migrate(m) => m.prompt(),
             Confirm::RemoveJob(_) => "Remove this run from your history?".into(),
             Confirm::ClearData => "Clear saved run history and cached data? Runs still being watched are kept; the audit log and your settings are not touched.".into(),
             Confirm::Tag(t) => t.prompt(),
@@ -221,6 +229,7 @@ pub struct App {
     collections: Arc<Collections>,
     pub run: RunState,
     pub tags: TagsState,
+    pub migrate: MigrateState,
     /// The new-tag / edit-tag form, when open.
     pub tag_form: Option<TagForm>,
     /// The "watch a task" box, when open.
@@ -284,6 +293,7 @@ impl App {
             collections,
             run: RunState::default(),
             tags: TagsState::default(),
+            migrate: MigrateState::default(),
             tag_form: None,
             watch: None,
             flash: None,
@@ -399,6 +409,7 @@ impl App {
                 self.tick_picker();
                 self.tick_tags();
                 self.tick_tag_form();
+                self.tick_migrate();
             }
             Event::Msg(msg) => self.on_msg(*msg),
         }
@@ -452,6 +463,7 @@ impl App {
             Msg::TagPreview { seq, key, result } => self.on_tag_preview(seq, key, result),
             Msg::TagFormDone(result) => self.on_tag_form_done(result),
             Msg::Watched(result) => self.on_watched(result),
+            Msg::Migrate(msg) => self.on_migrate_msg(*msg),
             Msg::DataCleared(result) => match result {
                 Ok(()) => {
                     self.jobs.clear_finished();
@@ -469,6 +481,9 @@ impl App {
     fn enter_page(&mut self) {
         if self.page == Page::Tags {
             self.enter_tags();
+        }
+        if self.page == Page::Migrate {
+            self.enter_migrate();
         }
         if self.page == Page::Audit && matches!(self.audit, Load::NotLoaded) {
             self.reload_audit();
@@ -548,7 +563,7 @@ impl App {
 
     /// True while anything is waiting on the network or keychain.
     pub fn busy(&self) -> bool {
-        matches!(self.screen, Screen::Loading) || matches!(self.audit, Load::Loading) || (self.jobs_started && !self.jobs.is_loaded())
+        matches!(self.screen, Screen::Loading) || self.migrate.busy.is_some() || matches!(self.audit, Load::Loading) || (self.jobs_started && !self.jobs.is_loaded())
     }
 
     fn on_main_key(&mut self, key: KeyEvent) {
@@ -560,6 +575,7 @@ impl App {
                         self.sync_jobs();
                     }
                     Confirm::Tag(tag) => self.run_tag_confirmed(tag),
+                    Confirm::Migrate(m) => self.run_migrate_confirmed(m),
                     Confirm::ClearData => self.spawn(|core| async move { Msg::DataCleared(core.clear_local_data().await) }),
                 }
             }
@@ -593,6 +609,10 @@ impl App {
         if self.run_captures_keys() {
             return self.on_run_modal_key(key);
         }
+        // The new-project and server forms are text entry, and the servers list covers the page: digits, q and ? are not shortcuts there.
+        if self.page == Page::Migrate && self.focus == Focus::Content && self.migrate_modal_open() {
+            return self.on_migrate_modal_key(key);
+        }
         match key.code {
             // With a tag form open, q would throw away unsaved work: esc leaves it, asking first.
             KeyCode::Char('q') if self.tag_form.is_none() => self.quit = true,
@@ -602,7 +622,7 @@ impl App {
                 self.dry_table.select((!self.core.dry_run_log().is_empty()).then_some(0));
                 self.dry_scroll = 0;
             }
-            KeyCode::Char(c @ '1'..='5') => self.go(Page::ALL[c as usize - '1' as usize]),
+            KeyCode::Char(c @ '1'..='6') => self.go(Page::ALL[c as usize - '1' as usize]),
             KeyCode::Tab => self.go(Page::ALL[(self.page.index() + 1) % Page::ALL.len()]),
             KeyCode::BackTab => self.go(Page::ALL[(self.page.index() + Page::ALL.len() - 1) % Page::ALL.len()]),
             _ => match self.focus {
@@ -635,6 +655,9 @@ impl App {
         }
         if self.page == Page::Tags {
             return self.on_tags_key(key);
+        }
+        if self.page == Page::Migrate {
+            return self.on_migrate_key(key);
         }
         if matches!(key.code, KeyCode::Left | KeyCode::Char('h') | KeyCode::Esc) {
             self.focus = Focus::Sidebar;
