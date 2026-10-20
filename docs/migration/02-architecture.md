@@ -37,7 +37,11 @@ flowchart TB
 
 Today the desktop app's domain logic is in TypeScript (`src/lib/`), mirrored in Rust (`crates/core/src/`) for the terminal app. Migration logic is larger and stateful (projects, mappings, waves, a tracker that runs for hours), and keeping two copies in step would be costly and risky.
 
-So **all migration logic lives in `nvoke-core`**, and the desktop app reaches it through Tauri commands, as it already does for `graphql`, the keychain and the store. The React side only renders state and sends user actions. The existing run, tag and activity features stay as they are.
+So **all migration logic lives in `nvoke-core`**, and the desktop app reaches it through Tauri commands, as it already does for `graphql`, the keychain and the store. The React side only renders state and sends user actions.
+
+**Decided 2026-10-20 ([Q9](09-roadmap.md#open-questions)): the existing features follow.** The run, tag, activity, poll, sync and picker logic that is duplicated in `src/lib/` moves to `nvoke-core` as well, so there is one copy of every rule and both apps run it (a fix such as the four-tasks-per-request poll limit then happens once, not in `poll.rs` and `jobs.ts`). The migration feature is built that way from the start; the existing features are moved in steps ([Phase 5](09-roadmap.md#phase-5-desktop-app)). The rule for each step: **behaviour doesn't change**, and the TypeScript module is deleted only when the Rust one passes the same cases.
+
+What stays in TypeScript: components, layout, formatting for display (`format.ts`), the shared UI types, and the query cache that drives re-rendering.
 
 ## New core modules
 
