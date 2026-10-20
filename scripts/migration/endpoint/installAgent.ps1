@@ -29,8 +29,20 @@ New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 $LogPath = Join-Path $LogDir ('install-{0}.log' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
 Get-ChildItem $LogDir -Filter 'install-*.log' | Sort-Object Name -Descending | Select-Object -Skip 9 | Remove-Item -Force -ErrorAction SilentlyContinue
 
-function Write-Log([string]$Message) {
+function Write-InstallLog([string]$Message) {
     Add-Content -Path $LogPath -Value ('{0} {1}' -f (Get-Date).ToString('o'), $Message) -Encoding UTF8
+}
+
+# Windows PowerShell 5.1 can follow a junction or link while deleting and empty what it points to: a link
+# is removed by itself and never entered. A user can create such a link where this deletes.
+function Remove-TreeSafely([string]$Path) {
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if (-not $item) { return }
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { [IO.Directory]::Delete($Path); return }
+    foreach ($child in @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue)) {
+        if ($child.PSIsContainer) { Remove-TreeSafely $child.FullName } else { Remove-Item -LiteralPath $child.FullName -Force -ErrorAction SilentlyContinue }
+    }
+    Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
 }
 
 function Save-Status($Status) {
@@ -40,10 +52,35 @@ function Save-Status($Status) {
     Move-Item -Path $tmp -Destination $StatusPath -Force
 }
 
-function Add-History($Status, [string]$Event, [string]$Detail) {
-    $entry = [ordered]@{ at = (Get-Date).ToUniversalTime().ToString('o'); event = $Event; detail = $Detail }
+function Add-StatusHistory($Status, [string]$EventName, [string]$Detail) {
+    $entry = [ordered]@{ at = (Get-Date).ToUniversalTime().ToString('o'); event = $EventName; detail = $Detail }
     $Status.history = @(@($Status.history) + $entry | Select-Object -Last 50)
-    Write-Log "$Event $Detail"
+    Write-InstallLog "$EventName $Detail"
+}
+
+# The registration token is on WindowsAgentSetup.exe's command line, so its verbose MSI log can record
+# it. Blank it out of every log in the folder: right after each install attempt, and at the start of
+# every run in case an earlier run was killed before it could. Returns how many files it changed.
+function Hide-RegistrationToken([string]$Directory, [string]$Token) {
+    if ([string]::IsNullOrEmpty($Token) -or -not (Test-Path -LiteralPath $Directory)) { return 0 }
+    $changed = 0
+    foreach ($file in Get-ChildItem -LiteralPath $Directory -Filter '*.log' -File -ErrorAction SilentlyContinue) {
+        try {
+            $bytes = [IO.File]::ReadAllBytes($file.FullName)
+            # MSI logs are ANSI or UTF-16: Latin-1 maps bytes one to one, so non-token bytes survive untouched.
+            $utf16 = $bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE
+            $encoding = if ($utf16) { [Text.Encoding]::Unicode } else { [Text.Encoding]::GetEncoding(28591) }
+            $text = $encoding.GetString($bytes)
+            if ($text.IndexOf($Token, [StringComparison]::Ordinal) -lt 0) { continue }
+            $tmp = $file.FullName + '.tmp'
+            [IO.File]::WriteAllBytes($tmp, $encoding.GetBytes($text.Replace($Token, '[token removed]')))
+            Move-Item -LiteralPath $tmp -Destination $file.FullName -Force
+            $changed++
+        } catch {
+            Write-InstallLog "could not remove the registration token from $($file.Name): $($_.Exception.Message)"
+        }
+    }
+    return $changed
 }
 
 function Get-AgentState {
@@ -92,9 +129,8 @@ $CleanupProducts = 'Windows Agent', 'MSP Core Agent', 'Patch Management Service 
 $ProgramFilesX86 = [Environment]::GetFolderPath('ProgramFilesX86')
 $CommonAppData = [Environment]::GetFolderPath('CommonApplicationData')
 $CleanupFolders = @(
-    "$ProgramFilesX86\N-able Technologies", "$ProgramFilesX86\Msp Agent", "$ProgramFilesX86\MspPlatform", "$ProgramFilesX86\BeAnywhere Support Express",
+    "$ProgramFilesX86\N-able Technologies", "$ProgramFilesX86\Msp Agent", "$ProgramFilesX86\MspPlatform",
     "$CommonAppData\N-able Technologies", "$CommonAppData\MspAgent", "$CommonAppData\MspPlatform",
-    "$CommonAppData\GetSupportService_N-Central", "$CommonAppData\GetSupportService_Common_N-Central",
     "$env:windir\System32\config\systemprofile\AppData\Local\MSPScriptExecution"
 )
 $CleanupRegistry = 'HKLM:\SOFTWARE\N-able Technologies', 'HKLM:\SOFTWARE\WOW6432Node\N-able Technologies'
@@ -138,23 +174,22 @@ function Invoke-FullCleanup($Status) {
         # Inno Setup uninstallers hand off to a temp copy and exit at once: wait until the entry is gone.
         for ($wait = 0; $wait -lt 60 -and (Get-UninstallEntry $product); $wait++) { Start-Sleep -Seconds 5 }
         if (Get-UninstallEntry $product) { $code = "$code (entry still present after 5 min)" }
-        Add-History $Status 'cleanup-uninstall' "$product -> $code"
+        Add-StatusHistory $Status 'cleanup-uninstall' "$product -> $code"
     }
-    # Take Control has no uninstall entry; its services, helper task and folder go directly.
-    Unregister-ScheduledTask -TaskName 'Take Control Agent N-Central Helper' -Confirm:$false -ErrorAction SilentlyContinue
+    # Whatever service is still registered from an N-able folder goes too.
     $leftover = Get-CimInstance Win32_Service | Where-Object { $p = [string]$_.PathName; $CleanupFolders | Where-Object { $p -like "*$_*" } }
     foreach ($svc in $leftover) {
         Stop-Service -Name $svc.Name -Force -ErrorAction SilentlyContinue
         & "$env:windir\System32\sc.exe" delete $svc.Name | Out-Null
         $log += "service $($svc.Name) deleted"
-        Add-History $Status 'cleanup-service' $svc.Name
+        Add-StatusHistory $Status 'cleanup-service' $svc.Name
     }
     Get-Process | Where-Object { $path = $_.Path; $path -and ($CleanupFolders | Where-Object { $path -like "$_*" }) } | Stop-Process -Force -ErrorAction SilentlyContinue
     foreach ($folder in $CleanupFolders) {
         if (-not (Test-Path $folder)) { continue }
         # Handles from processes stopped a moment ago take time to close; the new install overwrites anything left.
         for ($try = 1; $try -le 6 -and (Test-Path $folder); $try++) {
-            Remove-Item -Path $folder -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-TreeSafely $folder
             if (Test-Path $folder) { Start-Sleep -Seconds 10 }
         }
         $result = 'removed'
@@ -163,12 +198,12 @@ function Invoke-FullCleanup($Status) {
             $result = "partly left (files in use: $($left -join ', '))"
         }
         $log += "folder $folder $result"
-        Add-History $Status 'cleanup-folder' "$folder $result"
+        Add-StatusHistory $Status 'cleanup-folder' "$folder $result"
     }
     foreach ($key in $CleanupRegistry) {
         if (Test-Path $key) {
             Remove-Item -Path $key -Recurse -Force -ErrorAction SilentlyContinue
-            Add-History $Status 'cleanup-registry' "$key $(if (Test-Path $key) { 'left' } else { 'removed' })"
+            Add-StatusHistory $Status 'cleanup-registry' "$key $(if (Test-Path $key) { 'left' } else { 'removed' })"
         }
     }
     return $log
@@ -187,7 +222,7 @@ function Get-Installer([string]$Server) {
         Import-Module BitsTransfer -ErrorAction Stop
         Start-BitsTransfer -Source $url -Destination $SetupPath -ErrorAction Stop
     } catch {
-        Write-Log "BITS download failed ($($_.Exception.Message)); falling back to Invoke-WebRequest"
+        Write-InstallLog "BITS download failed ($($_.Exception.Message)); falling back to Invoke-WebRequest"
         $method = 'Invoke-WebRequest'
         Invoke-WebRequest -Uri $url -OutFile $SetupPath -UseBasicParsing -TimeoutSec 1800
     }
@@ -197,9 +232,10 @@ function Get-Installer([string]$Server) {
 }
 
 # ---------------------------------------------------------------------------
-Write-Log "Installer started (PID $PID, 64-bit: $([Environment]::Is64BitProcess))"
-if (-not (Test-Path $JobPath)) { Write-Log 'job.json missing'; exit 1007 }
-try { $job = Get-Content $JobPath -Raw | ConvertFrom-Json } catch { Write-Log "job.json invalid: $($_.Exception.Message)"; exit 1007 }
+Write-InstallLog "Installer started (PID $PID, 64-bit: $([Environment]::Is64BitProcess))"
+if (-not (Test-Path $JobPath)) { Write-InstallLog 'job.json missing'; exit 1007 }
+try { $job = Get-Content $JobPath -Raw | ConvertFrom-Json } catch { Write-InstallLog "job.json invalid: $($_.Exception.Message)"; exit 1007 }
+Hide-RegistrationToken $LogDir $job.registrationToken | Out-Null
 
 $status = [ordered]@{}
 if (Test-Path $StatusPath) {
@@ -236,13 +272,13 @@ try {
             if (-not $status.ufaRestartedAt) {
                 Restart-Service -Name 'MspAgent' -Force -ErrorAction SilentlyContinue
                 $status.ufaRestartedAt = (Get-Date).ToUniversalTime().ToString('o')
-                Add-History $status 'ufa-restarted' 'Windows Agent healthy on the destination; restarted MspAgent so it provisions there'
+                Add-StatusHistory $status 'ufa-restarted' 'Windows Agent healthy on the destination; restarted MspAgent so it provisions there'
                 Save-Status $status
                 # Provisioning usually follows within seconds; give it five minutes in this run.
                 for ($i = 0; $i -lt 30 -and -not $ufaProvisioned; $i++) { Start-Sleep -Seconds 10; $ufaProvisioned = & $testProvisioned }
                 if (-not $ufaProvisioned) {
                     $status.stage = 'awaiting-ufa'
-                    Add-History $status 'awaiting-ufa' 'not provisioned 5 min after restart; checking again next run'
+                    Add-StatusHistory $status 'awaiting-ufa' 'not provisioned 5 min after restart; checking again next run'
                     Save-Status $status
                     exit 0
                 }
@@ -252,7 +288,7 @@ try {
                 $waited = ((Get-Date).ToUniversalTime() - [datetime]::Parse($status.ufaRestartedAt).ToUniversalTime()).TotalMinutes
                 if ($waited -lt $HealthGraceMinutes) {
                     $status.stage = 'awaiting-ufa'
-                    Add-History $status 'awaiting-ufa' ('{0:N0} min since MspAgent restart; not provisioned yet' -f $waited)
+                    Add-StatusHistory $status 'awaiting-ufa' ('{0:N0} min since MspAgent restart; not provisioned yet' -f $waited)
                     Save-Status $status
                     exit 0
                 }
@@ -262,7 +298,7 @@ try {
 
         $status.stage = 'healthy'
         $status.healthyAt = (Get-Date).ToUniversalTime().ToString('o')
-        Add-History $status 'healthy' "agent $($agent.Version) on $($agent.Server); UFA present $([bool]$ufaService), provisioned $ufaProvisioned"
+        Add-StatusHistory $status 'healthy' "agent $($agent.Version) on $($agent.Server); UFA present $([bool]$ufaService), provisioned $ufaProvisioned"
         Save-Status $status
         # The token goes now. status.json and the logs stay for the review period, then a one-time task removes the folder.
         Remove-Item $JobPath -Force -ErrorAction SilentlyContinue
@@ -279,7 +315,7 @@ try {
             $principal = New-ScheduledTaskPrincipal -UserId 'S-1-5-18' -LogonType ServiceAccount -RunLevel Highest
             Register-ScheduledTask -TaskName $ReviewTaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description "N-voke: remove migration records after the review period" -Force | Out-Null
             $status.reviewUntil = $reviewUntil.ToUniversalTime().ToString('o')
-            Add-History $status 'review-period' "status.json and logs kept until $($status.reviewUntil), then removed"
+            Add-StatusHistory $status 'review-period' "status.json and logs kept until $($status.reviewUntil), then removed"
             Save-Status $status
         }
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
@@ -294,7 +330,7 @@ try {
     if ($status.stage -eq 'installed-awaiting-health' -and $status.installedAt) {
         $since = (Get-Date).ToUniversalTime() - [datetime]::Parse($status.installedAt).ToUniversalTime()
         if ($since.TotalMinutes -lt $HealthGraceMinutes) {
-            Add-History $status 'waiting-for-agent' ('{0:N0} min since install; service running: {1}; server: {2}' -f $since.TotalMinutes, $agent.ServiceRunning, $agent.Server)
+            Add-StatusHistory $status 'waiting-for-agent' ('{0:N0} min since install; service running: {1}; server: {2}' -f $since.TotalMinutes, $agent.ServiceRunning, $agent.Server)
             Save-Status $status
             exit 0
         }
@@ -302,13 +338,13 @@ try {
 
     if (Get-Process -Name 'WindowsAgentSetup' -ErrorAction SilentlyContinue) {
         $status.stage = 'install-in-progress'
-        Add-History $status 'install-in-progress' 'an earlier WindowsAgentSetup.exe is still running'
+        Add-StatusHistory $status 'install-in-progress' 'an earlier WindowsAgentSetup.exe is still running'
         Save-Status $status
         exit 0
     }
     if (Test-MsiBusy) {
         $status.stage = 'waiting-on-windows'
-        Add-History $status 'waiting-on-windows' 'Windows Installer is busy (another installation in progress)'
+        Add-StatusHistory $status 'waiting-on-windows' 'Windows Installer is busy (another installation in progress)'
         Save-Status $status
         exit 0
     }
@@ -317,11 +353,11 @@ try {
     $status.stage = 'downloading'
     Save-Status $status
     try {
-        Add-History $status 'downloaded' (Get-Installer $job.destServer)
+        Add-StatusHistory $status 'downloaded' (Get-Installer $job.destServer)
     } catch {
         $status.stage = 'download-failed'
         $status.lastError = $_.Exception.Message
-        Add-History $status 'download-failed' $_.Exception.Message
+        Add-StatusHistory $status 'download-failed' $_.Exception.Message
         Save-Status $status
         exit 1001
     }
@@ -329,7 +365,7 @@ try {
     # Everything above leaves the old agent alone. The cleanup and the installer below remove it.
     if ($job.cleanMode -ne 'none' -and -not $status.cleanedAt) {
         $status.stage = 'cleaning'
-        Add-History $status 'cleanup-started' "mode $($job.cleanMode)"
+        Add-StatusHistory $status 'cleanup-started' "mode $($job.cleanMode)"
         Save-Status $status
         Invoke-FullCleanup $status | Out-Null
         $status.cleanedAt = (Get-Date).ToUniversalTime().ToString('o')
@@ -337,36 +373,37 @@ try {
     }
 
     $status.stage = 'installing'
-    Add-History $status 'install-started' "reboot pending: $($status.rebootPending)"
+    Add-StatusHistory $status 'install-started' "reboot pending: $($status.rebootPending)"
     Save-Status $status
     $msiLog = Join-Path $LogDir ('msi-{0}.log' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
     $arguments = '/s /v" /qn SERVERADDRESS={0} CUSTOMERID={1} CUSTOMERSPECIFIC=1 REGISTRATION_TOKEN={2} SERVERPROTOCOL=HTTPS /L*V {3}"' -f $job.destServer, $job.destCustomerId, $job.registrationToken, $msiLog
     $code = (Start-Process -FilePath $SetupPath -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden).ExitCode
+    if ((Hide-RegistrationToken $LogDir $job.registrationToken) -gt 0) { Write-InstallLog 'removed the registration token from the installer log' }
 
     if ($code -eq 0 -or $code -eq 3010) {
         $status.stage = 'installed-awaiting-health'
         $status.installedAt = (Get-Date).ToUniversalTime().ToString('o')
         $status.lastInstallExitCode = 0
-        Add-History $status 'install-finished' "exit $code"
+        Add-StatusHistory $status 'install-finished' "exit $code"
         Save-Status $status
         exit 0
     }
     $status.lastInstallExitCode = $code
     if ($code -eq 1618) {
         $status.stage = 'waiting-on-windows'
-        Add-History $status 'waiting-on-windows' 'installer exit 1618: another installation in progress'
+        Add-StatusHistory $status 'waiting-on-windows' 'installer exit 1618: another installation in progress'
         Save-Status $status
         exit 0
     }
     $status.stage = 'install-failed'
     $status.lastError = "WindowsAgentSetup.exe exit $code"
-    Add-History $status 'install-failed' "exit $code"
+    Add-StatusHistory $status 'install-failed' "exit $code"
     Save-Status $status
     exit 1003
 } catch {
     $status.stage = 'error'
     $status.lastError = $_.Exception.Message
-    Add-History $status 'error' $_.Exception.Message
+    Add-StatusHistory $status 'error' $_.Exception.Message
     try { Save-Status $status } catch { }
     exit 1005
 }

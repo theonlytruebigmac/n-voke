@@ -54,14 +54,52 @@ function Get-OneLine($Value, [int]$Max = 4000) {
     return $s
 }
 
-function Set-RestrictedAcl([string]$Path) {
+function New-RestrictedSecurity {
     $acl = New-Object System.Security.AccessControl.DirectorySecurity
     $acl.SetAccessRuleProtection($true, $false)
     foreach ($sid in 'S-1-5-18', 'S-1-5-32-544') {
         $id = New-Object System.Security.Principal.SecurityIdentifier $sid
         $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($id, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
     }
-    Set-Acl -Path $Path -AclObject $acl
+    return $acl
+}
+
+function Set-RestrictedAcl([string]$Path) {
+    Set-Acl -Path $Path -AclObject (New-RestrictedSecurity)
+}
+
+# A real folder (not a junction or symbolic link) owned by SYSTEM or Administrators. A folder anyone else
+# owns can have its permissions changed by them whatever the ACL says.
+function Test-TrustedFolder([string]$Path) {
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if (-not $item -or -not $item.PSIsContainer) { return $false }
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { return $false }
+    $owner = (Get-Acl -LiteralPath $Path).GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+    return ($owner -eq 'S-1-5-18' -or $owner -eq 'S-1-5-32-544')
+}
+
+# C:\ProgramData lets any user create a folder, so one may already be there: refuse it rather than use it.
+# A new folder is created with its permissions in the same step.
+function Initialize-SecureFolder([string]$Path) {
+    if (Test-Path -LiteralPath $Path) {
+        if (-not (Test-TrustedFolder $Path)) { throw [System.UnauthorizedAccessException] "$Path already exists and is a link or isn't owned by SYSTEM or Administrators. Remove it, then launch again." }
+    } else {
+        [IO.Directory]::CreateDirectory($Path, (New-RestrictedSecurity)) | Out-Null
+    }
+    Set-RestrictedAcl $Path
+    if (-not (Test-TrustedFolder $Path)) { throw [System.UnauthorizedAccessException] "$Path isn't owned by SYSTEM or Administrators." }
+}
+
+# Windows PowerShell 5.1 can follow a junction or link while deleting and empty what it points to: a link
+# is removed by itself and never entered.
+function Remove-TreeSafely([string]$Path) {
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if (-not $item) { return }
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { [IO.Directory]::Delete($Path); return }
+    foreach ($child in @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue)) {
+        if ($child.PSIsContainer) { Remove-TreeSafely $child.FullName } else { Remove-Item -LiteralPath $child.FullName -Force -ErrorAction SilentlyContinue }
+    }
+    Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
 }
 
 function Get-StatusSummary {
@@ -91,9 +129,8 @@ function Invoke-Launch {
 
     # A review-period cleanup left by an earlier job would delete this job's folder: remove it first.
     Unregister-ScheduledTask -TaskName $ReviewTaskName -Confirm:$false -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory -Path $Root -Force | Out-Null
-    Set-RestrictedAcl (Split-Path $Root -Parent)
-    Set-RestrictedAcl $Root
+    Initialize-SecureFolder (Split-Path $Root -Parent)
+    Initialize-SecureFolder $Root
 
     $bytes = [Convert]::FromBase64String($InstallerB64)
     [IO.File]::WriteAllBytes($InstallerPath, $bytes)
@@ -162,7 +199,7 @@ function Invoke-Cleanup {
     $script:StatusJson = Get-StatusSummary
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $ReviewTaskName -Confirm:$false -ErrorAction SilentlyContinue
-    if (Test-Path $Root) { Remove-Item -Path $Root -Recurse -Force }
+    if (Test-Path $Root) { Remove-TreeSafely $Root }
     $parent = Split-Path $Root -Parent
     if ((Test-Path $parent) -and -not (Get-ChildItem -LiteralPath $parent -Force)) { Remove-Item -LiteralPath $parent -Force }
     $script:TaskState = Get-TaskSummary
