@@ -70,7 +70,7 @@ Viewing, managing and running scripts (`monitoring_scripts_view`, `monitoring_sc
 
 ## N-central REST (`https://<server>/api/...`)
 
-Authentication: `POST /api/auth/authenticate` with `Authorization: Bearer <user API JWT>` returns an access token (3,600 s) and a refresh token (90,000 s), confirmed in the lab. `POST /api/auth/refresh` renews it. A server restart invalidates sessions, so the client must re-authenticate on 401.
+Authentication: `POST /api/auth/authenticate` with `Authorization: Bearer <user API JWT>` returns an access token (3,600 s) and a refresh token (90,000 s), confirmed in the lab. N-voke doesn't use the refresh token (`POST /api/auth/refresh` is untested): it signs in again with the JWT from the keychain a minute before the access token expires. A server restart invalidates sessions, so the client also signs in again on a 401 and retries once.
 
 | Endpoint | Use | Status |
 |---|---|---|
@@ -107,7 +107,7 @@ The plan originally used SOAP to upload and find an AMP. AMPs are dropped ([Deli
 | `REGISTRATION_TOKEN` | Registration token for that customer or site |
 | `AGENTACTIVATIONKEY` | Alternative to the above when the device was pre-created |
 
-Generic installer URL: `https://<server>/download/current/winnt/N-central/WindowsAgentSetup.exe` (about 133 MB; no authentication; Authenticode signer *N-ABLE TECHNOLOGIES LTD*). Silent install: `/s /v" /qn …"`; N-voke adds `/L*V <log>` inside `/v"…"`. ❓ Whether the verbose MSI log records `REGISTRATION_TOKEN` in plain text is unchecked; see [Security](08-security.md).
+Generic installer URL: `https://<server>/download/current/winnt/N-central/WindowsAgentSetup.exe` (about 133 MB; no authentication; Authenticode signer *N-ABLE TECHNOLOGIES LTD*). Silent install: `/s /v" /qn …"`; N-voke adds `/L*V <log>` inside `/v"…"`. ❓ Whether the verbose MSI log records `REGISTRATION_TOKEN` in plain text is still unchecked on a device, so the installer removes the token from every log after each install attempt either way; see [Security](08-security.md).
 
 Confirmed in the lab:
 

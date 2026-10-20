@@ -407,6 +407,8 @@ VM-A after a clean install on the source (new device record and new asset), from
 | **The VM is very slow (2 GB RAM)**: ~20 s from service start to core start, 8 s to generate a CSR, metadata lookups time out | Timeouts and grace periods must tolerate slow devices; use larger VMs to separate our logic from hardware effects |
 | **The empty `ProgramData\N-voke` folder stayed**: cleanup removed `N-voke\Migration` but not its parent, which Launch creates | Fixed (build 0.1.0+61a6b82): every removal path also removes the parent if it's empty |
 
+> **Later change (2026-10-20):** the installer no longer removes anything of Take Control (its helper task, `BeAnywhere Support Express` and `GetSupportService_*`): it isn't required for a migration. The Take Control findings above describe what the Phase 0 build did.
+
 ## Status of Phase 0 tests
 
 | # | Status |

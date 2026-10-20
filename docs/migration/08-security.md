@@ -10,7 +10,7 @@ Migration adds two kinds of credential to N-voke, two new APIs it writes to, and
 | Second Ecoverse token, when the destination server is linked to another tenant | Seeing and cleaning up moved devices in the destination tenant | OS keychain, account `ecoverse:<tenant id>` |
 | N-central user API JWT, one per server | REST authentication | OS keychain, account `ncentral:<host>` |
 | REST access and refresh tokens | Short-lived REST sessions | Memory only |
-| Destination registration tokens | Passed to devices at launch | Memory, plus the encrypted project store (needed to relaunch). Never in logs, the audit log or reports |
+| Destination registration tokens | Passed to devices at launch | Memory only: read from the destination server at planning and again at each launch or relaunch, so they are never saved in the project store. A valid token isn't changed by reading it again. Never in logs, the audit log, dry-run output or reports |
 
 - The web UI never sees any of these. As today, it calls Rust commands; it doesn't make network requests (CSP `connect-src` stays limited to the app's IPC).
 - Every request goes over HTTPS with OS trust-store validation. Non-HTTPS server addresses are rejected, as the Ecoverse endpoint already is.
@@ -29,7 +29,7 @@ Migration adds two kinds of credential to N-voke, two new APIs it writes to, and
 Where the registration token is briefly visible on the device or elsewhere, by design of the platforms:
 
 - **Ecoverse:** PASSWORD inputs are hidden in the Ecoverse UI and API, but Ecoverse writes them as plain-text assignments into its temporary copy of the script (`…\systemprofile\AppData\Local\MSPScriptExecution\scripts\<guid>.ps1`, SYSTEM's profile) for the duration of the run; the file is deleted afterwards.
-- **Installer:** `REGISTRATION_TOKEN` is on `WindowsAgentSetup.exe`'s command line for the minute the install runs (readable by local administrators). ❓ The verbose MSI log N-voke writes (`/L*V`) may also record it; the log sits in the restricted folder and is deleted at cleanup, but this must be checked and fixed (drop the log or scrub it) before release.
+- **Installer:** `REGISTRATION_TOKEN` is on `WindowsAgentSetup.exe`'s command line for the minute the install runs (readable by local administrators). The verbose MSI log N-voke writes (`/L*V`) may also record it, so the installer replaces the token with `[token removed]` in every log in its folder after each install attempt and at the start of each run ([Endpoint scripts](05-endpoint-scripts.md#testing-the-scripts)). The log sits in the restricted folder and is deleted at cleanup. Whether Windows Installer records it at all hasn't been confirmed on a device.
 - **REST path:** the command line in N-central's task details (above), and the device's process list while the launcher runs.
 
 **REST task output is public to anyone with the URL.** N-central stores each direct task's full output and exit code in a zip under `/download/scheduled_tasks/output_files/…` that downloads **without authentication**, at a predictable path (org unit, device ID, task ID, task name, timestamp). The endpoint script therefore never prints a secret, and nothing it prints is sensitive. (To be reported to N-able.)
@@ -37,7 +37,9 @@ Where the registration token is briefly visible on the device or elsewhere, by d
 Device-side protections ([Endpoint scripts](05-endpoint-scripts.md)):
 
 - The working folder is `C:\ProgramData\N-voke\Migration`, readable and writable only by SYSTEM and Administrators, with inheritance disabled. The PowerShell project's Everyone: Full Control folder let any local user plant code that ran as SYSTEM; that's fixed.
-- The installer script's hash is checked against the value baked into the launcher before each install.
+- **A folder a user created first is refused.** Any user can create a folder in `C:\ProgramData`, and its owner can change its permissions whatever the ACL says. The launcher refuses `N-voke` or `Migration` if it already exists and is a junction or link, or isn't owned by SYSTEM or Administrators (error 1005, naming the folder); a missing folder is created with its permissions in the same step. Checked again after the permissions are applied. Untested on a Windows device.
+- **Deleting never follows a link.** Windows PowerShell 5.1's `Remove-Item -Recurse` can follow a junction and empty its target. Cleanup (in the launcher and the installer, which removes the old agent's folders) deletes a link by itself and never enters it.
+- The installer script is written to the restricted folder with its hash checked against the value baked into the launcher, once, at launch. It isn't re-checked before each run: what protects it afterwards is the folder's owner and permissions.
 - The registration token is read from `job.json`, never placed on the scheduled task's command line.
 - The scheduled task has an expiry date and removes itself on success, so nothing keeps running as SYSTEM indefinitely. The token-bearing `job.json` is deleted the moment the device is healthy; only `status.json` and logs (no secrets) stay for the review period, removed by a one-time task.
 - The installer is downloaded only over HTTPS from the destination server named in the job.
@@ -81,7 +83,10 @@ N-voke's API calls never uninstall agents (`removeAgents` is always false) and n
 
 | Threat | Mitigation |
 |---|---|
-| Local user on an endpoint reads or replaces the installer to get SYSTEM | Restricted folder ACL; hash check before running |
+| Local user on an endpoint reads or replaces the installer to get SYSTEM | Restricted folder ACL; a pre-created folder (or a link) is refused; hash check when the installer is written |
+| Two windows (or a crash) double-launch or overwrite a project | A lease taken before the project is read; every save is refused if the project changed since it was read; what is sent is saved first (see [Delivery paths](04-delivery-paths.md)) |
+| A registration token ends up in a stored error message | Server error text and task messages are scrubbed of `-RegistrationToken …` and of the token values in use before they reach a project, report or the audit log |
+| REST redirects carry a launch's body elsewhere | The REST client is HTTPS-only and follows no redirects; the unauthenticated output download is limited to a plain file name under N-central's output folder |
 | API key leaked from an endpoint | No API key is ever sent to endpoints |
 | Registration token leaked from an endpoint | Lets someone register a device into one customer until the token expires. The token is deleted after success; rotate tokens in N-central after the project |
 | Wrong customer ID sends devices to the wrong customer | Mapping review; Wrong place detection; inputs validated against the mapping at launch |
