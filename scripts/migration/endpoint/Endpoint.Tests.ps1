@@ -425,6 +425,15 @@ Describe 'the installer' {
         $text | Should -Match '(?s)Start-Process -FilePath \$SetupPath.*?\r?\n\s*if \(\(Hide-RegistrationToken'
     }
 
+    It 'starts the full cleanup with the UFA core uninstaller, before any product is uninstalled' {
+        . ([scriptblock]::Create((Get-FunctionText (Join-Path $here 'installAgent.ps1') @('Invoke-UfaCoreUninstall', 'Invoke-FullCleanup')))) 2>$null
+        $text = Get-Content -Raw (Join-Path $here 'installAgent.ps1')
+        $cleanup = [regex]::Match($text, '(?s)function Invoke-FullCleanup\(\$Status\) \{.*?foreach \(\$product in \$CleanupProducts\)').Value
+        $cleanup | Should -Match 'Invoke-UfaCoreUninstall'
+        $core = [regex]::Match($text, '(?s)function Invoke-UfaCoreUninstall \{.*?\r?\n\}').Value
+        $core | Should -Match 'Invoke-WithTimeout \$core ''--uninstall'''
+    }
+
     It 'is ASCII' {
         $bytes = [IO.File]::ReadAllBytes((Join-Path $here 'installAgent.ps1'))
         ($bytes | Where-Object { $_ -gt 126 -or ($_ -lt 32 -and $_ -notin 9, 10, 13) }).Count | Should -Be 0

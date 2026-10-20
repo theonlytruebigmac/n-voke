@@ -163,15 +163,12 @@ function Test-UfaRepairDue($Sync, [datetime]$NowUtc, [bool]$AlreadyRepaired, [in
 # The repair N-able support gave for a UFA whose login is refused: uninstall the UFA core, then restart the Windows
 # Agent services so the agent redeploys it. The new UFA provisions a fresh certificate under the same GUID.
 function Invoke-UfaRepair {
-    $core = [Environment]::GetFolderPath('ProgramFilesX86') + '\Msp Agent\msp-agent-core.exe'
-    if (-not (Test-Path -LiteralPath $core)) { return 'msp-agent-core.exe not found' }
-    $code = Invoke-WithTimeout $core '--uninstall' 5
-    Start-Sleep -Seconds 5
+    $result = Invoke-UfaCoreUninstall
     foreach ($name in 'Windows Agent Maintenance Service', 'Windows Agent Service') {
         Restart-Service -DisplayName $name -Force -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 5
     }
-    return "uninstall exit code $code"
+    return "uninstall: $result"
 }
 
 function Test-RebootPending {
@@ -213,10 +210,25 @@ function Invoke-WithTimeout([string]$File, [string]$Arguments, [int]$Minutes = 2
     return $p.ExitCode
 }
 
+# Removes the Ecoverse agent (UFA) with its own uninstaller, which N-able support gives as the way to take it off a
+# device so it can be provisioned again with a new identity. Leftover folders and registry keys alone kept a stale
+# identity in the lab (the cloud then refused its login), so this runs first, while msp-agent-core.exe still exists.
+function Invoke-UfaCoreUninstall {
+    $core = [Environment]::GetFolderPath('ProgramFilesX86') + '\Msp Agent\msp-agent-core.exe'
+    if (-not (Test-Path -LiteralPath $core)) { return 'msp-agent-core.exe not found' }
+    $code = Invoke-WithTimeout $core '--uninstall' 5
+    Start-Sleep -Seconds 5
+    $service = if (Get-Service -Name 'MspAgent' -ErrorAction SilentlyContinue) { 'MspAgent service still present' } else { 'MspAgent service gone' }
+    return "exit code $code; $service"
+}
+
 # Removes every N-central component so the new agent installs clean and the destination
 # redeploys its own UFA (an in-place upgrade keeps the old UFA enrolled in the source tenant).
 function Invoke-FullCleanup($Status) {
     $log = @()
+    $ufaResult = Invoke-UfaCoreUninstall
+    $log += "ufa core uninstall -> $ufaResult"
+    Add-StatusHistory $Status 'cleanup-ufa-uninstall' "msp-agent-core.exe --uninstall -> $ufaResult"
     foreach ($product in $CleanupProducts) {
         $entry = Get-UninstallEntry $product
         if (-not $entry) { continue }
@@ -335,6 +347,19 @@ try {
                 exit 0
             }
             $status.warning = "MspAgent not redeployed and provisioned $([math]::Round($sinceRepair)) min after the repair"
+        }
+
+        # The Windows Agent installs the UFA a few minutes after itself. When the destination is linked, a UFA that isn't
+        # there yet is not a healthy device: wait for it, up to the same limit as the data sync.
+        if ($job.expectUfa -eq 'true' -and -not $ufaService -and -not $status.ufaRepairedAt) {
+            $waitedAbsent = ((Get-Date).ToUniversalTime() - $since).TotalMinutes
+            if ($waitedAbsent -lt $UfaSyncGraceMinutes) {
+                $status.stage = 'awaiting-ufa'
+                Add-StatusHistory $status 'awaiting-ufa' ('MspAgent is not installed yet; {0:N0} min since install' -f $waitedAbsent)
+                Save-Status $status
+                exit 0
+            }
+            $status.warning = "MspAgent was not installed $([math]::Round($waitedAbsent)) min after the install"
         }
 
         # Only wait for the UFA when the destination is linked to Ecoverse (the project says so); otherwise it can't provision there.
