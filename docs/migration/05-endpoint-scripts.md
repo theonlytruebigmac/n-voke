@@ -113,10 +113,12 @@ Observed in the lab ([findings](10-phase0-findings.md#known-delays-2026-10-20)):
 |---|---|---|
 | `synced` | the inventory component `generic-asset-interrogator` was downloaded (after any failure) | Healthy |
 | `stalled` | `ERROR … configservice::FetchAllConfigurations failed to fetch configuration data: …` (a timeout, or a 400), then `auth::requestOauthToken Oauth token response received. Status: 200` (the cloud accepts the login again), and no component since | **Restart `MspAgent`**, record `ufa-sync-restart` in the history |
-| `rejected` | `auth::fetchJWTWithRetries … unexpected status code: 400 … The SSL certificate error` and no accepted login since | Wait and report: **a restart doesn't help** (seen on two lab VMs: restarted, still rejected). The history says the cloud rejects the agent's login |
+| `rejected` | `auth::fetchJWTWithRetries … unexpected status code: 400 … The SSL certificate error` and no accepted login since | Wait, and report. **A restart and a reboot don't help** (two lab VMs, refused for 2.5 hours). After **30 minutes of refusal** the installer does the **repair, once** (below) |
 | `blocked` | the same failure and the cloud still doesn't answer | Wait: a restart can't help while the network or auth service is down |
 | `waiting` | no failure and no component yet | Wait (normal for a while) |
 | `unknown` | no log | Wait |
+
+**The repair (`Invoke-UfaRepair`)** is the procedure N-able support gave for a UFA that won't log in: run `msp-agent-core.exe --uninstall`, wait 5 seconds, restart *Windows Agent Maintenance Service* and then *Windows Agent Service* (5 seconds apart). The Windows Agent redeploys the UFA, which provisions a **new certificate under the same agent GUID**. It fixed both refused lab VMs (the login was accepted at the first attempt, and the data arrived 5 to 11 minutes later). It is done at most once per job, only after the login has been refused for `$UfaRepairAfterMinutes` (30) with no accepted login, and then the installer keeps waiting up to `$UfaRepairWaitMinutes` (90) for the redeployed UFA instead of calling the device healthy. It is recorded as `ufa-repair` in the history with `ufaRepairedAt`. This is the one thing the installer does that restarts the Windows Agent's own services, which is why it is limited to a UFA that is already unusable and to one try.
 
 Limits, so a real outage can't cause a restart loop: at most **2 restarts** per job, at least **15 minutes apart**, and the installer stops waiting **120 minutes after the install** and goes on as healthy with a `warning` (`MspAgent had not synced its data … state: …`). The wait uses the existing repeating migration task (stage `awaiting-ufa`), so there's no extra scheduled task or file. `status.json` records `ufa.sync`, `ufaSyncRestarts` and `ufaSyncRestartedAt`.
 
@@ -177,7 +179,7 @@ Shape as written by the Phase 0 scripts (a real run, shortened):
 }
 ```
 
-Other fields as they occur: `lastError`, `warning` (for example the UFA not provisioning or not syncing), `ufaRestartedAt`, `ufaSyncRestarts`, `ufaSyncRestartedAt`, `ufa.sync`. Written atomically (temporary file, then rename).
+Other fields as they occur: `lastError`, `warning` (for example the UFA not provisioning or not syncing), `ufaRestartedAt`, `ufaSyncRestarts`, `ufaSyncRestartedAt`, `ufaRepairedAt`, `ufa.sync`. Written atomically (temporary file, then rename).
 
 It never contains the registration token. `history` is capped at the last 50 entries; `StatusJson` returns the last 30.
 

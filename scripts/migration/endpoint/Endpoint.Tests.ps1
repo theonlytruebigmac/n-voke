@@ -338,7 +338,7 @@ Describe 'Hide-RegistrationToken' {
 
 Describe 'Get-UfaSyncState' {
     BeforeAll {
-        . ([scriptblock]::Create((Get-FunctionText (Join-Path $here 'installAgent.ps1') @('Get-UfaSyncState'))))
+        . ([scriptblock]::Create((Get-FunctionText (Join-Path $here 'installAgent.ps1') @('Get-UfaSyncState', 'Test-UfaRepairDue'))))
         $auth = 'https://auth.example.invalid/oauth2/token'
         $timeout = "context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
         $lines = @{
@@ -389,6 +389,22 @@ Describe 'Get-UfaSyncState' {
     }
     It 'reads the log time zone: 10:27:59 at -04:00 is 14:27:59 UTC' {
         (Get-State @($lines.Fail, $lines.AuthOk)).FailedAt.ToString('HH:mm:ss') | Should -Be '14:27:59'
+    }
+    It 'reports when the refusal began, and forgets it once a login is accepted' {
+        (Get-State @($lines.Ssl400, $lines.Fail400)).RejectedSince.ToString('HH:mm:ss') | Should -Be '14:21:42'
+        (Get-State @($lines.Ssl400, $lines.Fail400, $lines.AuthOk)).RejectedSince | Should -BeNullOrEmpty
+    }
+    It 'asks for the repair only after a sustained refusal, and only once' {
+        $sync = [pscustomobject]@{ State = 'rejected'; RejectedSince = [datetime]'2026-10-20T14:21:42Z' }
+        Test-UfaRepairDue $sync ([datetime]'2026-10-20T14:40:00Z') $false 30 | Should -BeFalse
+        Test-UfaRepairDue $sync ([datetime]'2026-10-20T14:52:00Z') $false 30 | Should -BeTrue
+        Test-UfaRepairDue $sync ([datetime]'2026-10-20T14:52:00Z') $true 30 | Should -BeFalse
+    }
+    It 'never asks for the repair for any other state' {
+        foreach ($state in 'stalled', 'blocked', 'waiting', 'synced', 'unknown') {
+            $sync = [pscustomobject]@{ State = $state; RejectedSince = [datetime]'2026-10-20T10:00:00Z' }
+            Test-UfaRepairDue $sync ([datetime]'2026-10-20T16:00:00Z') $false 30 | Should -BeFalse
+        }
     }
     It 'says unknown when there is no log' {
         (Get-UfaSyncState (Join-Path ([IO.Path]::GetTempPath()) 'nvoke-no-such-core.log') ([datetime]::MinValue)).State | Should -Be 'unknown'

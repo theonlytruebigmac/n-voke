@@ -27,6 +27,8 @@ $HealthGraceMinutes = 60
 $UfaSyncGraceMinutes = 120
 $UfaSyncMaxRestarts = 2
 $UfaSyncRestartGapMinutes = 15
+$UfaRepairAfterMinutes = 30
+$UfaRepairWaitMinutes = 90
 
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 $LogPath = Join-Path $LogDir ('install-{0}.log' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
@@ -126,21 +128,22 @@ function Test-MsiBusy {
 #   stalled  a configuration fetch failed on a timeout, the cloud answers again, and nothing was delivered since: restart
 #   blocked  a fetch failed and the cloud still doesn't answer: a restart can't help
 #   rejected the cloud answers the agent's login with "400 The SSL certificate error" and never accepts it: a restart
-#            doesn't help (seen in the lab: a restart changed nothing), so it is reported, not retried
+#            or a reboot doesn't help (seen in the lab). What did: removing the UFA and letting the Windows Agent redeploy it,
+#            which issues a new certificate (Invoke-UfaRepair, once, after a sustained refusal)
 #   waiting  no fault and no inventory component yet (normal for a while)
 #   unknown  no log to read
 function Get-UfaSyncState([string]$LogPath, [datetime]$Since) {
-    if (-not (Test-Path -LiteralPath $LogPath)) { return [pscustomobject]@{ State = 'unknown'; FailedAt = $null } }
+    if (-not (Test-Path -LiteralPath $LogPath)) { return [pscustomobject]@{ State = 'unknown'; FailedAt = $null; RejectedSince = $null } }
     $stamp = [regex]'^\[(\d{4}-\d\d-\d\dT[\d:.]+[+-]\d\d:\d\d)\]'
-    $failedAt = $null; $authOkAt = $null; $syncedAt = $null; $rejectedAt = $null
+    $failedAt = $null; $authOkAt = $null; $syncedAt = $null; $rejectedAt = $null; $rejectedSince = $null
     foreach ($line in @(Get-Content -LiteralPath $LogPath -Tail 20000 -ErrorAction SilentlyContinue)) {
         $m = $stamp.Match($line)
         if (-not $m.Success) { continue }
         $at = [datetimeoffset]::Parse($m.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture).UtcDateTime
         if ($at -lt $Since) { continue }
         if ($line -match 'ERROR \(\d+\): configservice::FetchAllConfigurations failed to fetch configuration data:') { $failedAt = $at }
-        elseif ($line -match 'auth::fetchJWTWithRetries error occurred when fetching jwt: unexpected status code: 400 .*The SSL certificate error') { $rejectedAt = $at }
-        elseif ($line -match 'auth::requestOauthToken Oauth token response received\. Status: 200') { $authOkAt = $at }
+        elseif ($line -match 'auth::fetchJWTWithRetries error occurred when fetching jwt: unexpected status code: 400 .*The SSL certificate error') { $rejectedAt = $at; if (-not $rejectedSince) { $rejectedSince = $at } }
+        elseif ($line -match 'auth::requestOauthToken Oauth token response received\. Status: 200') { $authOkAt = $at; $rejectedSince = $null }
         elseif ($line -match 'components::Download Successfully downloaded .*generic-asset-interrogator') { $syncedAt = $at }
     }
     $state = if ($syncedAt -and (-not $failedAt -or $syncedAt -gt $failedAt)) { 'synced' }
@@ -148,7 +151,27 @@ function Get-UfaSyncState([string]$LogPath, [datetime]$Since) {
              elseif ($rejectedAt -and (-not $authOkAt -or $authOkAt -lt $rejectedAt)) { 'rejected' }
              elseif ($failedAt) { 'blocked' }
              else { 'waiting' }
-    [pscustomobject]@{ State = $state; FailedAt = $failedAt }
+    [pscustomobject]@{ State = $state; FailedAt = $failedAt; RejectedSince = $rejectedSince }
+}
+
+# True when the login has been refused for AfterMinutes without a single accepted login, and no repair was done yet.
+function Test-UfaRepairDue($Sync, [datetime]$NowUtc, [bool]$AlreadyRepaired, [int]$AfterMinutes) {
+    if ($AlreadyRepaired -or $Sync.State -ne 'rejected' -or -not $Sync.RejectedSince) { return $false }
+    return (($NowUtc - $Sync.RejectedSince).TotalMinutes -ge $AfterMinutes)
+}
+
+# The repair N-able support gave for a UFA whose login is refused: uninstall the UFA core, then restart the Windows
+# Agent services so the agent redeploys it. The new UFA provisions a fresh certificate under the same GUID.
+function Invoke-UfaRepair {
+    $core = [Environment]::GetFolderPath('ProgramFilesX86') + '\Msp Agent\msp-agent-core.exe'
+    if (-not (Test-Path -LiteralPath $core)) { return 'msp-agent-core.exe not found' }
+    $code = Invoke-WithTimeout $core '--uninstall' 5
+    Start-Sleep -Seconds 5
+    foreach ($name in 'Windows Agent Maintenance Service', 'Windows Agent Service') {
+        Restart-Service -DisplayName $name -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 5
+    }
+    return "uninstall exit code $code"
 }
 
 function Test-RebootPending {
@@ -302,6 +325,18 @@ try {
         $ufaProvisioned = & $testProvisioned
         $status.ufa = [ordered]@{ present = [bool]$ufaService; running = $agent.UfaRunning; provisioned = $ufaProvisioned }
 
+        # After a repair the UFA is gone until the Windows Agent redeploys it: keep waiting, don't call that healthy.
+        if ($job.expectUfa -eq 'true' -and $status.ufaRepairedAt -and -not ($ufaService -and $ufaProvisioned)) {
+            $sinceRepair = ((Get-Date).ToUniversalTime() - [datetime]::Parse($status.ufaRepairedAt).ToUniversalTime()).TotalMinutes
+            if ($sinceRepair -lt $UfaRepairWaitMinutes) {
+                $status.stage = 'awaiting-ufa'
+                Add-StatusHistory $status 'awaiting-ufa' ('{0:N0} min since the UFA repair; MspAgent not redeployed and provisioned yet' -f $sinceRepair)
+                Save-Status $status
+                exit 0
+            }
+            $status.warning = "MspAgent not redeployed and provisioned $([math]::Round($sinceRepair)) min after the repair"
+        }
+
         # Only wait for the UFA when the destination is linked to Ecoverse (the project says so); otherwise it can't provision there.
         if ($job.expectUfa -eq 'true' -and $ufaService -and -not $ufaProvisioned) {
             if (-not $status.ufaRestartedAt) {
@@ -346,6 +381,14 @@ try {
                     $status.ufaSyncRestartedAt = (Get-Date).ToUniversalTime().ToString('o')
                     Add-StatusHistory $status 'ufa-sync-restart' ("MspAgent configuration fetch timed out at {0:o} and the cloud answers again; restarted MspAgent to fetch now instead of at its next hourly check (restart {1} of {2})" -f $sync.FailedAt, ($restarts + 1), $UfaSyncMaxRestarts)
                 }
+            }
+            if (Test-UfaRepairDue $sync (Get-Date).ToUniversalTime() ([bool]$status.ufaRepairedAt) $UfaRepairAfterMinutes) {
+                $result = Invoke-UfaRepair
+                $status.ufaRepairedAt = (Get-Date).ToUniversalTime().ToString('o')
+                Add-StatusHistory $status 'ufa-repair' ("the cloud has refused the Ecoverse agent login since {0:o}; removed the UFA core and restarted the Windows Agent services so it is redeployed with a new certificate ({1})" -f $sync.RejectedSince, $result)
+                $status.stage = 'awaiting-ufa'
+                Save-Status $status
+                exit 0
             }
             if ($sync.State -ne 'synced') {
                 $waitedSync = ((Get-Date).ToUniversalTime() - $since).TotalMinutes
