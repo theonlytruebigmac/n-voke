@@ -29,6 +29,8 @@ $UfaSyncMaxRestarts = 2
 $UfaSyncRestartGapMinutes = 15
 $UfaRepairAfterMinutes = 30
 $UfaRepairWaitMinutes = 90
+$UfaRepairRestartAfterMinutes = 10
+$UfaRepairMaxFinalRestarts = 2
 
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 $LogPath = Join-Path $LogDir ('install-{0}.log' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
@@ -171,13 +173,28 @@ function Test-UfaRepairDue($Sync, [datetime]$NowUtc, [bool]$AlreadyRepaired, [in
 
 # The repair N-able support gave for a UFA whose login is refused: uninstall the UFA core, then restart the Windows
 # Agent services so the agent redeploys it. The new UFA provisions a fresh certificate under the same GUID.
-function Invoke-UfaRepair {
-    $result = Invoke-UfaCoreUninstall
+function Restart-WindowsAgentService {
     foreach ($name in 'Windows Agent Maintenance Service', 'Windows Agent Service') {
         Restart-Service -DisplayName $name -Force -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 5
     }
+}
+
+# The uninstaller exits before the removal is over, and an agent restarted too early doesn't redeploy the UFA (seen
+# in the lab: the operator always needed one more restart a while later). So wait until the UFA is really gone first.
+function Invoke-UfaRepair {
+    $result = Invoke-UfaCoreUninstall
+    $core = [Environment]::GetFolderPath('ProgramFilesX86') + '\Msp Agent\msp-agent-core.exe'
+    for ($i = 0; $i -lt 12 -and ((Get-Service -Name 'MspAgent' -ErrorAction SilentlyContinue) -or (Get-Process -Name 'msp-agent-core' -ErrorAction SilentlyContinue) -or (Test-Path -LiteralPath $core)); $i++) { Start-Sleep -Seconds 5 }
+    Restart-WindowsAgentService
     return "uninstall: $result"
+}
+
+# After a repair the UFA is only redeployed when the Windows Agent notices it is missing. If it hasn't been put back
+# some minutes after the last restart, restart the agent services again (bounded).
+function Test-UfaRedeployRestartDue([bool]$UfaPresent, [datetime]$LastActionUtc, [int]$Restarts, [datetime]$NowUtc, [int]$AfterMinutes, [int]$MaxRestarts) {
+    if ($UfaPresent -or $Restarts -ge $MaxRestarts) { return $false }
+    return (($NowUtc - $LastActionUtc).TotalMinutes -ge $AfterMinutes)
 }
 
 function Test-RebootPending {
@@ -349,6 +366,13 @@ try {
         # After a repair the UFA is gone until the Windows Agent redeploys it: keep waiting, don't call that healthy.
         if ($job.expectUfa -eq 'true' -and $status.ufaRepairedAt -and -not ($ufaService -and $ufaProvisioned)) {
             $sinceRepair = ((Get-Date).ToUniversalTime() - [datetime]::Parse($status.ufaRepairedAt).ToUniversalTime()).TotalMinutes
+            $lastAction = if ($status.ufaRepairRestartedAt) { [datetime]::Parse($status.ufaRepairRestartedAt).ToUniversalTime() } else { [datetime]::Parse($status.ufaRepairedAt).ToUniversalTime() }
+            if (Test-UfaRedeployRestartDue ([bool]$ufaService) $lastAction ([int]$status.ufaRepairRestarts) (Get-Date).ToUniversalTime() $UfaRepairRestartAfterMinutes $UfaRepairMaxFinalRestarts) {
+                Restart-WindowsAgentService
+                $status.ufaRepairRestarts = [int]$status.ufaRepairRestarts + 1
+                $status.ufaRepairRestartedAt = (Get-Date).ToUniversalTime().ToString('o')
+                Add-StatusHistory $status 'ufa-repair-restart' ('MspAgent was not redeployed {0:N0} min after the repair; restarted the Windows Agent services again (restart {1} of {2})' -f $sinceRepair, $status.ufaRepairRestarts, $UfaRepairMaxFinalRestarts)
+            }
             if ($sinceRepair -lt $UfaRepairWaitMinutes) {
                 $status.stage = 'awaiting-ufa'
                 Add-StatusHistory $status 'awaiting-ufa' ('{0:N0} min since the UFA repair; MspAgent not redeployed and provisioned yet' -f $sinceRepair)

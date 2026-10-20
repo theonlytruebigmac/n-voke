@@ -338,7 +338,7 @@ Describe 'Hide-RegistrationToken' {
 
 Describe 'Get-UfaSyncState' {
     BeforeAll {
-        . ([scriptblock]::Create((Get-FunctionText (Join-Path $here 'installAgent.ps1') @('Get-UfaSyncState', 'Test-UfaRepairDue'))))
+        . ([scriptblock]::Create((Get-FunctionText (Join-Path $here 'installAgent.ps1') @('Get-UfaSyncState', 'Test-UfaRepairDue', 'Test-UfaRedeployRestartDue'))))
         $auth = 'https://auth.example.invalid/oauth2/token'
         $timeout = "context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
         $lines = @{
@@ -421,6 +421,13 @@ Describe 'Get-UfaSyncState' {
             $sync = [pscustomobject]@{ State = $state; RejectedSince = [datetime]'2026-10-20T10:00:00Z'; FaultSince = [datetime]'2026-10-20T10:00:00Z' }
             Test-UfaRepairDue $sync ([datetime]'2026-10-20T16:00:00Z') $false 30 | Should -BeFalse
         }
+    }
+    It 'restarts the agent services again when the UFA is still missing some minutes after the last restart, a limited number of times' {
+        $now = [datetime]'2026-10-20T20:40:00Z'
+        Test-UfaRedeployRestartDue $false ([datetime]'2026-10-20T20:35:00Z') 0 $now 10 2 | Should -BeFalse
+        Test-UfaRedeployRestartDue $false ([datetime]'2026-10-20T20:28:00Z') 0 $now 10 2 | Should -BeTrue
+        Test-UfaRedeployRestartDue $false ([datetime]'2026-10-20T20:00:00Z') 2 $now 10 2 | Should -BeFalse
+        Test-UfaRedeployRestartDue $true ([datetime]'2026-10-20T20:00:00Z') 0 $now 10 2 | Should -BeFalse
     }
     It 'says unknown when there is no log' {
         (Get-UfaSyncState (Join-Path ([IO.Path]::GetTempPath()) 'nvoke-no-such-core.log') ([datetime]::MinValue)).State | Should -Be 'unknown'
