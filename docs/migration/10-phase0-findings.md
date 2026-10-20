@@ -449,12 +449,32 @@ Three moves with the same build (0.1.0+b4a4d7e) and the same options (`ExpectUfa
 | **Cleanup history** | Identical on both: Windows Agent uninstall 0, MSP Core Agent 1605 (removed with the Windows Agent), the same folders and registry keys removed, none "partly left", install exit 0 |
 | **The installer's watchdog on a device (first time)** | VM-F's `status.json` shows `awaiting-ufa … data sync: waiting` at 12, 27 and 42 minutes after the install, as designed |
 
+**Third move, with the new cleanup** (VM-E, source to destination site, build 0.1.0+298d630, launched 15:49 local, Ecoverse path): the cleanup's first step ran as designed (`cleanup-ufa-uninstall: msp-agent-core.exe --uninstall -> exit code 0; MspAgent service gone`, about 7 seconds; the source asset went `DISCONNECTED` and was **not** removed), then the same Windows Agent uninstall, folder and registry cleanup as before. N-central: on the destination 10 minutes after the launch. Destination Ecoverse asset `CONNECTED` at 16:02, but **its first login was refused** (`400 The SSL certificate error`), the same fault as on the first two VMs, so `--uninstall` first doesn't prevent it (one device).
+
+| Time (local) | VM-E, the watchdog on a real device (first live run) |
+|---|---|
+| 16:02:20 | Provisioned; first login refused |
+| 16:07, 16:22 | `awaiting-ufa … the cloud rejects the Ecoverse agent login; a restart does not fix this` |
+| 16:37:26 | **`ufa-repair`** after 35 minutes of refusal: UFA core uninstalled, Windows Agent services restarted; the destination asset went `DISCONNECTED` |
+| 16:52 | Nothing redeployed in the 15 minutes since the repair. The operator restarted the Windows Agent services by hand |
+| 17:08 | The Ecoverse agent redeployed (asset `CONNECTED`) and provisioned; the installer kept waiting (`awaiting-ufa`, never called the device healthy in between) |
+| 17:22 | Data in Ecoverse; **`healthy`**: UFA present, provisioned, `sync: synced`, no warning |
+
+| Finding | Effect |
+|---|---|
+| **The watchdog works end to end on a real device**: detect, wait 30 minutes, repair once, hold off calling the device healthy, then finish healthy | Proven on one device |
+| **The repair alone doesn't redeploy the UFA; a second restart of the Windows Agent services does** (confirmed: nothing for 15 minutes, redeployed within 16 minutes of the restart; the earlier manual repair on VM-F took 41 minutes until the operator's restart) | Built into the installer (build 0.1.0+fa1d1a0): the repair waits for the removal to finish, then restarts the services again after 10 minutes if the UFA is still missing (max 2 more). **Not yet tested on a device** |
+| **Same cleanup, three outcomes**: login accepted at once and synced (VM-D); login accepted but component downloads refused (VM-F); login refused (VM-E, with `--uninstall` first). Each of the last two was fixed by the repair | The faults are intermittent and the cleanup variant doesn't clearly change them: one device each way is not enough to tell |
+| **Decision (operator, 2026-10-20): keep `msp-agent-core.exe --uninstall` as the first cleanup step, as the default**, with the watchdog and one-time repair behind it | Cheap (about 7 seconds), the supported removal, and the repair is the one remedy that has worked every time. If a comparison of several moves each way later shows it makes no difference, make it an option |
+
+#### Earlier findings from the same tests
+
 | Finding | Effect |
 |---|---|
 | **The Ecoverse agent can sit with a working login but no components because the CDN returns 403 to the agent** (not to a plain request) | New state in the log summary: *denied*. A restart doesn't help; the repair did. Not yet recognised by the installer's watchdog |
 | **The launch route (Ecoverse or REST) isn't what differs.** After staging, both ran the same installer with the same history | The route only stages the task |
 | **The repair fixed every Ecoverse fault a restart or reboot didn't:** two refused logins and this CDN refusal | **The cleanup now starts with `msp-agent-core.exe --uninstall`** (operator decision, 2026-10-20: the repair "does some extra stuff" and probably signals the backend that manages the UFA, and it was needed after earlier migrations too). The Windows Agent uninstall and the folder cleanup follow as before. **Open:** what the flag does on the backend, and whether it makes the repair unnecessary; the next moves with the new build will show |
-| **The repair needs a final restart of the Windows Agent services a while after the uninstall** (operator, confirmed on the first automatic repair: the UFA core was uninstalled and nothing redeployed it) | The repair now waits for the removal to finish before restarting the services, and the installer restarts them again 10 minutes later if the UFA still isn't back (max 2 more). Build 0.1.0+… after 298d630 |
+| **The repair needs a final restart of the Windows Agent services a while after the uninstall** (operator, confirmed on the first automatic repair: the UFA core was uninstalled and nothing redeployed it) | The repair now waits for the removal to finish before restarting the services, and the installer restarts them again 10 minutes later if the UFA still isn't back (max 2 more). Build 0.1.0+fa1d1a0 |
 | An expected-but-missing Ecoverse agent counted as healthy in the installer | After a manual repair (or any gap between uninstall and redeploy) the installer marked the device healthy and stopped watching. **Fixed (2026-10-20):** with `ExpectUfa=true` it waits for `MspAgent` to be installed, up to 120 minutes after the install, then goes on with a warning |
 
 ## Status of Phase 0 tests

@@ -43,7 +43,7 @@ flowchart LR
 - Pester tests and PSScriptAnalyzer in CI, plus the build checks (ASCII, parses in the Ecoverse form, nothing on stderr).
 - Port the improvements back to the PowerShell project where they apply (folder ACL, exit codes, self-removal), so it stays useful on its own.
 
-**Status: code done, awaiting a lab run** (2026-10-20).
+**Status: lab run done on the main flows, fixes under way** (2026-10-20). Run on three larger lab VMs: the failure path (✅ `download-failed`, old agent untouched, `status.json` correct), an Ecoverse-path move and a REST-path move (✅ both reached the destination in about 10 minutes, the first live REST launch with the hardened script), and a move with the new cleanup (the watchdog's repair ran on a real device, ✅). Not yet run: the repair's final service restart (built after the test), the same-server reinstall (Q17), the Windows PowerShell 5.1 CI leg (runs on the next push), and whether the MSI log ever held the token. Findings: [UFA uninstall in the cleanup](10-phase0-findings.md#the-ufa-uninstall-in-the-cleanup-2026-10-20).
 
 | Item | State |
 |---|---|
