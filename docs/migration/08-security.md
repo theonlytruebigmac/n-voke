@@ -52,6 +52,7 @@ Every change N-voke makes is recorded in the encrypted, append-only audit log, n
 |---|---|
 | `script.create`, `script.update`, `script.delete` | Script name, organization, version hash |
 | `ncentral.registrationToken.generate` | Server, customer or site; never the token |
+| `ncentral.customer.create`, `ncentral.site.create` | Server, parent, name, the new ID (planned: creating the destination structure, [Q11](09-roadmap.md#open-questions)) |
 | `migration.restScript.set` | Server, item ID entered by the operator |
 | `migration.launch` | Project, wave, path, device count, destination customers; **registration tokens redacted** |
 | `migration.cleanup` | Devices, outcome |
@@ -69,9 +70,10 @@ PASSWORD-type script inputs are already redacted by N-voke; the registration tok
 | Launch a wave | Removes the old agent **and, with full cleanup (the default), every N-central component, folder and registry key** (see [Endpoint scripts](05-endpoint-scripts.md#full-cleanup-cleanmodefull-the-default)) from every device in the wave | Wave confirmation listing counts and paths. A pilot wave is suggested first. Dry-run available. On the device, nothing is removed until the destination's installer has downloaded and passed its signature check |
 | Delete source device records | Removes the old records (`removeAgents=false`), and with them their stale Ecoverse assets | Off by default; separate confirmation; only after the review period, for devices in **Cleaned up** |
 | Delete the Ecoverse script | Removes it from Ecoverse (the REST path's repository copy is removed by hand) | Only when no device in any open project still needs it |
+| Create customers and sites on the destination (planned) | Adds org units to the destination server; **N-voke can't delete them** (no delete endpoint), and the site endpoint is a preview | Preview of every entry first; explicit confirmation; customers before sites; duplicates offered as matches; audited and marked *created by N-voke* |
 | Delete a project | Removes local history | Confirmation; the audit log keeps its entries |
 
-N-voke's API calls never uninstall agents (`removeAgents` is always false) and never delete destination devices or org units. Removing the old agent from a device is done by the endpoint script on that device, as the migration itself, after the confirmation above.
+N-voke's API calls never uninstall agents (`removeAgents` is always false) and never delete destination devices or org units (it can create missing customers and sites, as above). Removing the old agent from a device is done by the endpoint script on that device, as the migration itself, after the confirmation above.
 
 ## Data at rest
 

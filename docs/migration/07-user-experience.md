@@ -26,6 +26,8 @@ A **project** holds one migration: a source server, a destination server (the sa
 - Automatic matching: exact name under a matching parent, then exact name anywhere, then normalized (case, punctuation, "Inc"/"LLC"). Each match shows its confidence.
 - The operator can drag, search and pick, exclude a customer, or map many source sites to one destination site.
 - Each destination entry shows its **registration token status**: present, expiring (with the date), or missing. Missing ones can be fixed in place: **Generate missing tokens** creates them through REST for the selected customers and sites, previewed and audited.
+- **Create missing structure.** A source customer or site with no destination match can be created on the destination from the Map step: *Create on destination* for one entry, or *Create all unmatched*. N-voke shows exactly what will be created first (name, parent, copied contact and address, licence type), asks for confirmation, writes each one through REST, and records every creation in the audit log. Customers are created under the chosen destination service organisation, sites under their customer (a site's parent must exist first, so customers go first). A name that already exists on the destination (`409`) is offered as a match instead of an error. Created entries are marked **created by N-voke**, and N-voke can't delete them (there is no delete endpoint), so the preview says so.
+- After creating, **Generate missing tokens** runs for the new entries, so the whole destination structure and its registration tokens come out of one pass.
 - Optional: **Write mapping to custom properties** on both servers (what `Add CustomerId to Destination.ps1` does today).
 
 ### 3. Prepare

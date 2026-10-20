@@ -9,7 +9,7 @@ Redeploying an N-central agent means running `WindowsAgentSetup.exe` against the
 ## What N-voke will do
 
 1. **Connect** to N-able (Ecoverse GraphQL, which N-voke already uses) and to the source and destination N-central servers (REST).
-2. **Map** source customers and sites to destination customers and sites, with automatic name matching and manual correction.
+2. **Map** source customers and sites to destination customers and sites, with automatic name matching and manual correction. Where the destination has no match, N-voke can **create the missing customers and sites** (names, contact and address) and then generate their registration tokens.
 3. **Prepare** the endpoint script once: N-voke publishes it as an N-able script (Ecoverse) automatically. For the REST fallback, the operator uploads the same PowerShell file to each N-central server's repository once.
 4. **Plan waves:** choose devices, see which delivery path each one will use, and see the warnings before anything runs.
 5. **Launch** each wave. Each device gets only the destination address, customer ID and registration token, never an API key. On the device, a scheduled task removes every N-central component and installs the destination's agent, so the whole device (N-central agent and Ecoverse agent) moves.
@@ -41,7 +41,7 @@ Redeploying an N-central agent means running `WindowsAgentSetup.exe` against the
 
 ## Non-goals (for now)
 
-- Migrating configuration (customers, sites, rules, filters, users, custom property definitions). The separate RMM-to-N-central migrator project covers estate migration; this feature only moves agents. See [what carries over to the migrator](#relationship-to-the-rmm-to-n-central-migrator).
+- Migrating configuration beyond the organisation structure. **In scope:** creating the missing customers and sites on the destination (names, contact, address) so devices have somewhere to register. **Out of scope:** rules, filters, users, roles, access groups, custom property definitions and licence settings; the separate RMM-to-N-central migrator project covers estate migration. See [what carries over to the migrator](#relationship-to-the-rmm-to-n-central-migrator).
 - macOS and Linux agents. The endpoint scripts are Windows-only to start with; other operating systems are listed as manual.
 - Deploying to devices that neither N-able agent can reach. These are reported for out-of-band handling (GPO, Intune, on site).
 
