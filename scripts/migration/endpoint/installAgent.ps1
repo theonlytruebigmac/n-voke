@@ -14,6 +14,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 $Root = [Environment]::GetFolderPath('CommonApplicationData') + '\N-voke\Migration'
+$Parent = Split-Path $Root -Parent
 $JobPath = Join-Path $Root 'job.json'
 $StatusPath = Join-Path $Root 'status.json'
 $LogDir = Join-Path $Root 'logs'
@@ -269,7 +270,7 @@ try {
         $reviewDays = [int]$job.reviewDays
         if ($reviewDays -gt 0) {
             $reviewUntil = (Get-Date).AddDays($reviewDays)
-            $command = "Remove-Item -LiteralPath '$Root' -Recurse -Force -ErrorAction SilentlyContinue; Unregister-ScheduledTask -TaskName '$ReviewTaskName' -Confirm:`$false"
+            $command = "Remove-Item -LiteralPath '$Root' -Recurse -Force -ErrorAction SilentlyContinue; if (-not (Get-ChildItem -LiteralPath '$Parent' -Force -ErrorAction SilentlyContinue)) { Remove-Item -LiteralPath '$Parent' -Force -ErrorAction SilentlyContinue }; Unregister-ScheduledTask -TaskName '$ReviewTaskName' -Confirm:`$false"
             $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
             $ps = Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
             $action = New-ScheduledTaskAction -Execute $ps -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encoded"
@@ -282,7 +283,11 @@ try {
             Save-Status $status
         }
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-        if ($reviewDays -le 0) { Remove-Item -LiteralPath $Root -Recurse -Force -ErrorAction SilentlyContinue }
+        if ($reviewDays -le 0) {
+            Remove-Item -LiteralPath $Root -Recurse -Force -ErrorAction SilentlyContinue
+            # Launch also creates the parent folder; remove it only if nothing else is in it.
+            if (-not (Get-ChildItem -LiteralPath $Parent -Force -ErrorAction SilentlyContinue)) { Remove-Item -LiteralPath $Parent -Force -ErrorAction SilentlyContinue }
+        }
         exit 0
     }
 

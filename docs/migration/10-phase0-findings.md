@@ -355,6 +355,57 @@ VM-A, from `source.example.com` → to `source.example.com` (same site; a same-s
 | ✅ `ExpectUfa=false` and the review-period task work as designed | — |
 | **A same-server reinstall shows no new device**: the only remote progress signals are the Ecoverse asset dropping and returning, and the check-in time pausing and resuming | The tracker watches check-in **age** on the existing record for reinstall projects |
 | **Check-in time formats differ by endpoint**: `GET /api/devices/{id}` gives `lastApplianceCheckinTime` in UTC (`…Z`) and `lastApplianceCheckinTimeLocal` with an offset (`…-04:00`); the `GET /api/org-units/{id}/devices` listing gives `lastApplianceCheckinTime` in server-local time **without a zone** (`2026-10-19T20:37:02.1`) | Always use the zoned fields (`/api/devices/{id}`, or `…Local` with its offset); never parse the listing's value as UTC |
+| ⚠️ **The reinstall broke the device's Ecoverse agent (found later; see below)** | Same-server reinstalls are not safe for Ecoverse yet |
+
+### Afterwards: Ecoverse agent broken by the same-server reinstall (open)
+
+The next step was to move VM-A from `source.example.com` → to `destination.example.com`. Two Ecoverse launches (a launch and a relaunch) were never picked up, although the asset showed `CONNECTED`.
+
+| Evidence | Detail |
+|---|---|
+| UFA `command.log` | During the reinstall the Windows Agent deployed the UFA, which ran `msp-agent-core.exe` with `provision_existing` and an agent GUID (core then upgraded 3.31.8 → 3.43.0). `provision_existing` is the **normal** deployment flag (a clean install later used it too, with a new GUID), so the question is where the GUID or identity came from |
+| `msp-agent-core.log` | From then on, JWT refresh failed every 10 minutes with `400 The SSL certificate error` |
+| Ecoverse | Asset still `CONNECTED`, same asset ID, but **no script tasks delivered** |
+| Repair attempt | `msp-agent-core.exe --uninstall`, then restart *Windows Agent Maintenance Service* and *Windows Agent Service* (a documented UFA repair). The asset went `DISCONNECTED`, and **after 25+ minutes the agent had not redeployed the UFA** |
+| Recovery | A clean install of the VM by hand |
+
+| Finding | Effect |
+|---|---|
+| **`CONNECTED` doesn't mean the asset can run scripts**: a UFA whose identity Ecoverse rejects still shows `CONNECTED` | *Not picked up* must be detected by task state, not by connection status; then the REST path |
+| **A same-server reinstall can leave the UFA on a rejected identity**, even with full cleanup. It happened on VM-A but not VM-B (test 0.12). The likely cause is identity material (GUID or certificate) that survives the full cleanup, or is handed back by the server for the same device record, so the UFA provisions as an identity Ecoverse has already retired | Open question [Q17](09-roadmap.md#open-questions); until it's answered, reinstall mode should warn that the Ecoverse agent may need repair |
+| The UFA repair procedure (uninstall core, restart the agent services) doesn't redeploy the UFA quickly | Not a reliable automatic fix; timing unknown |
+| The VMs have 2 GB RAM and are very slow (see the next section), which may contribute | Repeat on a VM with more memory before drawing conclusions |
+
+## Move with an Ecoverse-linked destination after a clean install (2026-10-19)
+
+VM-A after a clean install on the source (new device record and new asset), from `source.example.com` → to `destination.example.com` (a site), build 0.1.0+e620b1e, `CleanMode=full`, `ExpectUfa=false`, `ReviewDays=0`. Launched through the source tenant. The destination happens to be linked to its own Ecoverse tenant.
+
+| Time (local) | Event |
+|---|---|
+| 22:18:59 | Launch sent; ran 22:19:13 (pickup in ~14 s, right after a test `Status` run proved delivery) |
+| 22:19:18 | Staged, mode move; first task run 22:21 |
+| ~22:23 | Full cleanup: source asset `DISCONNECTED` |
+| 22:25 | Device record created on the destination |
+| 22:27:53 | Windows Agent deploys the UFA (core 3.31.8, `provision_existing`, new GUID) |
+| 22:28:37 | UFA core self-upgrade: download of the upgrade component from N-able's CDN returns **HTTP 403**; then `core upgrade is pending, skipping provisioning step until core upgrades` |
+| 22:29 | First check-in on the destination; steady from then on (source record silent) |
+| 22:37:02 | Hourly *Check For Updates* retry (schedule `2 37 */1 * * *`): download succeeds, core upgraded to 3.43.0 |
+| 22:37:20 → 22:40:34 | Provisioning: identity details, certificate request, certificate issued (after two `404` *not ready* polls) |
+| 22:41:00 | Operator reboots the VM (in the 30-second pause between provisioning steps) |
+| 22:41:16 | **Destination Ecoverse asset created** (server side already done; the VM was still rebooting) |
+| 22:44:49 | After the reboot, provisioning resumes from its saved state, skips the finished steps: `successfully provisioned agent` |
+| 22:46:35 | Destination asset `CONNECTED` |
+| 22:46:58 | `Status` sent through the destination tenant; **started 23:25:16** (≈38 min queued while Ecoverse waited for the new asset's data to sync) |
+| — | Migration task removed itself, folder contents removed (healthy without waiting for the UFA), `Status` confirms `TaskState absent` |
+
+| Finding | Effect |
+|---|---|
+| ✅ Move into an Ecoverse-linked destination worked: N-central in ~10 min from launch, destination Ecoverse asset ~28 min | — |
+| **The UFA core self-upgrade can block provisioning for up to an hour**: if the first download fails (here a CDN `403`), nothing provisions until the next hourly retry at a fixed minute | The tracker allows up to ~70 minutes before *Ecoverse not moved*; report the 403 to N-able |
+| **The reboot was not needed**: the certificate was issued and the asset created before the VM came back; provisioning only finished its remaining steps after the restart | No reboot step; production can't reboot devices anyway |
+| **A newly provisioned asset holds script tasks until its data syncs**: `CONNECTED` at 22:46, first task ran ≈38 min later (on a slow VM) | After the move, destination Ecoverse is for later use, not for tracking; destination REST is the health signal; don't flag *Not picked up* during the sync window |
+| **The VM is very slow (2 GB RAM)**: ~20 s from service start to core start, 8 s to generate a CSR, metadata lookups time out | Timeouts and grace periods must tolerate slow devices; use larger VMs to separate our logic from hardware effects |
+| **The empty `ProgramData\N-voke` folder stayed**: cleanup removed `N-voke\Migration` but not its parent, which Launch creates | Fixed (build 0.1.0+61a6b82): every removal path also removes the parent if it's empty |
 
 ## Status of Phase 0 tests
 

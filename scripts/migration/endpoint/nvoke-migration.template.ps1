@@ -89,6 +89,8 @@ function Invoke-Launch {
     if ($CleanMode -notin 'full', 'none') { throw [System.ArgumentException] "CleanMode '$CleanMode' must be full or none" }
     if ($LauncherVersion -and $LauncherVersion -ne '-' -and $LauncherVersion -ne $ScriptVersion) { throw [System.ArgumentException] "N-voke expected script $LauncherVersion but this is ${ScriptVersion}: re-publish or re-upload the script" }
 
+    # A review-period cleanup left by an earlier job would delete this job's folder: remove it first.
+    Unregister-ScheduledTask -TaskName $ReviewTaskName -Confirm:$false -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Path $Root -Force | Out-Null
     Set-RestrictedAcl (Split-Path $Root -Parent)
     Set-RestrictedAcl $Root
@@ -161,6 +163,8 @@ function Invoke-Cleanup {
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $ReviewTaskName -Confirm:$false -ErrorAction SilentlyContinue
     if (Test-Path $Root) { Remove-Item -Path $Root -Recurse -Force }
+    $parent = Split-Path $Root -Parent
+    if ((Test-Path $parent) -and -not (Get-ChildItem -LiteralPath $parent -Force)) { Remove-Item -LiteralPath $parent -Force }
     $script:TaskState = Get-TaskSummary
     $script:Cleaned = if ((-not (Test-Path $Root)) -and $script:TaskState -eq 'absent') { 'true' } else { 'false' }
     $script:Result = if ($script:Cleaned -eq 'true') { 'cleaned' } else { 'failed' }

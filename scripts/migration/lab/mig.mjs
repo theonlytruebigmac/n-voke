@@ -106,6 +106,48 @@ if (cmd === "publish") {
   ], "N-voke migration Launch");
   state.launch = { assetId, destOrgUnit, destSide, launchSide, taskId: id, at: new Date().toISOString() };
   save();
+} else if (cmd === "launch-rest") {
+  // REST path: node mig.mjs launch-rest <src deviceId> <itemId> <destOrgUnitId> [full|none] [destSide=dst] [--expect-ufa] [--review <days>]
+  const [deviceId, itemId, destOrgUnit] = process.argv.slice(3, 6);
+  const clean = process.argv[6] && !process.argv[6].startsWith("--") ? process.argv[6] : "full";
+  const destSide = process.argv[7] && !process.argv[7].startsWith("--") ? process.argv[7] : "dst";
+  const tok = (await rest(destSide, `/api/org-units/${destOrgUnit}/registration-token`)).json.data;
+  if (!tok?.registrationToken) throw new Error(`No registration token for destination org unit ${destOrgUnit}`);
+  const device = (await rest("src", `/api/devices/${deviceId}`)).json.data;
+  const values = {
+    Action: "Launch", DestServer: SIDES[destSide].host, DestCustomerId: destOrgUnit, RegistrationToken: tok.registrationToken,
+    MigrationId: `lab/rest-src-to-${destSide}`, LauncherVersion: built.version, TaskRepeatMinutes: 15, TaskExpiryDays: 14, CleanMode: clean,
+    ExpectUfa: process.argv.includes("--expect-ufa") ? "true" : "false",
+    ReviewDays: process.argv.includes("--review") ? Number(process.argv[process.argv.indexOf("--review") + 1]) : 7,
+  };
+  // cmd.exe sits in between: no value may contain % or " (all of these are host names, IDs, tokens and words).
+  for (const [k, v] of Object.entries(values)) if (/[%"\s]/.test(String(v))) throw new Error(`${k} contains a character the REST command line can't carry`);
+  const commandLine = Object.entries(values).map(([k, v]) => `-${k} ${v}`).join(" ");
+  const body = {
+    name: `N-voke migration Launch (REST) ${new Date().toISOString().slice(11, 19)}`, itemId: Number(itemId), taskType: "Script",
+    customerId: device.customerId, deviceId: Number(deviceId), credential: { type: "LocalSystem" },
+    parameters: [{ name: "CommandLine", value: commandLine, type: "password", description: "N-voke migration inputs" }],
+  };
+  const r = await rest("src", "/api/scheduled-tasks/direct", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  console.log(`POST /api/scheduled-tasks/direct -> ${r.status}`, JSON.stringify(r.json).slice(0, 300));
+  state.launch = { path: "rest", deviceId, itemId, destOrgUnit, destSide, taskId: r.json?.data?.taskId, at: new Date().toISOString() };
+  save();
+} else if (cmd === "result-rest") {
+  // node mig.mjs result-rest <taskId>  -> per-device status, then NVOKE-RESULT and Exit Code from the output zip
+  const taskId = process.argv[3] ?? state.launch?.taskId;
+  const d = [].concat((await rest("src", `/api/scheduled-tasks/${taskId}/status/details`)).json.data ?? [])[0];
+  const out = { status: d?.status, message: d?.message, outputFileName: d?.outputFileName || null };
+  if (d?.outputFileName) {
+    const zip = Buffer.from(await (await fetch(`https://${SIDES.src.host}${encodeURI(d.outputFileName)}`, { headers: UA })).arrayBuffer());
+    const { execFileSync } = await import("node:child_process");
+    const { writeFileSync: wf } = await import("node:fs");
+    const tmp = join(here, `rest-output-${taskId}.zip`); wf(tmp, zip);
+    const text = execFileSync("unzip", ["-p", tmp], { encoding: "utf8" });
+    out.exitCode = text.match(/Exit Code:\s*(-?\d+)/)?.[1];
+    const line = text.split(/\r?\n/).find((l) => l.startsWith("NVOKE-RESULT "));
+    out.result = line ? JSON.parse(line.slice(13)) : null;
+  }
+  console.log(JSON.stringify(out, null, 2));
 } else if (cmd === "action") {
   const [side, assetId, action] = process.argv.slice(3);
   // Ecoverse requires a value for every declared input ("Invalid number of input params." otherwise).
