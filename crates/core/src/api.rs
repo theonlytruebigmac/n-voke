@@ -58,7 +58,7 @@ const TASK_FIELDS: &str = "
     }
   }";
 
-fn plural(n: usize, word: &str) -> String {
+pub(crate) fn plural(n: usize, word: &str) -> String {
     format!("{n} {word}{}", if n == 1 { "" } else { "s" })
 }
 
@@ -109,7 +109,7 @@ pub fn interpret(status: u16, body: &Value, tolerate_errors: bool) -> Result<Rep
 }
 
 /// Fails with the mutation's own error messages, if it reported any.
-fn throw_if_errors(payload: &Value, action: &str) -> Result<(), String> {
+pub(crate) fn throw_if_errors(payload: &Value, action: &str) -> Result<(), String> {
     let errors = payload.get("errors").and_then(Value::as_array).cloned().unwrap_or_default();
     if errors.is_empty() {
         return Ok(());
@@ -119,12 +119,12 @@ fn throw_if_errors(payload: &Value, action: &str) -> Result<(), String> {
     Err(format!("{action}: {}", messages.join("; ")))
 }
 
-fn parse<T: DeserializeOwned>(value: &Value) -> Result<T, String> {
+pub(crate) fn parse<T: DeserializeOwned>(value: &Value) -> Result<T, String> {
     serde_json::from_value(value.clone()).map_err(|e| format!("Unexpected response from the API: {e}"))
 }
 
 /// The non-null entries of a connection's `nodes`.
-fn nodes<T: DeserializeOwned>(connection: &Value) -> Result<Vec<T>, String> {
+pub(crate) fn nodes<T: DeserializeOwned>(connection: &Value) -> Result<Vec<T>, String> {
     connection
         .get("nodes")
         .and_then(Value::as_array)
@@ -176,6 +176,9 @@ fn build_get_tasks(count: usize) -> String {
 
 fn build_run_script(input: &RunScriptInput) -> Value {
     let mut configuration = json!({ "scriptId": input.script_id, "name": input.name, "timeoutSeconds": input.timeout_seconds });
+    if input.run_when_online {
+        configuration["shouldRunWhenOnline"] = json!(true);
+    }
     if !input.inputs.is_empty() {
         configuration["inputs"] = json!(
             input.inputs.iter().map(|i| json!({ "name": i.name, "variable": i.variable, "type": i.kind_name(), "value": i.value })).collect::<Vec<_>>()
@@ -194,7 +197,7 @@ pub struct RunInput {
 }
 
 impl RunInput {
-    fn kind_name(&self) -> &'static str {
+    pub(crate) fn kind_name(&self) -> &'static str {
         match self.kind {
             InputType::String => "STRING",
             InputType::Password => "PASSWORD",
@@ -215,6 +218,8 @@ pub struct RunScriptInput {
     pub name: String,
     pub timeout_seconds: i64,
     pub inputs: Vec<RunInput>,
+    /// Queue the run for a device that is offline now (without it the API refuses an offline device).
+    pub run_when_online: bool,
 }
 
 pub struct RunResult {
@@ -240,11 +245,11 @@ impl Core {
         interpret(response.status, &response.body, tolerate_errors)
     }
 
-    async fn query(&self, query: &str, variables: Value) -> Result<Value, String> {
+    pub(crate) async fn query(&self, query: &str, variables: Value) -> Result<Value, String> {
         Ok(self.gql(query, variables, false, None).await?.data)
     }
 
-    async fn mutate(&self, query: &str, variables: Value, action: &str, summary: String) -> Result<Value, String> {
+    pub(crate) async fn mutate(&self, query: &str, variables: Value, action: &str, summary: String) -> Result<Value, String> {
         Ok(self.gql(query, variables, false, Some(AuditMeta { action: action.into(), summary })).await?.data)
     }
 
@@ -407,8 +412,10 @@ impl Core {
         // `name` resolves to null and would error the whole response.
         let query = format!("mutation RunScript($input: AssetsScriptRunMutationInput!) {{ assetsScriptRun(input: $input) {{ items {{ id }} {MUTATION_ERRORS} }} }}");
         let summary = format!("Ran {} on {} ({})", input.script_name, plural(input.asset_ids.len(), "device"), input.target_label);
-        let data = self.mutate(&query, build_run_script(input), "script.run", summary).await?;
-        run_result_from_payload(&data["assetsScriptRun"])
+        let reply = self.gql(&query, build_run_script(input), true, Some(AuditMeta { action: "script.run".into(), summary })).await?;
+        let mut result = run_result_from_payload(&reply.data["assetsScriptRun"]).map_err(|e| if reply.errors.is_empty() { e } else { format!("{e} {}", reply.errors.join("; ")) })?;
+        result.warnings.extend(reply.errors);
+        Ok(result)
     }
 
     pub async fn get_task(&self, task_id: &str) -> Result<(Option<TaskSnapshot>, Vec<String>), String> {
@@ -439,7 +446,7 @@ impl Core {
     // ---- full loads and deltas for the local cache ----------------------------
 
     /// Follows `after` cursors until the connection is exhausted.
-    async fn fetch_all_pages<T: DeserializeOwned>(&self, root: &str, args: &str, fields: &str, variables: Value, var_defs: &str) -> Result<Vec<T>, String> {
+    pub(crate) async fn fetch_all_pages<T: DeserializeOwned>(&self, root: &str, args: &str, fields: &str, variables: Value, var_defs: &str) -> Result<Vec<T>, String> {
         let query = format!(
             "query FetchAll($after: String{var_defs}) {{
       page: {root}({args}{}first: 100, after: $after) {{ totalCount pageInfo {{ hasNextPage endCursor }} nodes {{ {fields} }} }}
@@ -572,6 +579,7 @@ mod tests {
             name: "Run Cleanup".into(),
             timeout_seconds: 120,
             inputs: vec![],
+            run_when_online: false,
         };
         let vars = build_run_script(&input);
         assert_eq!(vars["input"]["assetIds"], json!(["a1", "a2"]));

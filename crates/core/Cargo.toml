@@ -18,3 +18,8 @@ base64 = "0.23.1"
 dirs = "6"
 regex = "1"
 uuid = { version = "1", features = ["v4"] }
+flate2 = "1"
+sha2 = "0.10"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }

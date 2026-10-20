@@ -172,14 +172,20 @@ pub fn operation_name(query: &str) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-/// Blanks out values of PASSWORD-typed script inputs anywhere in the variables.
+/// Blanks out values of PASSWORD-typed script inputs anywhere in the variables, and shortens a
+/// script's `content` (published scripts can be hundreds of kilobytes) to its size.
 pub fn redact(value: &Value) -> Value {
     match value {
         Value::Object(map) => {
             let is_password = map.get("type").and_then(Value::as_str) == Some("PASSWORD");
             let mut out = Map::new();
             for (k, v) in map {
-                out.insert(k.clone(), if is_password && k == "value" { Value::String("[redacted]".into()) } else { redact(v) });
+                let replaced = match v {
+                    _ if is_password && k == "value" => Some(Value::String("[redacted]".into())),
+                    Value::String(text) if k == "content" && text.chars().count() > 200 => Some(Value::String(format!("[{} characters]", text.chars().count()))),
+                    _ => None,
+                };
+                out.insert(k.clone(), replaced.unwrap_or_else(|| redact(v)));
             }
             Value::Object(out)
         }
@@ -242,6 +248,14 @@ mod tests {
         let inputs = &out["input"]["configuration"]["inputs"];
         assert_eq!(inputs[0]["value"], json!("[redacted]"));
         assert_eq!(inputs[1]["value"]["stringValue"], json!("chrome"));
+    }
+
+    #[test]
+    fn a_large_script_body_is_reduced_to_its_size() {
+        let out = redact(&json!({ "input": { "name": "N-voke migration", "content": "x".repeat(5000) }, "other": { "content": "short" } }));
+        assert_eq!(out["input"]["content"], json!("[5000 characters]"));
+        assert_eq!(out["input"]["name"], json!("N-voke migration"));
+        assert_eq!(out["other"]["content"], json!("short"));
     }
 
     #[test]

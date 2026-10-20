@@ -202,6 +202,7 @@ fn build_request(req: &RunRequest, name: &str) -> Result<RunScriptInput, String>
         name: name.to_string(),
         timeout_seconds: effective_timeout(&req.timeout, &req.script),
         inputs: build_run_inputs(decls, &req.values)?,
+        run_when_online: false,
     })
 }
 
