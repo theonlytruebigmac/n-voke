@@ -101,3 +101,5 @@ Messages follow N-voke's style: say what happened, why, and what to do. Examples
 - "12 devices can't be reached through Ecoverse or N-central. They'll be picked up if they come back online. Export the list for GPO or on-site follow-up."
 - "DESKTOP-42 has been staged for 52 minutes and is still checking in to the old server. Probe it to see why the install hasn't started."
 - "Registration token for Contoso (destination) expires in 2 days. Launches after that date will fail; generate a new one in N-central." Generating again through REST doesn't renew a valid token (confirmed), so an expiring token has to be regenerated in N-central or left to expire first.
+- "Windows Agent is healthy on the destination. The Ecoverse agent is still setting up (installed 12 minutes ago); this commonly takes 20 to 60 minutes and does not block the move. N-voke will keep checking."
+- "DESKTOP-42: the Ecoverse asset is CONNECTED but has not sent its inventory yet, so it cannot be matched by serial or MAC and scripts are held. Planned by its N-central record instead; try the Ecoverse path again in about 30 minutes."

@@ -409,6 +409,24 @@ VM-A after a clean install on the source (new device record and new asset), from
 
 > **Later change (2026-10-20):** the installer no longer removes anything of Take Control (its helper task, `BeAnywhere Support Express` and `GetSupportService_*`): it isn't required for a migration. The Take Control findings above describe what the Phase 0 build did.
 
+## Known delays (2026-10-20)
+
+Observed by the operator after installing three new, larger VMs by hand on the source server (Windows Agent installed from a registration token), then checked through the APIs.
+
+| Observation | Detail |
+|---|---|
+| **The Ecoverse agent (UFA) arrives after the Windows Agent**, not with it | The Windows Agent installs it as a component some minutes after its own install (in the lab run: the device record at 22:25, the UFA deployed at 22:27:53). A device that has just been installed has no Ecoverse asset yet |
+| **An asset can be `CONNECTED` and still be empty** | Right after the three VMs came up: all three assets `CONNECTED`, but `systemInfo` host name and serial number empty and no network interfaces; in the Ecoverse UI the Asset Overview, hardware and motherboard panels show *No data available* while the N-central device already shows healthy |
+| **Script tasks are held until the data sync finishes** | The earlier run: `CONNECTED` 22:46, the first task ran 23:25 (≈38 min, slow VM) |
+| **The UFA core self-upgrade can delay provisioning by up to an hour** | See the section above (CDN `403`, hourly retry) |
+
+| Finding | Effect |
+|---|---|
+| A fresh install is not "done" when the Windows Agent is healthy: the Ecoverse side catches up over minutes to tens of minutes, in a fixed order (see [Known delays](06-tracking.md#known-delays)) | N-voke tells the engineer what is still pending and roughly how long, never just *waiting* |
+| Ecoverse inventory can't be used for matching or surveying until it syncs | Survey and Plan fall back to the N-central record and mark the device **Ecoverse data pending** |
+| Delays are the likeliest explanation for several earlier stalls (task not picked up, `Asset not found` for ~4 minutes, empty inventory) | *Not picked up* counts from the first inventory, not from launch |
+| These timings come from 2 GB and larger lab VMs only | Re-measure on the larger VMs and replace the lab numbers with ranges before setting defaults |
+
 ## Status of Phase 0 tests
 
 | # | Status |

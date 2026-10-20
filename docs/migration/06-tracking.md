@@ -56,6 +56,35 @@ stateDiagram-v2
 | **Ambiguous match** | More than one destination device could be this one | Duplicate host names, imaged machines | Ask the operator to choose |
 | **Duplicate launch** | A second launch would overlap a live one | Operator action, path switch | Blocked unless the first launch has ended |
 
+## Known delays
+
+A device is built up in steps, each with its own wait. Seen in the lab ([findings](10-phase0-findings.md#known-delays-2026-10-20)); the minutes are from deliberately slow 2 GB VMs, so real devices should be faster, but the **order and the dependencies** hold on any machine.
+
+```mermaid
+flowchart LR
+    A[Windows Agent installed] -->|minutes| B[Device on the server<br/>first check-in]
+    A -->|~2-3 min, then the agent deploys the UFA| C[UFA starts]
+    C -->|core self-upgrade first;<br/>a failed download retries hourly| D[UFA provisioned<br/>asset appears]
+    D -->|minutes| E[Asset CONNECTED]
+    E -->|initial data sync: minutes to tens of minutes| F[Inventory present<br/>scripts run]
+```
+
+| Delay | Typical (lab) | Worst seen | What it breaks if ignored | What N-voke does |
+|---|---|---|---|---|
+| Windows Agent installed → first check-in on the server | 5–6 min | — | A device looks lost | Registered is detected from the destination listing before the first check-in |
+| Windows Agent → UFA deployed (the agent installs it as a component some minutes later) | ~2–3 min | — | A freshly installed device has no Ecoverse asset yet | Never read "no asset" as "no UFA" on a device installed recently |
+| UFA core self-upgrade before provisioning | none to ~9 min | up to ~1 h when the first download fails and waits for the hourly retry | Provisioning waits; the asset appears late | *Ecoverse not moved* only after 75 min |
+| Asset created → `CONNECTED` | ~5 min | — | — | — |
+| **`CONNECTED` → initial data sync**: the asset shows `CONNECTED` but inventory (host name, serial, MAC, hardware) is empty, and **script tasks are held** until it finishes | minutes | first task ran ~38 min after `CONNECTED` | Matching by serial or MAC finds nothing; a script launch looks stuck; a survey shows blank inventory | See below |
+
+What this means for the tool:
+
+- **Survey and Plan:** a source device whose asset is `CONNECTED` but has no inventory yet is marked **Ecoverse data pending**, not unreachable and not failed. It can still be planned by N-central record (REST). Matching uses N-central data first and falls back to Ecoverse inventory only when it's present.
+- **Launch:** don't treat a queued Ecoverse launch on a newly synced asset as *Not picked up* inside the sync window. The 30-minute threshold counts from the first time the asset reports inventory, or 60 minutes after `CONNECTED` if it never does; then offer cancel and relaunch, or the REST path.
+- **After the move:** the destination's Ecoverse asset is a late, optional signal. Health comes from destination check-ins over REST; the Ecoverse asset only upgrades the device from **Healthy** to **Healthy, Ecoverse linked**.
+- **Operator messages:** say what is being waited for and roughly how long, not just *waiting*. For example: *"Windows Agent is healthy. The Ecoverse agent is still setting up (installed 12 min ago); this commonly takes 20–60 minutes and doesn't block the move."* An engineer should never have to guess whether a device is stuck or just slow.
+- **Fresh installs:** for a project whose devices were installed in the last hour (labs, new customers), the survey warns up front that Ecoverse data may be incomplete.
+
 ## How each stage is detected
 
 | Transition | Ecoverse path | REST path |
