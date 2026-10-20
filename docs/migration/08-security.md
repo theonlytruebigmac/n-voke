@@ -23,7 +23,7 @@ Migration adds two kinds of credential to N-voke, two new APIs it writes to, and
 |---|---|---|
 | N-central API JWT | **Never** | The PowerShell project's main weakness, removed |
 | Ecoverse token | **Never** | |
-| Registration token | Yes, in `job.json` | Required by the installer. It can only register agents to one customer or site, and it expires. Deleted once the agent is healthy. On the **REST path** it's also in the direct task's `CommandLine`, which N-central shows in full in the task's details to anyone who can view scheduled tasks, **even when the parameter is sent as type `password`** (confirmed in the lab), and briefly in the device's process list. Rotate tokens after the project; if this exposure isn't acceptable, use Ecoverse only, or pre-created devices with per-device activation keys ([Q8](09-roadmap.md#open-questions)) |
+| Registration token | Yes, in `job.json` | Required by the installer. It can only register agents to one customer or site, and it expires. Deleted once the agent is healthy. On the **REST path** it's also in the direct task's `CommandLine`, which N-central shows in full in the task's details to anyone who can view scheduled tasks, **even when the parameter is sent as type `password`** (confirmed in the lab), and briefly in the device's process list. Rotate tokens after the project; if this exposure isn't acceptable, use Ecoverse only. Registration tokens stay the design ([Q8](09-roadmap.md#open-questions), decided 2026-10-20); per-device activation keys were considered and set aside |
 | Destination server and customer ID | Yes | Not secret |
 
 Where the registration token is briefly visible on the device or elsewhere, by design of the platforms:

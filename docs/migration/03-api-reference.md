@@ -87,7 +87,7 @@ Authentication: `POST /api/auth/authenticate` with `Authorization: Bearer <user 
 | `GET /api/scheduled-tasks/{id}`, `/status`, `/status/details` | Per-device result in `/status/details`: `status` (`Pending` while the device is offline, `In Progress`, `Success`, `Failed`), `message`, `output` and `outputFileName`. **`/status` reports failed runs as `Completed`**: use `/status/details`. `output` is only a ~500-character preview, and **holds only stderr if the script wrote any** (stdout is then lost). The full console output and the **exit code** are in a zip at `outputFileName` (`/download/scheduled_tasks/output_files/<site>/<device>/<task>/<name>_<device>_<timestamp>.zip` → `Output-Formatted.txt`), which **downloads without authentication**. No exit code field in the API (the UI shows a *Return Code*). Deleting the repository item deletes these tasks' history (404 / empty) | ✅ (lab) |
 | `GET /api/devices/{id}/scheduled-tasks` | Tasks for a device | ✅ in spec |
 | `DELETE /api/devices/{id}?removeAgents=false` | Remove the old device record from the source after migration (*Retired*). Returns 204; the record then 404s, and the device's stale source Ecoverse asset disappears within about 20 s. `removeAgents` defaults to false (record only; nothing is sent to the device) | ✅ (lab) |
-| `POST /api/device`, `GET /api/devices/{id}/activation-key` | Pre-create the destination device and get an activation key (optional variant) | ✅ in spec |
+| `POST /api/device`, `GET /api/devices/{id}/activation-key` | Pre-create the destination device and get an activation key. **Not used** (Q8: registration tokens stay) | ✅ in spec |
 | Upload or list repository items | — | **Not in the 2026.4 REST API.** The REST path's script is uploaded by hand and the operator enters its item ID |
 
 **Limits.** Concurrency is limited per endpoint and excess calls get HTTP 429. The default is 50; heavier endpoints are lower (for example `GET /api/devices` 5, `POST /api/scheduled-tasks/direct` 30, `POST /api/device` and activation keys 1). Page size defaults to 50, maximum 1000. The client keeps a semaphore per endpoint and backs off on 429.
@@ -105,7 +105,7 @@ The plan originally used SOAP to upload and find an AMP. AMPs are dropped ([Deli
 | `SERVERADDRESS`, `SERVERPORT`, `SERVERPROTOCOL` | Destination server |
 | `CUSTOMERID`, `CUSTOMERSPECIFIC=1` | Destination customer or site |
 | `REGISTRATION_TOKEN` | Registration token for that customer or site |
-| `AGENTACTIVATIONKEY` | Alternative to the above when the device was pre-created |
+| `AGENTACTIVATIONKEY` | Alternative to the above when the device was pre-created. **Not used**: registration tokens are the design ([Q8](09-roadmap.md#open-questions)) |
 
 Generic installer URL: `https://<server>/download/current/winnt/N-central/WindowsAgentSetup.exe` (about 133 MB; no authentication; Authenticode signer *N-ABLE TECHNOLOGIES LTD*). Silent install: `/s /v" /qn …"`; N-voke adds `/L*V <log>` inside `/v"…"`. ❓ Whether the verbose MSI log records `REGISTRATION_TOKEN` in plain text is still unchecked on a device, so the installer removes the token from every log after each install attempt either way; see [Security](08-security.md).
 
