@@ -125,23 +125,27 @@ function Test-MsiBusy {
 #   synced   the inventory component (generic-asset-interrogator) was downloaded
 #   stalled  a configuration fetch failed on a timeout, the cloud answers again, and nothing was delivered since: restart
 #   blocked  a fetch failed and the cloud still doesn't answer: a restart can't help
+#   rejected the cloud answers the agent's login with "400 The SSL certificate error" and never accepts it: a restart
+#            doesn't help (seen in the lab: a restart changed nothing), so it is reported, not retried
 #   waiting  no fault and no inventory component yet (normal for a while)
 #   unknown  no log to read
 function Get-UfaSyncState([string]$LogPath, [datetime]$Since) {
     if (-not (Test-Path -LiteralPath $LogPath)) { return [pscustomobject]@{ State = 'unknown'; FailedAt = $null } }
     $stamp = [regex]'^\[(\d{4}-\d\d-\d\dT[\d:.]+[+-]\d\d:\d\d)\]'
-    $failedAt = $null; $authOkAt = $null; $syncedAt = $null
+    $failedAt = $null; $authOkAt = $null; $syncedAt = $null; $rejectedAt = $null
     foreach ($line in @(Get-Content -LiteralPath $LogPath -Tail 20000 -ErrorAction SilentlyContinue)) {
         $m = $stamp.Match($line)
         if (-not $m.Success) { continue }
         $at = [datetimeoffset]::Parse($m.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture).UtcDateTime
         if ($at -lt $Since) { continue }
-        if ($line -match 'ERROR \(\d+\): configservice::FetchAllConfigurations failed to fetch configuration data:.*Client\.Timeout') { $failedAt = $at }
+        if ($line -match 'ERROR \(\d+\): configservice::FetchAllConfigurations failed to fetch configuration data:') { $failedAt = $at }
+        elseif ($line -match 'auth::fetchJWTWithRetries error occurred when fetching jwt: unexpected status code: 400 .*The SSL certificate error') { $rejectedAt = $at }
         elseif ($line -match 'auth::requestOauthToken Oauth token response received\. Status: 200') { $authOkAt = $at }
         elseif ($line -match 'components::Download Successfully downloaded .*generic-asset-interrogator') { $syncedAt = $at }
     }
     $state = if ($syncedAt -and (-not $failedAt -or $syncedAt -gt $failedAt)) { 'synced' }
              elseif ($failedAt -and $authOkAt -and $authOkAt -gt $failedAt) { 'stalled' }
+             elseif ($rejectedAt -and (-not $authOkAt -or $authOkAt -lt $rejectedAt)) { 'rejected' }
              elseif ($failedAt) { 'blocked' }
              else { 'waiting' }
     [pscustomobject]@{ State = $state; FailedAt = $failedAt }
@@ -347,7 +351,8 @@ try {
                 $waitedSync = ((Get-Date).ToUniversalTime() - $since).TotalMinutes
                 if ($waitedSync -lt $UfaSyncGraceMinutes) {
                     $status.stage = 'awaiting-ufa'
-                    Add-StatusHistory $status 'awaiting-ufa' ('MspAgent data sync: {0}; {1:N0} min since install' -f $sync.State, $waitedSync)
+                    $why = if ($sync.State -eq 'rejected') { 'the cloud rejects the Ecoverse agent login (400 SSL certificate error); a restart does not fix this' } else { $sync.State }
+                    Add-StatusHistory $status 'awaiting-ufa' ('MspAgent data sync: {0}; {1:N0} min since install' -f $why, $waitedSync)
                     Save-Status $status
                     exit 0
                 }

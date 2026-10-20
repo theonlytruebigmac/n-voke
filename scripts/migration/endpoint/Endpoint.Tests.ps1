@@ -347,6 +347,8 @@ Describe 'Get-UfaSyncState' {
             AuthOk  = '[2026-10-20T10:53:46.634-04:00] INFO (249): auth::requestOauthToken Oauth token response received. Status: 200.'
             Synced  = "[2026-10-20T11:28:09.180-04:00] INFO (21): components::Download Successfully downloaded 'cdn.example.invalid/components/generic-asset-interrogator/windows/v0.18.2/x.exe' to 'C:\x'"
             Meta    = "[2026-10-20T10:28:26.000-04:00] ERROR (21): localdiscovery::CollectFingerPrintData failed to collect device cloud discovery data: Get `"http://169.254.169.254/metadata/instance`": $timeout"
+            Fail400 = '[2026-10-20T10:21:50.445-04:00] ERROR (7): configservice::FetchAllConfigurations failed to fetch configuration data: unexpected status code: 400 body: <html>\r\n<head><title>400 The SSL certificate error</title></head>'
+            Ssl400  = '[2026-10-20T10:21:42.239-04:00] ERROR (7): auth::fetchJWTWithRetries error occurred when fetching jwt: unexpected status code: 400 body: <html>\r\n<head><title>400 The SSL certificate error</title></head>'
             Noise   = '[2026-10-20T10:30:00.000-04:00] INFO (21): scheduler::Run (configGUID=Check For Updates) Job completed: Check For Updates'
         }
         function Get-State($Lines, [string]$SinceUtc = '2026-10-20T14:00:00Z') {
@@ -363,6 +365,12 @@ Describe 'Get-UfaSyncState' {
     }
     It 'says blocked while the cloud still does not answer, so no restart is asked for' {
         (Get-State @($lines.Fail, $lines.Noise)).State | Should -Be 'blocked'
+    }
+    It 'says rejected when the cloud answers the login with 400 SSL certificate error and never accepts it, so no restart is asked for' {
+        (Get-State @($lines.Ssl400, $lines.Fail400, $lines.JwtFail, $lines.Fail)).State | Should -Be 'rejected'
+    }
+    It 'says stalled, not rejected, when the login is accepted later and nothing was delivered' {
+        (Get-State @($lines.Ssl400, $lines.Fail400, $lines.AuthOk)).State | Should -Be 'stalled'
     }
     It 'says synced once the inventory component was downloaded after the failure' {
         (Get-State @($lines.Fail, $lines.AuthOk, $lines.Synced)).State | Should -Be 'synced'
