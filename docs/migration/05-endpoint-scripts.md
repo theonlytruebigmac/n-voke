@@ -103,6 +103,16 @@ Each run:
    `WindowsAgentSetup.exe /s /v" /qn SERVERADDRESS=… CUSTOMERID=… CUSTOMERSPECIFIC=1 REGISTRATION_TOKEN=… SERVERPROTOCOL=HTTPS /L*V <msi log>"`
 7. Exit code 0 or 3010: `stage = installed-awaiting-health`, `installedAt`. 1618: `waiting-on-windows`. Anything else: `stage = install-failed` with `lastError`, exit 1003.
 
+### UFA watchdog (planned)
+
+Observed in the lab: a UFA whose core log shows communication errors (timeouts) doesn't sync its data to Ecoverse, so the asset sits `CONNECTED` with no inventory, and **restarting the `MspAgent` service fixes it** ([findings](10-phase0-findings.md#known-delays-2026-10-20)). The installer builds this in, because the device is the one place that can read the log:
+
+- **When:** only when `ExpectUfa=true`, the `MspAgent` service exists, and it has provisioned. At a set time after our install (planned default 20 minutes, an input) and again once later, so a late fault is caught too.
+- **What it reads:** the tail of `Program Files (x86)\Msp Agent\logs\msp-agent-core.log`, only lines written since our install, for timeout and communication errors. Lines that are normal on every non-cloud machine must be excluded: the cloud-instance metadata lookup (`169.254.169.254`) always times out on a physical or VM host and says nothing about connectivity.
+- **What it does:** if errors are found, `Restart-Service MspAgent`, record `ufa-restarted` in `status.json` with the matched error (no secrets), and check again after a set time. At most two restarts per job, so a real outage can't cause a restart loop.
+- **How it runs:** the migration task is gone once the device is healthy, so the check is a separate one-time scheduled task (like the review task) that removes itself, and only touches the service if the log shows errors.
+- **Reported:** `status.json` records `ufaWatchdog` (checked at, found, restarted) so the tracker and the report show what happened.
+
 Device-side stages in `status.json`: `staged`, `downloading`, `download-failed`, `cleaning`, `installing`, `installed-awaiting-health`, `install-failed`, `install-in-progress`, `waiting-on-windows`, `awaiting-ufa`, `healthy`, `error`.
 
 Downloading before installing matters: if the destination can't be reached, the old agent is never removed.

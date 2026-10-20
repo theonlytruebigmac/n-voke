@@ -419,12 +419,15 @@ Observed by the operator after installing three new, larger VMs by hand on the s
 | **An asset can be `CONNECTED` and still be empty** | Right after the three VMs came up: all three assets `CONNECTED`, but `systemInfo` host name and serial number empty and no network interfaces; in the Ecoverse UI the Asset Overview, hardware and motherboard panels show *No data available* while the N-central device already shows healthy |
 | **Script tasks are held until the data sync finishes** | The earlier run: `CONNECTED` 22:46, the first task ran 23:25 (≈38 min, slow VM) |
 | **The UFA core self-upgrade can delay provisioning by up to an hour** | See the section above (CDN `403`, hourly retry) |
+| **The Ecoverse agent's own log showed communication errors, and those devices never synced their data** (operator, 2026-10-20) | On the new VMs the core Msp Agent log had communication (timeout) errors; the devices stayed `CONNECTED` with no serial number, MAC or other inventory. **Restarting the `MspAgent` service fixed them.** Not yet known whether it is specific to the lab (the VMs and their network) or a bug in the UFA. The log and the exact error text weren't kept |
 
 | Finding | Effect |
 |---|---|
 | A fresh install is not "done" when the Windows Agent is healthy: the Ecoverse side catches up over minutes to tens of minutes, in a fixed order (see [Known delays](06-tracking.md#known-delays)) | N-voke tells the engineer what is still pending and roughly how long, never just *waiting* |
 | Ecoverse inventory can't be used for matching or surveying until it syncs | Survey and Plan fall back to the N-central record and mark the device **Ecoverse data pending** |
 | Delays are the likeliest explanation for several earlier stalls (task not picked up, `Asset not found` for ~4 minutes, empty inventory) | *Not picked up* counts from the first inventory, not from launch |
+| **An empty asset isn't always a delay: it can be a stalled sync.** Part of the 38-minute hold seen earlier may have been the same fault | Treat "CONNECTED but no data" as *pending* at first, then as *stalled*, and fix it with a service restart rather than waiting |
+| A restart of `MspAgent` fixes the stalled sync (observed) | The device-side installer checks the core log for timeout errors after the install and restarts the service if it finds them; and N-voke offers the same restart from the tracker. Design in [Endpoint scripts](05-endpoint-scripts.md#ufa-watchdog-planned) |
 | These timings come from 2 GB and larger lab VMs only | Re-measure on the larger VMs and replace the lab numbers with ranges before setting defaults |
 
 ## Status of Phase 0 tests
