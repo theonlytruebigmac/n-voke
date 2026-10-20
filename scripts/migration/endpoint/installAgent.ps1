@@ -130,12 +130,14 @@ function Test-MsiBusy {
 #   rejected the cloud answers the agent's login with "400 The SSL certificate error" and never accepts it: a restart
 #            or a reboot doesn't help (seen in the lab). What did: removing the UFA and letting the Windows Agent redeploy it,
 #            which issues a new certificate (Invoke-UfaRepair, once, after a sustained refusal)
+#   denied   the login works but the component CDN answers the agent's downloads with 403 (five or more, none succeeded
+#            since): nothing can be delivered. A restart changed nothing in the lab; the repair fixed it
 #   waiting  no fault and no inventory component yet (normal for a while)
 #   unknown  no log to read
 function Get-UfaSyncState([string]$LogPath, [datetime]$Since) {
-    if (-not (Test-Path -LiteralPath $LogPath)) { return [pscustomobject]@{ State = 'unknown'; FailedAt = $null; RejectedSince = $null } }
+    if (-not (Test-Path -LiteralPath $LogPath)) { return [pscustomobject]@{ State = 'unknown'; FailedAt = $null; RejectedSince = $null; FaultSince = $null } }
     $stamp = [regex]'^\[(\d{4}-\d\d-\d\dT[\d:.]+[+-]\d\d:\d\d)\]'
-    $failedAt = $null; $authOkAt = $null; $syncedAt = $null; $rejectedAt = $null; $rejectedSince = $null
+    $failedAt = $null; $authOkAt = $null; $syncedAt = $null; $rejectedAt = $null; $rejectedSince = $null; $deniedCount = 0; $deniedSince = $null
     foreach ($line in @(Get-Content -LiteralPath $LogPath -Tail 20000 -ErrorAction SilentlyContinue)) {
         $m = $stamp.Match($line)
         if (-not $m.Success) { continue }
@@ -144,20 +146,27 @@ function Get-UfaSyncState([string]$LogPath, [datetime]$Since) {
         if ($line -match 'ERROR \(\d+\): configservice::FetchAllConfigurations failed to fetch configuration data:') { $failedAt = $at }
         elseif ($line -match 'auth::fetchJWTWithRetries error occurred when fetching jwt: unexpected status code: 400 .*The SSL certificate error') { $rejectedAt = $at; if (-not $rejectedSince) { $rejectedSince = $at } }
         elseif ($line -match 'auth::requestOauthToken Oauth token response received\. Status: 200') { $authOkAt = $at; $rejectedSince = $null }
-        elseif ($line -match 'components::Download Successfully downloaded .*generic-asset-interrogator') { $syncedAt = $at }
+        elseif ($line -match 'ERROR \(\d+\): components::doRequestWithRetry received invalid status: ''403''') { $deniedCount++; if (-not $deniedSince) { $deniedSince = $at } }
+        elseif ($line -match 'components::Download Successfully downloaded') {
+            $deniedCount = 0; $deniedSince = $null
+            if ($line -match 'generic-asset-interrogator') { $syncedAt = $at }
+        }
     }
     $state = if ($syncedAt -and (-not $failedAt -or $syncedAt -gt $failedAt)) { 'synced' }
              elseif ($failedAt -and $authOkAt -and $authOkAt -gt $failedAt) { 'stalled' }
              elseif ($rejectedAt -and (-not $authOkAt -or $authOkAt -lt $rejectedAt)) { 'rejected' }
+             elseif ($deniedCount -ge 5) { 'denied' }
              elseif ($failedAt) { 'blocked' }
              else { 'waiting' }
-    [pscustomobject]@{ State = $state; FailedAt = $failedAt; RejectedSince = $rejectedSince }
+    $faultSince = if ($state -eq 'rejected') { $rejectedSince } elseif ($state -eq 'denied') { $deniedSince } else { $null }
+    [pscustomobject]@{ State = $state; FailedAt = $failedAt; RejectedSince = $rejectedSince; FaultSince = $faultSince }
 }
 
-# True when the login has been refused for AfterMinutes without a single accepted login, and no repair was done yet.
+# True when the same fault (login refused, or component downloads refused) has lasted AfterMinutes with nothing
+# getting through, and no repair was done yet.
 function Test-UfaRepairDue($Sync, [datetime]$NowUtc, [bool]$AlreadyRepaired, [int]$AfterMinutes) {
-    if ($AlreadyRepaired -or $Sync.State -ne 'rejected' -or -not $Sync.RejectedSince) { return $false }
-    return (($NowUtc - $Sync.RejectedSince).TotalMinutes -ge $AfterMinutes)
+    if ($AlreadyRepaired -or $Sync.State -notin 'rejected', 'denied' -or -not $Sync.FaultSince) { return $false }
+    return (($NowUtc - $Sync.FaultSince).TotalMinutes -ge $AfterMinutes)
 }
 
 # The repair N-able support gave for a UFA whose login is refused: uninstall the UFA core, then restart the Windows
@@ -410,7 +419,7 @@ try {
             if (Test-UfaRepairDue $sync (Get-Date).ToUniversalTime() ([bool]$status.ufaRepairedAt) $UfaRepairAfterMinutes) {
                 $result = Invoke-UfaRepair
                 $status.ufaRepairedAt = (Get-Date).ToUniversalTime().ToString('o')
-                Add-StatusHistory $status 'ufa-repair' ("the cloud has refused the Ecoverse agent login since {0:o}; removed the UFA core and restarted the Windows Agent services so it is redeployed with a new certificate ({1})" -f $sync.RejectedSince, $result)
+                Add-StatusHistory $status 'ufa-repair' ("the Ecoverse agent has been in state '{0}' since {1:o} with nothing getting through; removed the UFA core and restarted the Windows Agent services so it is redeployed ({2})" -f $sync.State, $sync.FaultSince, $result)
                 $status.stage = 'awaiting-ufa'
                 Save-Status $status
                 exit 0
@@ -419,7 +428,11 @@ try {
                 $waitedSync = ((Get-Date).ToUniversalTime() - $since).TotalMinutes
                 if ($waitedSync -lt $UfaSyncGraceMinutes) {
                     $status.stage = 'awaiting-ufa'
-                    $why = if ($sync.State -eq 'rejected') { 'the cloud rejects the Ecoverse agent login (400 SSL certificate error); a restart does not fix this' } else { $sync.State }
+                    $why = switch ($sync.State) {
+                        'rejected' { 'the cloud rejects the Ecoverse agent login (400 SSL certificate error); a restart does not fix this' }
+                        'denied' { 'the component CDN refuses the Ecoverse agent downloads (403); a restart does not fix this' }
+                        default { $sync.State }
+                    }
                     Add-StatusHistory $status 'awaiting-ufa' ('MspAgent data sync: {0}; {1:N0} min since install' -f $why, $waitedSync)
                     Save-Status $status
                     exit 0

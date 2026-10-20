@@ -39,7 +39,7 @@ flowchart LR
 
 - Start from the Phase 0 scripts in [`scripts/migration/endpoint/`](../../scripts/migration/README.md) (launcher, installer, status probe and cleanup as described in [Endpoint scripts](05-endpoint-scripts.md)), and keep every Phase 0 rule.
 - Fix before release: the verbose MSI log and the registration token.
-- **UFA sync watchdog and repair** (✅ coded and tested with fixtures and a replay of the real lab logs; awaiting a lab run; includes the one-time repair after a sustained refusal; [design](05-endpoint-scripts.md#ufa-sync-watchdog)): the installer waits for the Ecoverse agent's data sync and restarts `MspAgent` when the core log shows a timed-out configuration fetch and the cloud answers again, at most twice.
+- **UFA sync watchdog and repair** (✅ coded and tested with fixtures and a replay of the real lab logs; awaiting a lab run; includes the one-time repair after a sustained refusal; [design](05-endpoint-scripts.md#ufa-sync-watchdog)): the installer waits for the Ecoverse agent's data sync and restarts `MspAgent` when the core log shows a timed-out configuration fetch and the cloud answers again (at most twice), and does the one-time repair when the login is refused or the component downloads are refused (`rejected`, `denied`) for 30 minutes.
 - Pester tests and PSScriptAnalyzer in CI, plus the build checks (ASCII, parses in the Ecoverse form, nothing on stderr).
 - Port the improvements back to the PowerShell project where they apply (folder ACL, exit codes, self-removal), so it stays useful on its own.
 

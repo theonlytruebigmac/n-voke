@@ -349,6 +349,8 @@ Describe 'Get-UfaSyncState' {
             Meta    = "[2026-10-20T10:28:26.000-04:00] ERROR (21): localdiscovery::CollectFingerPrintData failed to collect device cloud discovery data: Get `"http://169.254.169.254/metadata/instance`": $timeout"
             Fail400 = '[2026-10-20T10:21:50.445-04:00] ERROR (7): configservice::FetchAllConfigurations failed to fetch configuration data: unexpected status code: 400 body: <html>\r\n<head><title>400 The SSL certificate error</title></head>'
             Ssl400  = '[2026-10-20T10:21:42.239-04:00] ERROR (7): auth::fetchJWTWithRetries error occurred when fetching jwt: unexpected status code: 400 body: <html>\r\n<head><title>400 The SSL certificate error</title></head>'
+            Deny403 = "[2026-10-20T13:48:24.328-04:00] ERROR (47): components::doRequestWithRetry received invalid status: '403'"
+            Down200 = "[2026-10-20T13:42:58.000-04:00] INFO (15): components::Download Successfully downloaded 'cdn.example.invalid/components/msp-agent-core/windows/v3.43.0/x.exe' to 'C:\x'"
             Noise   = '[2026-10-20T10:30:00.000-04:00] INFO (21): scheduler::Run (configGUID=Check For Updates) Job completed: Check For Updates'
         }
         function Get-State($Lines, [string]$SinceUtc = '2026-10-20T14:00:00Z') {
@@ -371,6 +373,15 @@ Describe 'Get-UfaSyncState' {
     }
     It 'says stalled, not rejected, when the login is accepted later and nothing was delivered' {
         (Get-State @($lines.Ssl400, $lines.Fail400, $lines.AuthOk)).State | Should -Be 'stalled'
+    }
+    It 'says denied after repeated CDN 403s with nothing downloaded since, and reports when they began' {
+        $r = Get-State @($lines.AuthOk, $lines.Deny403, $lines.Deny403, $lines.Deny403, $lines.Deny403, $lines.Deny403)
+        $r.State | Should -Be 'denied'
+        $r.FaultSince | Should -Not -BeNullOrEmpty
+    }
+    It 'does not say denied for a few 403s, or when a download succeeded after them' {
+        (Get-State @($lines.Deny403, $lines.Deny403)).State | Should -Be 'waiting'
+        (Get-State @($lines.Deny403, $lines.Deny403, $lines.Deny403, $lines.Deny403, $lines.Deny403, $lines.Down200)).State | Should -Be 'waiting'
     }
     It 'says synced once the inventory component was downloaded after the failure' {
         (Get-State @($lines.Fail, $lines.AuthOk, $lines.Synced)).State | Should -Be 'synced'
@@ -395,14 +406,19 @@ Describe 'Get-UfaSyncState' {
         (Get-State @($lines.Ssl400, $lines.Fail400, $lines.AuthOk)).RejectedSince | Should -BeNullOrEmpty
     }
     It 'asks for the repair only after a sustained refusal, and only once' {
-        $sync = [pscustomobject]@{ State = 'rejected'; RejectedSince = [datetime]'2026-10-20T14:21:42Z' }
+        $sync = [pscustomobject]@{ State = 'rejected'; RejectedSince = [datetime]'2026-10-20T14:21:42Z'; FaultSince = [datetime]'2026-10-20T14:21:42Z' }
         Test-UfaRepairDue $sync ([datetime]'2026-10-20T14:40:00Z') $false 30 | Should -BeFalse
         Test-UfaRepairDue $sync ([datetime]'2026-10-20T14:52:00Z') $false 30 | Should -BeTrue
         Test-UfaRepairDue $sync ([datetime]'2026-10-20T14:52:00Z') $true 30 | Should -BeFalse
     }
+    It 'asks for the repair for a denied state too, after the same wait' {
+        $sync = [pscustomobject]@{ State = 'denied'; FaultSince = [datetime]'2026-10-20T14:00:00Z' }
+        Test-UfaRepairDue $sync ([datetime]'2026-10-20T14:20:00Z') $false 30 | Should -BeFalse
+        Test-UfaRepairDue $sync ([datetime]'2026-10-20T14:31:00Z') $false 30 | Should -BeTrue
+    }
     It 'never asks for the repair for any other state' {
         foreach ($state in 'stalled', 'blocked', 'waiting', 'synced', 'unknown') {
-            $sync = [pscustomobject]@{ State = $state; RejectedSince = [datetime]'2026-10-20T10:00:00Z' }
+            $sync = [pscustomobject]@{ State = $state; RejectedSince = [datetime]'2026-10-20T10:00:00Z'; FaultSince = [datetime]'2026-10-20T10:00:00Z' }
             Test-UfaRepairDue $sync ([datetime]'2026-10-20T16:00:00Z') $false 30 | Should -BeFalse
         }
     }
