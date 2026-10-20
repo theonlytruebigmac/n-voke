@@ -1,6 +1,6 @@
 // Phase 0 test 0.10: one real migration, driven by the built endpoint script.
 //   node mig.mjs publish                 publish/refresh dist/nvoke-migration.ps1 in both Ecoverse tenants
-//   node mig.mjs launch <assetId> <destOrgUnitId> [full|none] [destSide=dst] [launchSide=src] [--expect-ufa] [--review <days>]
+//   node mig.mjs launch <assetId> <destOrgUnitId> [full|none] [destSide=dst] [launchSide=src] [--expect-ufa] [--review <days>] [--dest-host <host>]   (--dest-host: failure tests, e.g. an unreachable server)
 //   node mig.mjs action <src|dst> <assetId> <Status|Cleanup>
 //   node mig.mjs watch                   log every stage signal until healthy (Ctrl-C to stop)
 import { SIDES as LAB, secret } from "./lab-config.mjs";
@@ -98,7 +98,7 @@ if (cmd === "publish") {
   if (!tok?.registrationToken) throw new Error(`No registration token for destination org unit ${destOrgUnit}`);
   console.log(`destination ${destOrgUnit}: token ${tok.registrationToken.length} chars, expires ${tok.registrationTokenExpiryDate}`);
   const id = await runScript(launchSide, assetId, [
-    input("Action", "Launch"), input("DestServer", SIDES[destSide].host), input("DestCustomerId", destOrgUnit),
+    input("Action", "Launch"), input("DestServer", process.argv.includes("--dest-host") ? process.argv[process.argv.indexOf("--dest-host") + 1] : SIDES[destSide].host), input("DestCustomerId", destOrgUnit),
     input("RegistrationToken", tok.registrationToken), input("MigrationId", `lab/${launchSide}-to-${destSide}`), input("LauncherVersion", built.version),
     input("TaskRepeatMinutes", 15), input("TaskExpiryDays", 14), input("CleanMode", process.argv[5] ?? "full"),
     input("ExpectUfa", process.argv.includes("--expect-ufa") ? "true" : "false"),
