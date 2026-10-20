@@ -17,7 +17,7 @@ A **project** holds one migration: a source server, a destination server (the sa
 
 - Choose or add the **source** and **destination** N-central servers: host, plus a user API JWT for each (stored in the keychain). N-voke checks each one: it authenticates, reads the server version, and confirms the endpoints it needs respond (the scheduled-task and registration-token endpoints). Everything this plan uses was tested on 2026.4.0 and 2026.4.1; older versions are untested and get a warning.
 - The **Ecoverse** token is the one N-voke already has. N-voke checks whether the source server is linked to it ("Ecoverse sees 412 devices on this server").
-- **Is the destination linked to Ecoverse?** Asked per project (default **no**, the usual case for a new server): *Not yet* (devices leave Ecoverse until it's linked; tracking after the move uses REST), *Same tenant as the source*, or *Another tenant* (add that tenant's token). N-voke explains the consequence of the choice, and notes Ecoverse's prerequisites for UFAs on the destination (N-able Login, analytics).
+- **Is the destination linked to Ecoverse?** Asked per project (default **no**, the usual case for a new server): *Not yet* (devices leave Ecoverse until it's linked; tracking after the move uses REST), *Same tenant as the source*, or *Another tenant* (add that tenant's token). N-voke explains the consequence of the choice, and notes Ecoverse's prerequisites for UFAs on the destination (cloud eventing on, SSO enabled).
 - The result is a checklist with green, amber and red items and one-line fixes, for example: "The destination JWT's user can't read registration tokens. Give that user access to the destination customers, or use another JWT."
 
 ### 2. Map

@@ -25,7 +25,7 @@ The launch only needs Ecoverse on the **source**. What happens after the move de
 | Destination linked to the **same** tenant | N-able links the new server before the migration | The device reappears in the same tenant as a **new asset** linked to the destination server; one Ecoverse key covers both sides |
 | Destination linked to **another** tenant | Separate partner tenants (the Phase 0 lab) | As above, in the other tenant; needs that tenant's key too |
 
-Even a linked destination only deploys UFAs when the server meets Ecoverse's prerequisites (❓ known so far: at least one administrator signs in with N-able Login, and analytics is enabled). The UFA is installed by the agent as a component, like Take Control, not by the main installer.
+Even a linked destination only deploys UFAs when the server meets Ecoverse's prerequisites (✅ per N-able: **cloud eventing is turned on and SSO is enabled**; the UFA needs what the N-central agent needs). The UFA is installed by the agent as a component, like Take Control, not by the main installer: **the N-central agent triggers it when those conditions are met**. A destination without them gets no UFA, however the device arrived.
 
 **No AMPs.** Ecoverse scripting doesn't run AMPs: its repository holds plain scripts with declared **input** and **output** variables (confirmed in the Ecoverse UI, *Scripting → Add script*). The REST path doesn't need one either, because a direct task can run a repository **Script**. So N-voke never builds, publishes or wraps an AMP, and needs no SOAP. The REST API has no endpoint for uploading repository items, which is why the REST path's script is uploaded by hand.
 
