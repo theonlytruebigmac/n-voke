@@ -15,7 +15,7 @@ A **project** holds one migration: a source server, a destination server (the sa
 
 ### 1. Connect
 
-- Choose or add the **source** and **destination** N-central servers: host, plus a user API JWT for each (stored in the keychain). N-voke checks each one: it authenticates, reads the server version, and confirms the endpoints it needs respond (the scheduled-task and registration-token endpoints). The minimum supported version is set after the proof of concept; everything this plan uses is present in 2026.4.
+- Choose or add the **source** and **destination** N-central servers: host, plus a user API JWT for each (stored in the keychain). N-voke checks each one: it authenticates, reads the server version, and confirms the endpoints it needs respond (the scheduled-task and registration-token endpoints). Everything this plan uses was tested on 2026.4.0 and 2026.4.1; older versions are untested and get a warning.
 - The **Ecoverse** token is the one N-voke already has. N-voke checks whether the source server is linked to it ("Ecoverse sees 412 devices on this server"). If the destination server is linked to a different Ecoverse tenant, the operator adds that tenant's token too, so the new devices can be seen and cleaned up through Ecoverse; without it, the destination side uses REST only.
 - The result is a checklist with green, amber and red items and one-line fixes, for example: "The destination JWT's user can't read registration tokens. Give that user access to the destination customers, or use another JWT."
 
@@ -32,7 +32,7 @@ A **project** holds one migration: a source server, a destination server (the sa
 - Shows the endpoint script version and what will be published:
   - Ecoverse: the script name, the organization it goes in, and "publish" or "already up to date".
   - REST (only if some devices need it): **Export script** saves `nvoke-migration.ps1` with its version in the name, with steps to upload it to the source server's repository (and the destination's, for cleanup) and turn on **Enable API**. The operator then enters each item ID. A newer script version means deleting the old item and uploading again (N-central can't replace an item's file), which gives a new ID. N-voke flags a server whose script reports an older version.
-- Options: scheduled-task repeat interval, task expiry, stall thresholds, whether to delete source records at the end, which tags to use.
+- Options: **clean mode** (full cleanup of the old agent before installing, the default; or install over the top, which leaves the device in the source Ecoverse tenant when the destination's agent is newer), scheduled-task repeat interval, task expiry, stall thresholds, whether to retire source records at the end, which tags to use.
 - **Publish** is one action, previewed and audited.
 
 ### 4. Plan waves
@@ -53,7 +53,8 @@ The dashboard from [Tracking](06-tracking.md#what-the-operator-sees): stage coun
 
 | Action | Applies to |
 |---|---|
-| Probe | Stuck staged: fetch `status.json` and the task state through the old agent |
+| Probe | Stuck staged (through the old agent), or any device on the destination (through its new agent): fetch `status.json`, the task state and the install log tail |
+| Cancel and relaunch | Not picked up |
 | Retry | Launch failed |
 | Retry on other path | Launch failed, Stuck staged |
 | Choose match | Ambiguous match |
@@ -64,7 +65,7 @@ The dashboard from [Tracking](06-tracking.md#what-the-operator-sees): stage coun
 ### 7. Finish
 
 - Cleanup runs automatically on Healthy devices (configurable). The project closes when every device is Retired, Excluded or Marked resolved.
-- Optional, behind its own confirmation: delete the old source records (`removeAgents=false`).
+- Optional, behind its own confirmation: delete the old source records (`removeAgents=false`; the device itself is untouched). This also removes their stale Ecoverse assets within seconds, so nothing needs cleaning up by hand in the source N-central or Ecoverse.
 - Export the CSV and HTML reports.
 
 ## Terminal app

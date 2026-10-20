@@ -1,6 +1,6 @@
 # N-central agent migration: plan
 
-**Status: planning.** Nothing in this folder is built yet. These documents describe how N-voke grows from "run a script and watch it" into a tool that moves Windows devices from one N-central server to another (or reinstalls the agent on the same server), and tracks every device until it is checked in and healthy on the destination.
+**Status: Phase 0 (proof of concept) done; Phase 1 next.** The approach is proven end to end in a lab (whole device moved, both directions, same-server reinstall); see the [Phase 0 findings](10-phase0-findings.md), whose summary is the quickest way in. Nothing is built into N-voke yet; the working endpoint scripts and test harness are in [`scripts/migration/`](../../scripts/migration/README.md). These documents describe how N-voke grows from "run a script and watch it" into a tool that moves Windows devices from one N-central server to another (or reinstalls the agent on the same server), and tracks every device until it is checked in and healthy on the destination.
 
 ## The problem in one paragraph
 
@@ -12,7 +12,7 @@ Redeploying an N-central agent means running `WindowsAgentSetup.exe` against the
 2. **Map** source customers and sites to destination customers and sites, with automatic name matching and manual correction.
 3. **Prepare** the endpoint script once: N-voke publishes it as an N-able script (Ecoverse) automatically. For the REST fallback, the operator uploads the same PowerShell file to each N-central server's repository once.
 4. **Plan waves:** choose devices, see which delivery path each one will use, and see the warnings before anything runs.
-5. **Launch** each wave. Each device gets only the destination address, customer ID and registration token, never an API key.
+5. **Launch** each wave. Each device gets only the destination address, customer ID and registration token, never an API key. On the device, a scheduled task removes every N-central component and installs the destination's agent, so the whole device (N-central agent and Ecoverse agent) moves.
 6. **Track** every device through fixed stages, from launch to healthy on the destination to cleaned up, with stall detection, the device's own log collected afterwards, and a report.
 
 ## Documents
