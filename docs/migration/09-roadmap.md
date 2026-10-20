@@ -68,6 +68,7 @@ Any change to the installer or launcher changes the built script's version, so t
 | New Ecoverse operations: `scriptCreate`, `scriptUpdate`, `scriptsDelete`, `scriptTasksCancel`, asset identity fields | `migration/ecoverse.rs`; `shouldRunWhenOnline` on the existing run | ✅ The delete and cancel input types are written inline, because their type names weren't recorded in Phase 0 |
 | `migration::project`, `mapping`, `planner` (with path selection), and the store | `migration/` | ✅ Stage moves follow the state diagram; lease for one driving app |
 | A debug command that connects, maps and prints a plan | `nvoke migrate-server`, `nvoke migrate-plan` | ✅ Read-only; verified against fixtures, not yet a lab project |
+| Project store on SQLite ([Q7](#open-questions)) | `migration/store.rs` | Not built. Per-device rows, events table, encrypted at rest, same `Core` API, import of existing project blobs, WAL; tighten the per-device event caps. Design points in [Architecture](02-architecture.md#storage) |
 
 Decisions made while building, to confirm or change:
 
@@ -152,7 +153,7 @@ The Migrate page in React over new Tauri commands, mirroring the terminal app's 
 
 ## Open questions
 
-**Answered:** Q1 to Q5, Q8, Q12, Q13. **Partly answered:** Q11 (an expired token is untested), Q16 (the lab check of a device already on a destination when it is linked is outstanding). **Open:** Q6, Q7, Q9, Q10, Q14, Q15, Q17. An answered question keeps its answer in the row, with the test that settled it.
+**Answered:** Q1 to Q5, Q7, Q8, Q12, Q13. **Partly answered:** Q11 (an expired token is untested), Q16 (the lab check of a device already on a destination when it is linked is outstanding). **Open:** Q6, Q9, Q10, Q14, Q15, Q17. An answered question keeps its answer in the row, with the test that settled it.
 
 | # | Status | Question and answer | Affects | Settled by |
 |---|---|---|---|---|
@@ -162,7 +163,7 @@ The Migrate page in React over new Tauri commands, mirroring the terminal app's 
 | Q4 | ✅ Answered | Does `/status/details` include an exit code? No; the exit code is in the output zip at `outputFileName` | REST result parsing | Test 0.7 (done) |
 | Q5 | ✅ Answered | Does an Ecoverse asset keep its ID across servers? No: the asset ID follows the N-central device record, so it changes on a move (and after a reinstall whose record was deleted) and stays on a same-server reinstall | Matching | Answered (0.10b, 0.12) |
 | Q6 | ❓ Open | Minimum N-central version to support. Tested: 2026.4.0 and 2026.4.1 (REST API 1.3.23); older versions untested | Connect checks | Test against an older server before release |
-| Q7 | ❓ Open | Is the encrypted JSON store enough for large projects (5,000+ devices), or should projects move to SQLite? | Storage | Load test in Phase 3 |
+| Q7 | ✅ Decided | Is the encrypted JSON store enough for large projects (5,000+ devices), or should projects move to SQLite? **Decided (2026-10-20): move to SQLite**, because jobs can exceed 5,000 endpoints. Measured with a synthetic project: 25 MB at 5,000 devices and 100 MB at 20,000, rewritten in full on every save. Encryption at rest stays (SQLCipher or encrypted columns). Details and open design points in [Architecture](02-architecture.md#storage) | Storage, Phase 2 rework | Build in Phase 2; load test at 5,000 and 20,000 devices in Phase 3 |
 | Q8 | ✅ Decided | Should the launcher pre-create the destination device and use `AGENTACTIVATIONKEY` instead of a registration token? **Decided (2026-10-20): keep the registration token.** Reasons weighed: it needs no pre-created records (so no Wrong place risk from pre-creation, and no one-at-a-time `POST /api/device` calls), and the lab proved it end to end. Its cost, the token visible in a REST task's command line, is accepted and handled by preferring Ecoverse, rotating tokens after the project, and scrubbing installer logs | Launch inputs, REST path exposure | Revisit only if the exposure proves unacceptable to a partner |
 | Q9 | ❓ Open | Desktop UI logic moves into Rust for this feature (see [Architecture](02-architecture.md#a-deliberate-change-migration-logic-is-rust-only)). Should existing features follow later? | Codebase direction | Separate decision |
 | Q10 | ❓ Open | Should this share the endpoint script and deployment-engine concepts with the RMM-to-N-central migrator project? | Reuse | After Phase 3 |

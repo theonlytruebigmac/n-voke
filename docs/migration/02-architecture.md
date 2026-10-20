@@ -73,7 +73,26 @@ N-voke keeps history in named encrypted stores (XChaCha20-Poly1305, key in the k
 - devices with their current stage and both old and new IDs,
 - an append-only event list per device (stage changes, task outputs, collected status files), with output capped like run history.
 
-A project with a few thousand devices and their events stays in the low megabytes, which the current store handles. If projects grow beyond that, the store can move to SQLite inside the same encryption scheme without changing the modules above. That decision is listed in [open questions](09-roadmap.md#open-questions).
+**Jobs can exceed 5,000 endpoints, so the project store is moving to SQLite** ([Q7](09-roadmap.md#open-questions), decided 2026-10-20). A synthetic project with typical per-device history (about 15 stage events and one 3 KB collected output each) measured:
+
+| Devices | Project file | Serialize + parse |
+|---|---|---|
+| 1,000 | 5 MB | ~10 ms |
+| 5,000 | 25 MB | ~35 ms |
+| 20,000 | 100 MB | ~170 ms |
+
+Encoding isn't the problem. What doesn't scale is the way the single-blob store works: **every save re-reads, decrypts and rewrites the whole project** (once to check the revision, once to write), the project list loads every project in full, and the dashboard needs the whole project in memory just to count stages. With a poll pass saving after each change, and two apps able to open the same project, that is tens of megabytes of I/O per save at 5,000 devices and an increasing risk of lost or refused saves.
+
+What the SQLite store gives: **one row per device** (a stage change updates one row, not the file), events in their own table, stage counts and attention lists as queries, atomic transactions (a crash can't leave half a save), and the project's revision check becomes a row-level one. The project definition, waves and options stay small.
+
+Design points to settle before building (Phase 2 rework):
+
+- **Encryption at rest stays a requirement.** Plain SQLite files aren't encrypted. Either use an encrypted SQLite build (SQLCipher) with the key from the keychain, or encrypt the free-text columns (event detail, collected output) with the existing XChaCha20-Poly1305 scheme. The registration token is never stored either way.
+- **One database per project** (`migration-<id>.db`), so deleting a project deletes one file and a project can be exported or copied.
+- **The same `Core` API.** `migration_save`, `migration_load`, `migration_list` and the lease keep their shape, so the planner, launcher, tracker, poller, report and both apps don't change. Per-device writes get their own calls for the poller.
+- **Migration of existing projects**: read an old `migration-<id>` blob once and import it.
+- Both apps share one file, so use WAL mode and short transactions; the advisory lease stays.
+- The event cap (500 per device) and output cap (64 KB per event) are per device, so the worst case is much larger than the measurement above: tighten them for 5,000+ device projects.
 
 Projects are kept until the user deletes them; the run-history retention setting doesn't apply, because a migration can span weeks.
 
