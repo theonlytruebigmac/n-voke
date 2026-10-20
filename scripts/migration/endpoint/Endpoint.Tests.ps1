@@ -336,6 +336,57 @@ Describe 'Hide-RegistrationToken' {
     }
 }
 
+Describe 'Get-UfaSyncState' {
+    BeforeAll {
+        . ([scriptblock]::Create((Get-FunctionText (Join-Path $here 'installAgent.ps1') @('Get-UfaSyncState'))))
+        $auth = 'https://auth.example.invalid/oauth2/token'
+        $timeout = "context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
+        $lines = @{
+            Fail    = "[2026-10-20T10:27:59.400-04:00] ERROR (212): configservice::FetchAllConfigurations failed to fetch configuration data: Post `"$auth`": $timeout"
+            JwtFail = "[2026-10-20T10:27:59.400-04:00] ERROR (212): auth::requestOauthToken unable to get jwt: Post `"$auth`": $timeout"
+            AuthOk  = '[2026-10-20T10:53:46.634-04:00] INFO (249): auth::requestOauthToken Oauth token response received. Status: 200.'
+            Synced  = "[2026-10-20T11:28:09.180-04:00] INFO (21): components::Download Successfully downloaded 'cdn.example.invalid/components/generic-asset-interrogator/windows/v0.18.2/x.exe' to 'C:\x'"
+            Meta    = "[2026-10-20T10:28:26.000-04:00] ERROR (21): localdiscovery::CollectFingerPrintData failed to collect device cloud discovery data: Get `"http://169.254.169.254/metadata/instance`": $timeout"
+            Noise   = '[2026-10-20T10:30:00.000-04:00] INFO (21): scheduler::Run (configGUID=Check For Updates) Job completed: Check For Updates'
+        }
+        function Get-State($Lines, [string]$SinceUtc = '2026-10-20T14:00:00Z') {
+            $log = Join-Path ([IO.Path]::GetTempPath()) ('nvoke-core-' + [guid]::NewGuid().ToString('N') + '.log')
+            try {
+                Set-Content -Path $log -Value $Lines -Encoding UTF8
+                Get-UfaSyncState $log ([datetime]::Parse($SinceUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal))
+            } finally { Remove-Item $log -Force -ErrorAction SilentlyContinue }
+        }
+    }
+
+    It 'says stalled when a fetch timed out and the cloud answers again with nothing delivered' {
+        (Get-State @($lines.JwtFail, $lines.Fail, $lines.Noise, $lines.AuthOk)).State | Should -Be 'stalled'
+    }
+    It 'says blocked while the cloud still does not answer, so no restart is asked for' {
+        (Get-State @($lines.Fail, $lines.Noise)).State | Should -Be 'blocked'
+    }
+    It 'says synced once the inventory component was downloaded after the failure' {
+        (Get-State @($lines.Fail, $lines.AuthOk, $lines.Synced)).State | Should -Be 'synced'
+    }
+    It 'says synced when the component arrived and nothing failed' {
+        (Get-State @($lines.Noise, $lines.Synced)).State | Should -Be 'synced'
+    }
+    It 'says waiting when there is no fault and no component yet' {
+        (Get-State @($lines.Noise)).State | Should -Be 'waiting'
+    }
+    It 'does not treat the cloud-metadata timeout, which every non-cloud machine logs, as a fault' {
+        (Get-State @($lines.Meta, $lines.Noise, $lines.AuthOk)).State | Should -Be 'waiting'
+    }
+    It 'ignores everything logged before the install' {
+        (Get-State @($lines.Fail, $lines.AuthOk) '2026-10-20T15:00:00Z').State | Should -Be 'waiting'
+    }
+    It 'reads the log time zone: 10:27:59 at -04:00 is 14:27:59 UTC' {
+        (Get-State @($lines.Fail, $lines.AuthOk)).FailedAt.ToString('HH:mm:ss') | Should -Be '14:27:59'
+    }
+    It 'says unknown when there is no log' {
+        (Get-UfaSyncState (Join-Path ([IO.Path]::GetTempPath()) 'nvoke-no-such-core.log') ([datetime]::MinValue)).State | Should -Be 'unknown'
+    }
+}
+
 Describe 'the installer' {
     It 'passes the registration token on the installer command line only, never to the task or a log call' {
         $text = Get-Content -Raw (Join-Path $here 'installAgent.ps1')

@@ -24,6 +24,9 @@ $ReviewTaskName = 'N-voke Migration Cleanup'
 $AgentDir = [Environment]::GetFolderPath('ProgramFilesX86') + '\N-able Technologies\Windows Agent'
 $ServerConfigPath = Join-Path $AgentDir 'config\ServerConfig.xml'
 $HealthGraceMinutes = 60
+$UfaSyncGraceMinutes = 120
+$UfaSyncMaxRestarts = 2
+$UfaSyncRestartGapMinutes = 15
 
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 $LogPath = Join-Path $LogDir ('install-{0}.log' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
@@ -114,6 +117,34 @@ function Test-MsiBusy {
     $mutex = $null
     if ([System.Threading.Mutex]::TryOpenExisting('Global\_MSIExecute', [ref]$mutex)) { $mutex.Dispose(); return $true }
     return $false
+}
+
+# Reads the Ecoverse agent's core log for the one fault seen in the lab: its configuration fetch timed out while
+# fetching a login token, so the inventory components were never delivered and the asset stays CONNECTED with no
+# data. The agent retries that fetch only hourly; restarting MspAgent retries it at once. Only lines after $Since count.
+#   synced   the inventory component (generic-asset-interrogator) was downloaded
+#   stalled  a configuration fetch failed on a timeout, the cloud answers again, and nothing was delivered since: restart
+#   blocked  a fetch failed and the cloud still doesn't answer: a restart can't help
+#   waiting  no fault and no inventory component yet (normal for a while)
+#   unknown  no log to read
+function Get-UfaSyncState([string]$LogPath, [datetime]$Since) {
+    if (-not (Test-Path -LiteralPath $LogPath)) { return [pscustomobject]@{ State = 'unknown'; FailedAt = $null } }
+    $stamp = [regex]'^\[(\d{4}-\d\d-\d\dT[\d:.]+[+-]\d\d:\d\d)\]'
+    $failedAt = $null; $authOkAt = $null; $syncedAt = $null
+    foreach ($line in @(Get-Content -LiteralPath $LogPath -Tail 20000 -ErrorAction SilentlyContinue)) {
+        $m = $stamp.Match($line)
+        if (-not $m.Success) { continue }
+        $at = [datetimeoffset]::Parse($m.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture).UtcDateTime
+        if ($at -lt $Since) { continue }
+        if ($line -match 'ERROR \(\d+\): configservice::FetchAllConfigurations failed to fetch configuration data:.*Client\.Timeout') { $failedAt = $at }
+        elseif ($line -match 'auth::requestOauthToken Oauth token response received\. Status: 200') { $authOkAt = $at }
+        elseif ($line -match 'components::Download Successfully downloaded .*generic-asset-interrogator') { $syncedAt = $at }
+    }
+    $state = if ($syncedAt -and (-not $failedAt -or $syncedAt -gt $failedAt)) { 'synced' }
+             elseif ($failedAt -and $authOkAt -and $authOkAt -gt $failedAt) { 'stalled' }
+             elseif ($failedAt) { 'blocked' }
+             else { 'waiting' }
+    [pscustomobject]@{ State = $state; FailedAt = $failedAt }
 }
 
 function Test-RebootPending {
@@ -293,6 +324,34 @@ try {
                     exit 0
                 }
                 $status.warning = "MspAgent not provisioned $([math]::Round($waited)) min after restart"
+            }
+        }
+
+        # Provisioned is not the same as syncing its data. Wait for the inventory components, and restart MspAgent
+        # if its log shows the configuration fetch timing out (see Get-UfaSyncState). Bounded: a few restarts, a grace period.
+        if ($job.expectUfa -eq 'true' -and $ufaService -and $ufaProvisioned) {
+            $coreLog = [Environment]::GetFolderPath('ProgramFilesX86') + '\Msp Agent\logs\msp-agent-core.log'
+            $sync = Get-UfaSyncState $coreLog $since
+            $status.ufa.sync = $sync.State
+            if ($sync.State -eq 'stalled') {
+                $restarts = [int]$status.ufaSyncRestarts
+                $lastRestart = if ($status.ufaSyncRestartedAt) { [datetime]::Parse($status.ufaSyncRestartedAt).ToUniversalTime() } else { [datetime]::MinValue }
+                if ($restarts -lt $UfaSyncMaxRestarts -and ((Get-Date).ToUniversalTime() - $lastRestart).TotalMinutes -ge $UfaSyncRestartGapMinutes) {
+                    Restart-Service -Name 'MspAgent' -Force -ErrorAction SilentlyContinue
+                    $status.ufaSyncRestarts = $restarts + 1
+                    $status.ufaSyncRestartedAt = (Get-Date).ToUniversalTime().ToString('o')
+                    Add-StatusHistory $status 'ufa-sync-restart' ("MspAgent configuration fetch timed out at {0:o} and the cloud answers again; restarted MspAgent to fetch now instead of at its next hourly check (restart {1} of {2})" -f $sync.FailedAt, ($restarts + 1), $UfaSyncMaxRestarts)
+                }
+            }
+            if ($sync.State -ne 'synced') {
+                $waitedSync = ((Get-Date).ToUniversalTime() - $since).TotalMinutes
+                if ($waitedSync -lt $UfaSyncGraceMinutes) {
+                    $status.stage = 'awaiting-ufa'
+                    Add-StatusHistory $status 'awaiting-ufa' ('MspAgent data sync: {0}; {1:N0} min since install' -f $sync.State, $waitedSync)
+                    Save-Status $status
+                    exit 0
+                }
+                $status.warning = "MspAgent had not synced its data $([math]::Round($waitedSync)) min after the install (state: $($sync.State))"
             }
         }
 

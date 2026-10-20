@@ -95,7 +95,7 @@ Changes from the PowerShell project's version:
 Each run:
 
 1. Read `job.json` and `status.json`; increment `attempts`; record the agent's state (installed, version, service running, server, UFA running).
-2. **Healthy check.** If the Windows Agent is installed, its service is running and `ServerConfig.xml` points at `DestServer`, check the UFA, **only when `ExpectUfa=true`**: a UFA installed alongside a new agent starts before that agent registers and doesn't provision until it's restarted ([findings](10-phase0-findings.md)). If `MspAgent` exists but hasn't provisioned since our install (no `Status: 200` X.509 fetch in its `provision.log`), restart it once, wait up to 5 minutes for provisioning, and otherwise set `stage = awaiting-ufa` and check again next run (giving up with a warning after 60 minutes). Then set `stage = healthy` and `healthyAt`. Delete `job.json` (removing the token from disk) and the downloaded installer, register the one-time **N-voke Migration Cleanup** task for `healthyAt + ReviewDays` (it deletes `C:\ProgramData\N-voke\Migration` and itself; it runs late if the device is off that day), record `reviewUntil`, unregister the migration task, and exit 0. During the review period `status.json` and the logs can be read on the device or with `Status`. With `ReviewDays=0` the folder is removed at once.
+2. **Healthy check.** If the Windows Agent is installed, its service is running and `ServerConfig.xml` points at `DestServer`, check the UFA, **only when `ExpectUfa=true`**: a UFA installed alongside a new agent starts before that agent registers and doesn't provision until it's restarted ([findings](10-phase0-findings.md)). If `MspAgent` exists but hasn't provisioned since our install (no `Status: 200` X.509 fetch in its `provision.log`), restart it once, wait up to 5 minutes for provisioning, and otherwise set `stage = awaiting-ufa` and check again next run (giving up with a warning after 60 minutes). Then set `stage = healthy` and `healthyAt`. Delete `job.json` (removing the token from disk) and the downloaded installer, register the one-time **N-voke Migration Cleanup** task for `healthyAt + ReviewDays` (it deletes `C:\ProgramData\N-voke\Migration` and itself; it runs late if the device is off that day), record `reviewUntil`, unregister the migration task, and exit 0. During the review period `status.json` and the logs can be read on the device or with `Status`. With `ReviewDays=0` the folder is removed at once. Once provisioned, it also waits for the UFA's data sync and restarts `MspAgent` if the log shows a timed-out configuration fetch ([UFA sync watchdog](#ufa-sync-watchdog)).
 3. **Wait if appropriate.** Within 60 minutes of our own successful install (`installed-awaiting-health`), just record and exit. If an earlier `WindowsAgentSetup.exe` is still running (`install-in-progress`) or Windows Installer is busy (`waiting-on-windows`), record and exit.
 4. **Download** `WindowsAgentSetup.exe` from `DestServer` (BITS, then `Invoke-WebRequest`), check its Authenticode signature, and record method, size and time (`download-failed`, exit 1001, if it can't).
 5. **Full cleanup** (unless `CleanMode=none`; once per job): see below. Nothing before this step changes the device's agents.
@@ -103,17 +103,25 @@ Each run:
    `WindowsAgentSetup.exe /s /v" /qn SERVERADDRESS=… CUSTOMERID=… CUSTOMERSPECIFIC=1 REGISTRATION_TOKEN=… SERVERPROTOCOL=HTTPS /L*V <msi log>"`
 7. Exit code 0 or 3010: `stage = installed-awaiting-health`, `installedAt`. 1618: `waiting-on-windows`. Anything else: `stage = install-failed` with `lastError`, exit 1003.
 
-### UFA watchdog (planned)
+### UFA sync watchdog
 
-Observed in the lab: a UFA whose core log shows communication errors (timeouts) doesn't sync its data to Ecoverse, so the asset sits `CONNECTED` with no inventory, and **restarting the `MspAgent` service fixes it** ([findings](10-phase0-findings.md#known-delays-2026-10-20)). The installer builds this in, because the device is the one place that can read the log:
+Observed in the lab ([findings](10-phase0-findings.md#known-delays-2026-10-20)): an Ecoverse agent (UFA) that is provisioned and `CONNECTED` can still have no inventory, because its **configuration fetch timed out while fetching a login token**, so the inventory components (`generic-asset-interrogator`, `osquery`, and others) were never delivered. The agent retries that fetch only at its hourly *Check For Updates*; **restarting `MspAgent` retries it at once.** The installer reads the agent's core log for exactly this and restarts the service. Only when `ExpectUfa=true`, the UFA exists and is provisioned.
 
-- **When:** only when `ExpectUfa=true`, the `MspAgent` service exists, and it has provisioned. At a set time after our install (planned default 20 minutes, an input) and again once later, so a late fault is caught too.
-- **What it reads:** the tail of `Program Files (x86)\Msp Agent\logs\msp-agent-core.log`, only lines written since our install, for timeout and communication errors. Lines that are normal on every non-cloud machine must be excluded: the cloud-instance metadata lookup (`169.254.169.254`) always times out on a physical or VM host and says nothing about connectivity.
-- **What it does:** if errors are found, `Restart-Service MspAgent`, record `ufa-restarted` in `status.json` with the matched error (no secrets), and check again after a set time. At most two restarts per job, so a real outage can't cause a restart loop.
-- **How it runs:** the migration task is gone once the device is healthy, so the check is a separate one-time scheduled task (like the review task) that removes itself, and only touches the service if the log shows errors.
-- **Reported:** `status.json` records `ufaWatchdog` (checked at, found, restarted) so the tracker and the report show what happened.
+`Get-UfaSyncState` reads `Program Files (x86)\Msp Agent\logs\msp-agent-core.log`, only lines written since our install, and returns:
 
-Device-side stages in `status.json`: `staged`, `downloading`, `download-failed`, `cleaning`, `installing`, `installed-awaiting-health`, `install-failed`, `install-in-progress`, `waiting-on-windows`, `awaiting-ufa`, `healthy`, `error`.
+| State | Log shows | Action |
+|---|---|---|
+| `synced` | the inventory component `generic-asset-interrogator` was downloaded (after any failure) | Healthy |
+| `stalled` | `ERROR … configservice::FetchAllConfigurations failed to fetch configuration data: … Client.Timeout`, then `auth::requestOauthToken Oauth token response received. Status: 200` (the cloud answers again), and no component since | **Restart `MspAgent`**, record `ufa-sync-restart` in the history |
+| `blocked` | the same failure and the cloud still doesn't answer | Wait: a restart can't help while the network or auth service is down |
+| `waiting` | no failure and no component yet | Wait (normal for a while) |
+| `unknown` | no log | Wait |
+
+Limits, so a real outage can't cause a restart loop: at most **2 restarts** per job, at least **15 minutes apart**, and the installer stops waiting **120 minutes after the install** and goes on as healthy with a `warning` (`MspAgent had not synced its data … state: …`). The wait uses the existing repeating migration task (stage `awaiting-ufa`), so there's no extra scheduled task or file. `status.json` records `ufa.sync`, `ufaSyncRestarts` and `ufaSyncRestartedAt`.
+
+What the match leaves out on purpose: the cloud-instance metadata lookup (`169.254.169.254`, from `localdiscovery::`) times out on every machine that isn't in a public cloud and says nothing about connectivity, and the `client certificate missing` or `private key missing` errors seen before provisioning finishes are normal. Replaying the lab's real log through the function gave `waiting` (10:20), `blocked` (10:30 to 10:45, the auth service timing out), `stalled` from 10:53 (when the login token worked again) and `synced` at 11:28. A restart at the first check after 10:53 would have fetched the components about 35 minutes earlier than the hourly check did.
+
+Device-side stages in `status.json`: `staged`, `downloading`, `download-failed`, `cleaning`, `installing`, `installed-awaiting-health`, `install-failed`, `install-in-progress`, `waiting-on-windows`, `awaiting-ufa` (provisioning, or waiting for the data sync), `healthy`, `error`.
 
 Downloading before installing matters: if the destination can't be reached, the old agent is never removed.
 
@@ -168,7 +176,7 @@ Shape as written by the Phase 0 scripts (a real run, shortened):
 }
 ```
 
-Other fields as they occur: `lastError`, `warning` (for example the UFA not provisioning), `ufaRestartedAt`. Written atomically (temporary file, then rename).
+Other fields as they occur: `lastError`, `warning` (for example the UFA not provisioning or not syncing), `ufaRestartedAt`, `ufaSyncRestarts`, `ufaSyncRestartedAt`, `ufa.sync`. Written atomically (temporary file, then rename).
 
 It never contains the registration token. `history` is capped at the last 50 entries; `StatusJson` returns the last 30.
 
