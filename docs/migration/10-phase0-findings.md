@@ -338,6 +338,24 @@ VM-C moved back from `destination.example.com` (agent 2026.4.1.11) to `source.ex
 | The old destination asset's device link flickered (empty, then set) for a few minutes after the uninstall | Don't rely on `ncentralDevice` of a disconnected asset |
 | Both lab servers are back to their pre-test state | — |
 
+## Review period and no UFA wait (2026-10-19)
+
+VM-A, from `source.example.com` → to `source.example.com` (same site; a same-server run to exercise the new code), build 0.1.0+5e8c74b, `CleanMode=full`, `ExpectUfa=false`, `ReviewDays=1`.
+
+| Time (local) | Event |
+|---|---|
+| 20:23 | Staged (`mode reinstall, clean full, expect UFA false, review 1 days`) |
+| 20:25:55 | First task run; ~20:28 full cleanup (Windows Agent and MSP Core Agent uninstall logs), 20:28:50 reinstall |
+| 20:37:02 | Check-ins resume on the same N-central record (then 20:42, …) |
+| 20:38:31 | Ecoverse asset `CONNECTED` again (same asset ID) |
+| ~20:40 | Second task run: **healthy without waiting for the UFA**; the migration task removed itself; **N-voke Migration Cleanup** registered for 8:40 PM the next day (seen in Task Scheduler); Take Control helper task already redeployed by the new agent |
+
+| Finding | Effect |
+|---|---|
+| ✅ `ExpectUfa=false` and the review-period task work as designed | — |
+| **A same-server reinstall shows no new device**: the only remote progress signals are the Ecoverse asset dropping and returning, and the check-in time pausing and resuming | The tracker watches check-in **age** on the existing record for reinstall projects |
+| **Check-in time formats differ by endpoint**: `GET /api/devices/{id}` gives `lastApplianceCheckinTime` in UTC (`…Z`) and `lastApplianceCheckinTimeLocal` with an offset (`…-04:00`); the `GET /api/org-units/{id}/devices` listing gives `lastApplianceCheckinTime` in server-local time **without a zone** (`2026-10-19T20:37:02.1`) | Always use the zoned fields (`/api/devices/{id}`, or `…Local` with its offset); never parse the listing's value as UTC |
+
 ## Status of Phase 0 tests
 
 | # | Status |

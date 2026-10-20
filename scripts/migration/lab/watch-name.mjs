@@ -23,7 +23,12 @@ async function eco(side) {
 }
 async function nc(side) {
   const d = ((await rest(side, `/api/org-units/${SIDES[side].so}/devices?pageSize=1000`)).data ?? []).filter((x) => x.longName?.toUpperCase() === NAME.toUpperCase());
-  return d.length ? d.map((x) => `${x.deviceId} ${x.siteName} checkin=${x.lastApplianceCheckinTime ? "yes" : "never"}`).join(", ") : "none";
+  // Bucketed age, so a reinstall that keeps the same record still shows progress without logging every minute.
+  // The org-unit listing gives check-in times in server-local time without a zone; /api/devices/{id} gives UTC.
+  const age = (t) => { if (!t) return "never"; const m = (Date.now() - Date.parse(t)) / 60000; return m < 3 ? "<3m" : m < 10 ? "3-10m" : m < 60 ? "10-60m" : ">1h"; };
+  const out = [];
+  for (const x of d) out.push(`${x.deviceId} ${x.siteName} checkin=${age((await rest(side, `/api/devices/${x.deviceId}`)).data?.lastApplianceCheckinTime)}`);
+  return out.length ? out.join(", ") : "none";
 }
 let last = "";
 for (;;) {
