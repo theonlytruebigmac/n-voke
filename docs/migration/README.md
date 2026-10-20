@@ -41,9 +41,25 @@ Redeploying an N-central agent means running `WindowsAgentSetup.exe` against the
 
 ## Non-goals (for now)
 
-- Migrating configuration (customers, sites, rules, filters, users, custom property definitions). The separate RMM-to-N-central migrator project covers estate migration; this feature only moves agents.
+- Migrating configuration (customers, sites, rules, filters, users, custom property definitions). The separate RMM-to-N-central migrator project covers estate migration; this feature only moves agents. See [what carries over to the migrator](#relationship-to-the-rmm-to-n-central-migrator).
 - macOS and Linux agents. The endpoint scripts are Windows-only to start with; other operating systems are listed as manual.
 - Deploying to devices that neither N-able agent can reach. These are reported for out-of-band handling (GPO, Intune, on site).
+
+## Relationship to the RMM-to-N-central migrator
+
+This is a **standalone proof of concept**, built as a precursor to the RMM-to-N-central migrator and meant to be its inspiration, not a component it shares code with (decided 2026-10-20, [Q10](09-roadmap.md#open-questions)). So the aim is to **prove the approach and write down what was learned**, and to keep the pieces separable so they are easy to lift or re-implement. What is most reusable:
+
+| Carries over | Where it lives |
+|---|---|
+| What the platforms really do: Ecoverse script rules, REST direct-task behaviour, the unauthenticated output zip, registration-token handling, asset and device ID behaviour, the Ecoverse agent's deployment conditions and delays | [Phase 0 findings](10-phase0-findings.md), [API reference](03-api-reference.md) |
+| The scheduled-task handoff for an agent replacement: stage a job, let the task do the uninstall and install, survive the old agent going away, report from `status.json` | [Endpoint scripts](05-endpoint-scripts.md), `scripts/migration/endpoint/` |
+| Two delivery paths with a per-device choice, and the failure cases for each | [Delivery paths](04-delivery-paths.md) |
+| A device stage machine, attention states with thresholds, matching old device to new, and known delays | [Tracking](06-tracking.md) |
+| The operator workflow (connect, map, prepare, plan waves, launch, track, finish) and its wording | [User experience](07-user-experience.md) |
+| Safety and security decisions: credentials, token exposure, scrubbing, audit | [Security](08-security.md) |
+| The lab harness and tests that proved each claim | `scripts/migration/lab/`, the Pester and Rust tests |
+
+Things to keep in mind so the lift stays easy: the migration code sits in its own modules (`crates/core/src/migration/`, `ncentral/`) behind the core's API; the endpoint script is one hash-versioned file with a documented input and output contract; and every platform finding is written down with the test that proved it.
 
 ## Lineage
 
