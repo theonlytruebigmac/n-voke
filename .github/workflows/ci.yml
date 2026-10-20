@@ -43,6 +43,9 @@ jobs:
       - name: Version files in sync
         run: npm run version:check
 
+      - name: TypeScript bindings match the Rust types
+        run: npm run bindings:check
+
       - name: Type-check and build frontend
         run: npm run build
 
