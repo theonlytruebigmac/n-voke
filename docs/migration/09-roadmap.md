@@ -101,6 +101,7 @@ The Migrate page in React over new Tauri commands, mirroring the terminal app's 
 | Q13 | ~~Does the device's Ecoverse agent (UFA) move with it?~~ Not by itself: on an in-place upgrade the agent installer deliberately leaves the UFA enrolled with the source, and a UFA reinstalled over its leftover identity can't connect (`400 The SSL certificate error`). **Answered:** a full cleanup before installing (all N-able products, folders and registry keys) makes the destination provision a fresh UFA into its own tenant | Installer steps, Healthy definition | Test 0.10b (done) |
 | Q14 | Lighter alternative to full cleanup: after an in-place upgrade, does restarting `MspAgent` trigger its built-in *agent GUID doesn't match certificate* reset and re-provision into the destination tenant? Would allow `CleanMode=none` to work | Optional; less disruption | Untested |
 | Q15 | Does a queued Ecoverse task (`shouldRunWhenOnline`) ever expire? | Tracker limits | Not tested (dropped); the tracker sets its own limit and cancels |
+| Q16 | When a destination isn't linked to Ecoverse (the usual case for a new server), does its agent still install the UFA, and once the server is linked later, do existing devices provision into the tenant on their own? Known so far: the UFA is deployed by the agent as a component (like Take Control) and needs server-side prerequisites, including at least one administrator using N-able Login and analytics enabled | Destination Ecoverse handling, post-link re-match | Lab: a destination not linked to Ecoverse; or N-able teams |
 
 ## Risks
 
@@ -116,6 +117,7 @@ The Migrate page in React over new Tauri commands, mirroring the terminal app's 
 | UFA disconnected on many devices | More devices on the REST path | Per-device path choice; REST fallback |
 | Two apps driving one project | Conflicting actions | Project lease; second app read-only |
 | Device stays in the source Ecoverse tenant after the move | Can't be seen, scripted or cleaned up through the destination tenant | Full cleanup (default); **Ecoverse not moved** attention state |
+| Destination not linked to Ecoverse (usual for a new server) | Migrated devices leave Ecoverse until it's linked; no Ecoverse path to them after the move | REST-only tracking after the move; review period instead of a post-move `Cleanup`; set expectations in Connect |
 | Ecoverse delivery stalls for single tasks (seen: 31 minutes, and one task never picked up) | Slow or stuck launches | **Not picked up** after 30 minutes → cancel and relaunch, then the REST path |
 | Newly registered assets can't run scripts for minutes, and have no inventory | Cleanup and matching fail early | Retry `Asset not found`; match on the destination N-central record first |
 | Registration token visible on the REST path and possibly in the MSI log | Token misuse until it expires (one customer or site) | Prefer Ecoverse; rotate tokens after the project; scrub the MSI log (Phase 1); activation keys (Q8) |

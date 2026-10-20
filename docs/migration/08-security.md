@@ -39,7 +39,7 @@ Device-side protections ([Endpoint scripts](05-endpoint-scripts.md)):
 - The working folder is `C:\ProgramData\N-voke\Migration`, readable and writable only by SYSTEM and Administrators, with inheritance disabled. The PowerShell project's Everyone: Full Control folder let any local user plant code that ran as SYSTEM; that's fixed.
 - The installer script's hash is checked against the value baked into the launcher before each install.
 - The registration token is read from `job.json`, never placed on the scheduled task's command line.
-- The scheduled task has an expiry date and removes itself on success, so nothing keeps running as SYSTEM indefinitely.
+- The scheduled task has an expiry date and removes itself on success, so nothing keeps running as SYSTEM indefinitely. The token-bearing `job.json` is deleted the moment the device is healthy; only `status.json` and logs (no secrets) stay for the review period, removed by a one-time task.
 - The installer is downloaded only over HTTPS from the destination server named in the job.
 
 ## Audit log
@@ -65,7 +65,7 @@ PASSWORD-type script inputs are already redacted by N-voke; the registration tok
 | Action | Effect | Guard |
 |---|---|---|
 | Launch a wave | Removes the old agent **and, with full cleanup (the default), every N-central component, folder and registry key** (see [Endpoint scripts](05-endpoint-scripts.md#full-cleanup-cleanmodefull-the-default)) from every device in the wave | Wave confirmation listing counts and paths. A pilot wave is suggested first. Dry-run available. On the device, nothing is removed until the destination's installer has downloaded and passed its signature check |
-| Delete source device records | Removes the old records (`removeAgents=false`), and with them their stale Ecoverse assets | Off by default; separate confirmation; only for devices in **Cleaned up** |
+| Delete source device records | Removes the old records (`removeAgents=false`), and with them their stale Ecoverse assets | Off by default; separate confirmation; only after the review period, for devices in **Cleaned up** |
 | Delete the Ecoverse script | Removes it from Ecoverse (the REST path's repository copy is removed by hand) | Only when no device in any open project still needs it |
 | Delete a project | Removes local history | Confirmation; the audit log keeps its entries |
 

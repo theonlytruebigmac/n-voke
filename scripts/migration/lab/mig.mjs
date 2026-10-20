@@ -1,6 +1,6 @@
 // Phase 0 test 0.10: one real migration, driven by the built endpoint script.
 //   node mig.mjs publish                 publish/refresh dist/nvoke-migration.ps1 in both Ecoverse tenants
-//   node mig.mjs launch <assetId> <destOrgUnitId> [full|none] [destSide=dst] [launchSide=src]
+//   node mig.mjs launch <assetId> <destOrgUnitId> [full|none] [destSide=dst] [launchSide=src] [--expect-ufa] [--review <days>]
 //   node mig.mjs action <src|dst> <assetId> <Status|Cleanup>
 //   node mig.mjs watch                   log every stage signal until healthy (Ctrl-C to stop)
 import { SIDES as LAB, secret } from "./lab-config.mjs";
@@ -45,6 +45,7 @@ const INPUTS = [
   ["Action", "STRING", { stringValue: "Launch" }], ["DestServer", "STRING", { stringValue: "-" }], ["DestCustomerId", "STRING", { stringValue: "-" }],
   ["RegistrationToken", "PASSWORD", { stringValue: "-" }], ["MigrationId", "STRING", { stringValue: "-" }], ["LauncherVersion", "STRING", { stringValue: "-" }],
   ["TaskRepeatMinutes", "INT", { intValue: 15 }], ["TaskExpiryDays", "INT", { intValue: 14 }], ["CleanMode", "STRING", { stringValue: "full" }],
+  ["ExpectUfa", "STRING", { stringValue: "false" }], ["ReviewDays", "INT", { intValue: 7 }],
 ].map(([variable, type, value]) => ({ name: variable, variable, type, value }));
 const OUTPUTS = ["Result", "ErrorCode", "Message", "ScriptVersion", "TaskCreated", "StagedAt", "StatusJson", "TaskState", "Cleaned"].map((variable) => ({ name: variable, variable, type: "STRING" }));
 
@@ -100,6 +101,8 @@ if (cmd === "publish") {
     input("Action", "Launch"), input("DestServer", SIDES[destSide].host), input("DestCustomerId", destOrgUnit),
     input("RegistrationToken", tok.registrationToken), input("MigrationId", `lab/${launchSide}-to-${destSide}`), input("LauncherVersion", built.version),
     input("TaskRepeatMinutes", 15), input("TaskExpiryDays", 14), input("CleanMode", process.argv[5] ?? "full"),
+    input("ExpectUfa", process.argv.includes("--expect-ufa") ? "true" : "false"),
+    input("ReviewDays", process.argv.includes("--review") ? Number(process.argv[process.argv.indexOf("--review") + 1]) : 7),
   ], "N-voke migration Launch");
   state.launch = { assetId, destOrgUnit, destSide, launchSide, taskId: id, at: new Date().toISOString() };
   save();

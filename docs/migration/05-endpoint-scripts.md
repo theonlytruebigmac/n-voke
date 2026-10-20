@@ -7,9 +7,9 @@ Four roles run on devices. The working Phase 0 versions are in [`scripts/migrati
 | **Launcher** (`Action=Launch`) | Old agent (UFA or Windows Agent) | Launch | Stage files, write the job file, register the scheduled task, report back |
 | **Installer** (`installAgent.ps1`) | The scheduled task, as SYSTEM (64-bit PowerShell) | Every 15 minutes until done | Check health; if not healthy on the destination, download, clean up the old agent, install; record progress |
 | **Status probe** (`Action=Status`) | Whichever agent the device has now (the old one before the cleanup, the new one after) | On demand | Return the status file, task state and log tail |
-| **Cleanup** (`Action=Cleanup`) | New agent (UFA or Windows Agent) on the destination | After the device is healthy | Return the status file, remove the task and the folder |
+| **Cleanup** (`Action=Cleanup`) | New agent (UFA or Windows Agent) on the destination | Optional, any time after healthy | Return the status file, remove the tasks and the folder before the review period ends |
 
-On the REST path the cleanup runs on the **destination** server, so the same file is uploaded there too.
+A successful device doesn't need `Cleanup`: after the review period a one-time task on the device removes the folder (below). `Cleanup` is for collecting the record early, or for tidying up sooner; on the REST path it runs on the **destination** server, so the file has to be uploaded there too.
 
 ## Files on the device
 
@@ -41,6 +41,8 @@ The same names are used on both paths. The packager declares them as Ecoverse sc
 | `TaskRepeatMinutes` | INT | `15` | Optional |
 | `TaskExpiryDays` | INT | `14` | Optional; the task deletes itself after this |
 | `CleanMode` | STRING | `full` | `full` (default): remove every N-central component before installing ([Full cleanup](#full-cleanup-cleanmodefull-the-default)); `none`: install over the top |
+| `ExpectUfa` | STRING | `false` | `true` only when the destination is linked to Ecoverse (per project). With `false` the installer doesn't restart or wait for the UFA |
+| `ReviewDays` | INT | `7` | How long `status.json` and the logs stay on the device after it's healthy, for review, before a one-time task removes them. `0` removes them immediately |
 
 Outputs (all STRING, always one non-blank line): `Result` (`staged`, `ok`, `cleaned`, `failed`), `ErrorCode`, `Message`, `ScriptVersion`, `TaskCreated`, `StagedAt`, `StatusJson` (compact JSON, last 30 history entries), `TaskState`, `Cleaned`. The REST path prints the same fields as one `NVOKE-RESULT {json}` line.
 
@@ -93,7 +95,7 @@ Changes from the PowerShell project's version:
 Each run:
 
 1. Read `job.json` and `status.json`; increment `attempts`; record the agent's state (installed, version, service running, server, UFA running).
-2. **Healthy check.** If the Windows Agent is installed, its service is running and `ServerConfig.xml` points at `DestServer`, check the UFA: a UFA installed alongside a new agent starts before that agent registers and doesn't provision until it's restarted ([findings](10-phase0-findings.md)). If `MspAgent` exists but hasn't provisioned since our install (no `Status: 200` X.509 fetch in its `provision.log`), restart it once, wait up to 5 minutes for provisioning, and otherwise set `stage = awaiting-ufa` and check again next run (giving up with a warning after 60 minutes). Then set `stage = healthy` and `healthyAt`. Unregister the scheduled task, delete `job.json` (removing the token from disk), and exit 0. Keep `status.json` and the logs for the cleanup script to collect.
+2. **Healthy check.** If the Windows Agent is installed, its service is running and `ServerConfig.xml` points at `DestServer`, check the UFA, **only when `ExpectUfa=true`**: a UFA installed alongside a new agent starts before that agent registers and doesn't provision until it's restarted ([findings](10-phase0-findings.md)). If `MspAgent` exists but hasn't provisioned since our install (no `Status: 200` X.509 fetch in its `provision.log`), restart it once, wait up to 5 minutes for provisioning, and otherwise set `stage = awaiting-ufa` and check again next run (giving up with a warning after 60 minutes). Then set `stage = healthy` and `healthyAt`. Delete `job.json` (removing the token from disk) and the downloaded installer, register the one-time **N-voke Migration Cleanup** task for `healthyAt + ReviewDays` (it deletes `C:\ProgramData\N-voke\Migration` and itself; it runs late if the device is off that day), record `reviewUntil`, unregister the migration task, and exit 0. During the review period `status.json` and the logs can be read on the device or with `Status`. With `ReviewDays=0` the folder is removed at once.
 3. **Wait if appropriate.** Within 60 minutes of our own successful install (`installed-awaiting-health`), just record and exit. If an earlier `WindowsAgentSetup.exe` is still running (`install-in-progress`) or Windows Installer is busy (`waiting-on-windows`), record and exit.
 4. **Download** `WindowsAgentSetup.exe` from `DestServer` (BITS, then `Invoke-WebRequest`), check its Authenticode signature, and record method, size and time (`download-failed`, exit 1001, if it can't).
 5. **Full cleanup** (unless `CleanMode=none`; once per job): see below. Nothing before this step changes the device's agents.
@@ -169,7 +171,7 @@ Read-only. It returns `status.json` (`StatusJson`), the scheduled task's state, 
 It runs on the destination, through whichever agent is connected there:
 
 1. Return `status.json` and the log tail (same output shape as the status probe).
-2. Unregister the scheduled task if it still exists.
+2. Unregister the migration task and the review-period cleanup task if they still exist.
 3. Delete `C:\ProgramData\N-voke\Migration`.
 4. Return `Cleaned=true`, or what couldn't be removed.
 

@@ -15,6 +15,18 @@ A device can be launched in one of two ways. Both run the same endpoint script a
 
 Both paths need the **destination** REST JWT, because registration tokens and numeric customer IDs come only from N-central REST.
 
+## Ecoverse on the destination
+
+The launch only needs Ecoverse on the **source**. What happens after the move depends on how the destination relates to Ecoverse, which the operator states per project (a fresh destination has no devices, so it can't be detected):
+
+| Setup | Typical when | After the move |
+|---|---|---|
+| **Destination not linked to Ecoverse** (default) | A new N-central server, linked to the partner's tenant only after the source is decommissioned, or later by N-able | The full cleanup removes the device's UFA, and an unlinked server can't provision a new one, so **the device leaves Ecoverse until the destination is linked**. Tracking after the move is REST-only (destination appearance and check-ins); the installer doesn't wait for a UFA (`ExpectUfa=false`); `Status`/`Cleanup` aren't needed for a successful device (see the review period in [Endpoint scripts](05-endpoint-scripts.md)) |
+| Destination linked to the **same** tenant | N-able links the new server before the migration | The device reappears in the same tenant as a **new asset** linked to the destination server; one Ecoverse key covers both sides |
+| Destination linked to **another** tenant | Separate partner tenants (the Phase 0 lab) | As above, in the other tenant; needs that tenant's key too |
+
+Even a linked destination only deploys UFAs when the server meets Ecoverse's prerequisites (❓ known so far: at least one administrator signs in with N-able Login, and analytics is enabled). The UFA is installed by the agent as a component, like Take Control, not by the main installer.
+
 **No AMPs.** Ecoverse scripting doesn't run AMPs: its repository holds plain scripts with declared **input** and **output** variables (confirmed in the Ecoverse UI, *Scripting → Add script*). The REST path doesn't need one either, because a direct task can run a repository **Script**. So N-voke never builds, publishes or wraps an AMP, and needs no SOAP. The REST API has no endpoint for uploading repository items, which is why the REST path's script is uploaded by hand.
 
 ## Choosing a path
@@ -46,7 +58,7 @@ Rules:
 4. **No double launch.** A device is launched on one path at a time. Switching paths after a launch requires the first launch to have ended (failed, cancelled or expired). The scheduled task's fixed name also guards against duplicates on the device itself.
 5. **Same-server reinstall** works on either path; source and destination are the same server (confirmed, test 0.12).
 6. **The REST path is opt-in per server.** Until the operator has uploaded the script and entered its item ID for the source server, devices that would need the REST path are shown as **Blocked: upload the script** instead of being launched. A project that never uses the REST path never asks for an upload.
-7. **Launch from where the device is now.** The launch goes through the tenant (or server) the device currently belongs to; `Status` before the move goes there too, and `Cleanup` after the move goes through the **destination** (its Ecoverse tenant, or its REST server). A move back runs the same way in reverse (confirmed).
+7. **Launch from where the device is now.** The launch goes through the tenant (or server) the device currently belongs to; `Status` before the move goes there too. After the move, `Status` and `Cleanup` go through the **destination**: its Ecoverse tenant when it's linked, otherwise its REST path (which needs the script uploaded to the destination's repository), or they aren't run at all and the device cleans up after the review period. A move back runs the same way in reverse (confirmed).
 
 ## One script, two packages
 
@@ -71,7 +83,7 @@ flowchart LR
 | Step | Ecoverse | REST |
 |---|---|---|
 | Group devices | By destination customer or site (inputs are per call) | By device (one call each) |
-| Inputs | **All** of `Action`, `DestServer`, `DestCustomerId`, `RegistrationToken` (PASSWORD), `MigrationId`, `LauncherVersion`, `TaskRepeatMinutes`, `TaskExpiryDays`, `CleanMode` (Ecoverse refuses a run that omits any; unused ones are `-`) | The same names, as `-Name value` pairs in the `CommandLine` parameter. The registration token is therefore visible in the task's details in N-central (see [Security](08-security.md)) |
+| Inputs | **All** of `Action`, `DestServer`, `DestCustomerId`, `RegistrationToken` (PASSWORD), `MigrationId`, `LauncherVersion`, `TaskRepeatMinutes`, `TaskExpiryDays`, `CleanMode`, `ExpectUfa`, `ReviewDays` (Ecoverse refuses a run that omits any; unused ones are `-`) | The same names, as `-Name value` pairs in the `CommandLine` parameter. The registration token is therefore visible in the task's details in N-central (see [Security](08-security.md)) |
 | Throttle | A few calls per second; 429 and 503 are retried; a launch is never retried automatically (it may have created tasks) | A semaphore at 30 concurrent direct-task calls, 429 retried |
 | Record | The task ID per device (decoded from the returned IDs) | The task ID per device |
 | Visible in Activity | Yes, as a normal N-voke job | Shown in the migration page only |

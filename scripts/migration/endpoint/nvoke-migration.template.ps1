@@ -25,6 +25,8 @@ if (-not $Action) { $Action = 'Launch' }
 if (-not $TaskRepeatMinutes) { $TaskRepeatMinutes = 15 }
 if (-not $TaskExpiryDays) { $TaskExpiryDays = 14 }
 if (-not $CleanMode -or $CleanMode -eq '-') { $CleanMode = 'full' }
+if (-not $ExpectUfa -or $ExpectUfa -eq '-') { $ExpectUfa = 'false' }
+if ([string]$ReviewDays -eq '' -or $ReviewDays -eq '-') { $ReviewDays = 7 }
 
 # ---- outputs (every one always has a single-line value) -----------------------
 $Result = 'failed'
@@ -38,6 +40,7 @@ $Cleaned = 'false'
 
 $Root = [Environment]::GetFolderPath('CommonApplicationData') + '\N-voke\Migration'
 $TaskName = 'N-voke Agent Migration'
+$ReviewTaskName = 'N-voke Migration Cleanup'
 $InstallerPath = $Root + '\installAgent.ps1'
 $InstallerB64 = '__INSTALLER_B64__'
 $InstallerSha256 = '__INSTALLER_SHA256__'
@@ -81,6 +84,8 @@ function Invoke-Launch {
     if ([string]$DestServer -notmatch '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$') { throw [System.ArgumentException] "DestServer '$DestServer' is not a host name" }
     if ([string]$DestCustomerId -notmatch '^\d+$') { throw [System.ArgumentException] "DestCustomerId '$DestCustomerId' is not numeric" }
     if ([string]$RegistrationToken -notmatch '^[A-Za-z0-9-]{8,128}$') { throw [System.ArgumentException] 'RegistrationToken is missing or malformed' }
+    if ($ExpectUfa -notin 'true', 'false') { throw [System.ArgumentException] "ExpectUfa '$ExpectUfa' must be true or false" }
+    if ([string]$ReviewDays -notmatch '^\d{1,3}$') { throw [System.ArgumentException] "ReviewDays '$ReviewDays' must be 0-999" }
     if ($CleanMode -notin 'full', 'none') { throw [System.ArgumentException] "CleanMode '$CleanMode' must be full or none" }
     if ($LauncherVersion -and $LauncherVersion -ne '-' -and $LauncherVersion -ne $ScriptVersion) { throw [System.ArgumentException] "N-voke expected script $LauncherVersion but this is ${ScriptVersion}: re-publish or re-upload the script" }
 
@@ -104,6 +109,8 @@ function Invoke-Launch {
         destServer        = $DestServer
         destCustomerId    = $DestCustomerId
         cleanMode         = $CleanMode
+        expectUfa         = $ExpectUfa
+        reviewDays        = [int]$ReviewDays
         registrationToken = $RegistrationToken
         createdAt         = (Get-Date).ToUniversalTime().ToString('o')
     }
@@ -114,7 +121,7 @@ function Invoke-Launch {
         schema = 1; migrationId = $job.migrationId; launcherVersion = $ScriptVersion; mode = $job.mode
         sourceServer = $currentServer; destServer = $DestServer; destCustomerId = $DestCustomerId
         stage = 'staged'; stagedAt = $stagedAt; attempts = 0
-        history = @([ordered]@{ at = $stagedAt; event = 'staged'; detail = "mode $($job.mode), clean $CleanMode, from $currentServer" })
+        history = @([ordered]@{ at = $stagedAt; event = 'staged'; detail = "mode $($job.mode), clean $CleanMode, expect UFA $ExpectUfa, review $ReviewDays days, from $currentServer" })
     }
     $status | ConvertTo-Json -Depth 5 | Set-Content -Path (Join-Path $Root 'status.json') -Encoding UTF8
 
@@ -152,6 +159,7 @@ function Invoke-Status {
 function Invoke-Cleanup {
     $script:StatusJson = Get-StatusSummary
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName $ReviewTaskName -Confirm:$false -ErrorAction SilentlyContinue
     if (Test-Path $Root) { Remove-Item -Path $Root -Recurse -Force }
     $script:TaskState = Get-TaskSummary
     $script:Cleaned = if ((-not (Test-Path $Root)) -and $script:TaskState -eq 'absent') { 'true' } else { 'false' }

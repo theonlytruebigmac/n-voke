@@ -38,9 +38,9 @@ stateDiagram-v2
 | **Staged** | The launcher ran and registered the scheduled task |
 | **Agent removed** | The old agent went quiet: the cleanup and install are running |
 | **Registered** | A matching device exists on the destination |
-| **Healthy** | That device is checking in to the destination and, when the destination has Ecoverse, its new asset there is `CONNECTED` |
-| **Cleaned up** | The cleanup script ran and returned the device's status file |
-| **Retired** | The old source record is tagged as migrated, or deleted (optional, needs approval) |
+| **Healthy** | That device is checking in to the destination and, when the destination is linked to Ecoverse, its new asset there is `CONNECTED` |
+| **Cleaned up** | The device's records are gone: `Cleanup` ran (and returned `status.json`), or the review period ended and the device removed them itself |
+| **Retired** | The old source record is tagged as migrated, or deleted (optional; only after the review period, and with approval) |
 
 ## Failure and attention states
 
@@ -51,7 +51,7 @@ stateDiagram-v2
 | **Stuck staged** | Staged, but the source agent still checks in 90 minutes later | Task not firing, destination unreachable from the device, installer failing before the uninstall, or a slow download | Run the status probe; show `status.json` and the task's last result |
 | **Lost** | Agent removed, nothing on the destination after 4 hours | Install failed after the uninstall, or a very slow machine. The task keeps retrying | Keep watching; flag for out-of-band follow-up; export the list |
 | **Waiting on Windows** | The installer reports `waiting-on-windows` (Windows Installer busy, e.g. Windows Update) | Another installation in progress | Keep waiting; it retries every run and doesn't count toward Lost |
-| **Ecoverse not moved** | Healthy in N-central on the destination, but no `CONNECTED` asset in the destination tenant 60 minutes later (or the asset is still in the source tenant) | `CleanMode=none` with an in-place upgrade (the UFA keeps its source enrolment), or the new UFA not provisioning | Probe through whichever tenant still sees it; restart `MspAgent` (the installer does this once); relaunch with full cleanup |
+| **Ecoverse not moved** | Only for projects whose destination is linked to Ecoverse: healthy in N-central on the destination, but no `CONNECTED` asset in the destination tenant 60 minutes later (or the asset is still in the source tenant). With an unlinked destination, leaving Ecoverse is expected and shown as information, not attention | `CleanMode=none` with an in-place upgrade (the UFA keeps its source enrolment), or the new UFA not provisioning | Probe through whichever tenant still sees it; restart `MspAgent` (the installer does this once); relaunch with full cleanup |
 | **Wrong place** | Registered under a customer other than the mapped one | Mapping error, wrong customer ID input | Show the expected and actual customer; leave it for the operator |
 | **Ambiguous match** | More than one destination device could be this one | Duplicate host names, imaged machines | Ask the operator to choose |
 | **Duplicate launch** | A second launch would overlap a live one | Operator action, path switch | Blocked unless the first launch has ended |
@@ -64,8 +64,8 @@ stateDiagram-v2
 | Launched → Launch failed | Execution failed or non-zero exit; task cancelled or expired (existing N-voke rules) | `/status/details` failed or expired |
 | Staged → Agent removed | Source asset `DISCONNECTED` (with full cleanup this happens about 3 minutes into the first install run, when the UFA is removed) **or** the device already appearing on the destination. The source's `lastApplianceCheckinTime` alone is not reliable: it drifts by fractions of a second while a device is off, a slow device keeps checking in for minutes while it shuts down, and it jumped by an hour around a move | Destination appearance, or `lastApplianceCheckinTime` older than the threshold |
 | → Registered | First signal: a device with the same host name appears in the mapped destination org unit (`GET /api/org-units/{id}/devices`), about a minute after the install starts and before its first check-in. Confirmed by identity (serial, MAC from `/api/devices/{id}/assets`). Later, the Ecoverse asset whose `ncentralDevice.server.origin` is the destination: a **new asset ID** in the destination's tenant (unless the N-central record was kept, as on a same-server reinstall), which appears only once the UFA provisions there and has empty inventory at first | `GET /api/org-units/{id}/devices` on the mapped destination customer, matched by identity |
-| Registered → Healthy | Destination `lastApplianceCheckinTime` within 2 × the check-in interval (first check-in came 5–6 minutes after the install in the lab) **and** the new destination asset `CONNECTED` (4–5 minutes after the first check-in). The installer's own `stage = healthy` (via `Status`) confirms it | Destination check-in via REST; `Status` through the destination server's REST path |
-| Healthy → Cleaned up | Cleanup task output `Cleaned = true`; `StatusJson` stored | `Cleaned` and `StatusJson` from the `NVOKE-RESULT {json}` line (the script must be uploaded to the destination server too) |
+| Registered → Healthy | Destination `lastApplianceCheckinTime` within 2 × the check-in interval (first check-in came 5–6 minutes after the install in the lab), **plus**, only when the destination is linked to Ecoverse, the new destination asset `CONNECTED` (2–5 minutes after the first check-in). The installer's own `stage = healthy` (via `Status`, where it can run) confirms it | Destination check-in via REST; `Status` through the destination server's REST path |
+| Healthy → Cleaned up | `Cleanup` output `Cleaned = true` (`StatusJson` stored), or `healthyAt + ReviewDays` has passed (the device removes its own records; nothing to poll) | `Cleaned` and `StatusJson` from the `NVOKE-RESULT {json}` line (the script must be uploaded to the destination server too) |
 | Cleaned up → Retired | Optional (approval needed): `DELETE /api/devices/{id}?removeAgents=false` on the source (confirmed: record removed, and its stale Ecoverse asset disappears within seconds). Without it, the source asset is tagged `nvoke:migrated` and the record is left for the operator | The same |
 
 ## Matching the new device to the old one

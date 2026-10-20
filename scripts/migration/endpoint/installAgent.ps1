@@ -19,6 +19,7 @@ $StatusPath = Join-Path $Root 'status.json'
 $LogDir = Join-Path $Root 'logs'
 $SetupPath = Join-Path $Root 'WindowsAgentSetup.exe'
 $TaskName = 'N-voke Agent Migration'
+$ReviewTaskName = 'N-voke Migration Cleanup'
 $AgentDir = [Environment]::GetFolderPath('ProgramFilesX86') + '\N-able Technologies\Windows Agent'
 $ServerConfigPath = Join-Path $AgentDir 'config\ServerConfig.xml'
 $HealthGraceMinutes = 60
@@ -229,7 +230,8 @@ try {
         $ufaProvisioned = & $testProvisioned
         $status.ufa = [ordered]@{ present = [bool]$ufaService; running = $agent.UfaRunning; provisioned = $ufaProvisioned }
 
-        if ($ufaService -and -not $ufaProvisioned) {
+        # Only wait for the UFA when the destination is linked to Ecoverse (the project says so); otherwise it can't provision there.
+        if ($job.expectUfa -eq 'true' -and $ufaService -and -not $ufaProvisioned) {
             if (-not $status.ufaRestartedAt) {
                 Restart-Service -Name 'MspAgent' -Force -ErrorAction SilentlyContinue
                 $status.ufaRestartedAt = (Get-Date).ToUniversalTime().ToString('o')
@@ -261,9 +263,26 @@ try {
         $status.healthyAt = (Get-Date).ToUniversalTime().ToString('o')
         Add-History $status 'healthy' "agent $($agent.Version) on $($agent.Server); UFA present $([bool]$ufaService), provisioned $ufaProvisioned"
         Save-Status $status
+        # The token goes now. status.json and the logs stay for the review period, then a one-time task removes the folder.
         Remove-Item $JobPath -Force -ErrorAction SilentlyContinue
         Remove-Item $SetupPath -Force -ErrorAction SilentlyContinue
+        $reviewDays = [int]$job.reviewDays
+        if ($reviewDays -gt 0) {
+            $reviewUntil = (Get-Date).AddDays($reviewDays)
+            $command = "Remove-Item -LiteralPath '$Root' -Recurse -Force -ErrorAction SilentlyContinue; Unregister-ScheduledTask -TaskName '$ReviewTaskName' -Confirm:`$false"
+            $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+            $ps = Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            $action = New-ScheduledTaskAction -Execute $ps -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encoded"
+            $trigger = New-ScheduledTaskTrigger -Once -At $reviewUntil
+            $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
+            $principal = New-ScheduledTaskPrincipal -UserId 'S-1-5-18' -LogonType ServiceAccount -RunLevel Highest
+            Register-ScheduledTask -TaskName $ReviewTaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description "N-voke: remove migration records after the review period" -Force | Out-Null
+            $status.reviewUntil = $reviewUntil.ToUniversalTime().ToString('o')
+            Add-History $status 'review-period' "status.json and logs kept until $($status.reviewUntil), then removed"
+            Save-Status $status
+        }
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+        if ($reviewDays -le 0) { Remove-Item -LiteralPath $Root -Recurse -Force -ErrorAction SilentlyContinue }
         exit 0
     }
 
