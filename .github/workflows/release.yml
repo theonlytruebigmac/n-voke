@@ -187,6 +187,14 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      # Signs the app with the same certificate every release, so the keychain's "Always Allow" survives updates.
+      - name: Import the macOS signing certificate
+        if: matrix.platform == 'macos-latest'
+        env:
+          MACOS_SIGNING_CERT_P12: ${{ secrets.MACOS_SIGNING_CERT_P12 }}
+          MACOS_SIGNING_CERT_PASSWORD: ${{ secrets.MACOS_SIGNING_CERT_PASSWORD }}
+        run: scripts/ci/macos-signing.sh
+
       - name: Build and upload installers
         uses: tauri-apps/tauri-action@v0
         env:

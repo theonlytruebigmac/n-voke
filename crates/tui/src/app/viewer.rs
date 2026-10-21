@@ -197,8 +197,11 @@ pub(crate) mod tests {
         Local.with_ymd_and_hms(2026, 10, 17, 13, 5, 9).unwrap()
     }
 
+    /// A fresh directory of its own for each call. Tests run in parallel in one process, and every `viewer_app()` asks
+    /// for one, so a name that was only unique per process let one test delete another's folder mid-test.
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("nvoke-viewer-test-{name}-{}", std::process::id()));
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!("nvoke-viewer-test-{name}-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }

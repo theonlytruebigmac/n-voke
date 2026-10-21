@@ -80,7 +80,7 @@ The app keeps these on your machine:
 
 | What | Where |
 |---|---|
-| API key and the encryption key for local data | OS keychain, service `com.fraziersystems.nable-script-runner` (accounts `api-key` and `data-key`) |
+| API key and the encryption key for local data | OS keychain, service `com.fraziersystems.nable-script-runner` (one item, `secrets`, holding every secret, including `api-key` and `data-key`; older separate items are moved in on first use) |
 | Settings, cache, jobs, audit log | The app data directory, named after the bundle identifier `com.fraziersystems.nable-script-runner` |
 
 The app data directory is:

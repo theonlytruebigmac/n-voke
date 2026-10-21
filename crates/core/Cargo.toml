@@ -1,6 +1,6 @@
 [package]
 name = "nvoke-core"
-version = "0.2.0"
+version = "0.2.1"
 license = "MIT"
 description = "Shared core of N-voke: API client, settings, keychain, encrypted local storage and audit log"
 authors = ["theonlytruebigmac"]
