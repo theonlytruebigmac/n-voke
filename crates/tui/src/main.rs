@@ -4,8 +4,6 @@
 mod app;
 mod help;
 mod input;
-mod migrate_cli;
-mod migrate_ui;
 mod output_view;
 mod picker;
 mod run_ui;
@@ -32,11 +30,6 @@ OPTIONS:
                      NVOKE_DRY_RUN=1 does the same.
     -h, --help       Show this help
     -V, --version    Show the version
-
-COMMANDS (instead of the app):
-    migrate-server   Add, list or remove the N-central servers used for agent migration
-    migrate-plan     Print the plan for a migration without changing anything
-                     (run `nvoke migrate-plan --help` for the options)
 ";
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -60,10 +53,6 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Cli, String> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if migrate_cli::is_migrate_command(args.first().map(String::as_str)) {
-        return run_migrate_command(&args);
-    }
     let cli = match parse_args(std::env::args().skip(1)) {
         Ok(cli) => cli,
         Err(message) => {
@@ -94,39 +83,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let result = app::App::new(core, runtime.handle().clone()).run(&mut terminal);
     ratatui::restore();
     Ok(result?)
-}
-
-/// The migration commands print and exit; they never start the terminal app.
-fn run_migrate_command(args: &[String]) -> Result<(), Box<dyn Error>> {
-    if args.iter().any(|a| a == "-h" || a == "--help") {
-        print!("{}", migrate_cli::HELP);
-        return Ok(());
-    }
-    // --dry-run (or -n) applies to every migration command: reads work, every change is held back and listed.
-    let dry_run = args.iter().any(|a| a == "--dry-run" || a == "-n");
-    let args: Vec<String> = args.iter().filter(|a| *a != "--dry-run" && *a != "-n").cloned().collect();
-    let command = match migrate_cli::parse(&args) {
-        Ok(command) => command,
-        Err(message) => {
-            eprintln!("{message}");
-            std::process::exit(2);
-        }
-    };
-    let runtime = tokio::runtime::Runtime::new()?;
-    let core = Arc::new(Core::new(env!("CARGO_PKG_VERSION"))?);
-    if dry_run {
-        core.set_dry_run(true);
-    }
-    match runtime.block_on(migrate_cli::run(&core, command)) {
-        Ok(text) => {
-            print!("{text}");
-            Ok(())
-        }
-        Err(message) => {
-            eprintln!("{message}");
-            std::process::exit(1);
-        }
-    }
 }
 
 #[cfg(test)]
