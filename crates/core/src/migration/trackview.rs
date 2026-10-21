@@ -230,6 +230,8 @@ pub struct DeviceDetail {
     /// A launch was sent and its answer lost: it may be running.
     pub launch_unsure: bool,
     pub ecoverse: Option<EcoState>,
+    /// Why Ecoverse doesn't show it, when it doesn't: where it was looked and what was found there.
+    pub ecoverse_note: Option<String>,
     pub waiting_for_ecoverse: bool,
     pub candidates: Vec<DeviceCandidate>,
     pub actions: Vec<DeviceAction>,
@@ -397,6 +399,7 @@ pub fn device_detail(project: &Project, index: usize, source_names: &HashMap<Str
         last_error: d.last_error.clone(),
         launch_unsure: d.launch_unsure,
         ecoverse: d.ecoverse,
+        ecoverse_note: d.ecoverse_note.clone(),
         waiting_for_ecoverse: project.waiting_for_ecoverse(d),
         candidates: d.match_candidates.iter().map(|MatchCandidate { device_id, name }| DeviceCandidate { device_id: device_id.clone(), name: name.clone() }).collect(),
         actions: actions_for(d),

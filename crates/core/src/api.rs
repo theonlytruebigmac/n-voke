@@ -99,7 +99,15 @@ pub fn interpret(status: u16, body: &Value, tolerate_errors: bool) -> Result<Rep
     }
     let usable_despite_errors = tolerate_errors && data.is_some();
     if !errors.is_empty() && !usable_despite_errors {
-        return Err(errors.join("; "));
+        // One failing field on each of many assets repeats the same message; say it once with how many.
+        let mut counted: Vec<(String, usize)> = vec![];
+        for e in &errors {
+            match counted.iter_mut().find(|(m, _)| m == e) {
+                Some((_, n)) => *n += 1,
+                None => counted.push((e.clone(), 1)),
+            }
+        }
+        return Err(counted.into_iter().map(|(m, n)| if n > 1 { format!("{m} (x{n})") } else { m }).collect::<Vec<_>>().join("; "));
     }
     if status >= 400 {
         return Err(format!("The N-able API returned HTTP {status}."));

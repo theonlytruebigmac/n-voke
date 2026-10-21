@@ -23,6 +23,11 @@ const MUTATION_ERRORS: &str = "errors { __typename ... on Error { message } }";
 
 /// Fields that tie an asset to its N-central device and let old and new devices be matched.
 /// One request: 30-odd fields, well inside the 130-field limit.
+/// What identifies an asset and says whether its agent is connected, without the inventory. An asset whose agent hasn't
+/// sent its inventory yet can make the inventory fields fail ("Internal error") for that asset, which fails the whole
+/// search; these fields always read.
+const ECO_DEVICE_BASE_FIELDS: &str = "id name agentConnection { status } ncentralDevice { deviceId server { id origin } }";
+
 const ECO_DEVICE_FIELDS: &str = "id name agentConnection { status } \
     ncentralDevice { deviceId server { id origin } } \
     systemInfo { hostname serialNumber } networkInterfaces { macAddress } \
@@ -222,10 +227,22 @@ impl Core {
     /// Every asset in the organizations, with the fields that identify it. Follows pagination.
     /// With no organizations, every asset the key can see; callers pick their server's devices by host.
     pub async fn eco_devices(&self, org_ids: &[String]) -> Result<Vec<EcoDevice>, String> {
-        if org_ids.is_empty() {
-            return self.fetch_all_pages::<EcoDevice>("assetSearch", "", ECO_DEVICE_FIELDS, json!({}), "").await;
+        match self.eco_devices_with(org_ids, ECO_DEVICE_FIELDS).await {
+            Ok(devices) => Ok(devices),
+            // The inventory fields failed: read what always reads. The assets come back without their inventory, which
+            // is exactly "registered, but no asset data yet". If even that fails, the first error is the one to report.
+            Err(first) => match self.eco_devices_with(org_ids, ECO_DEVICE_BASE_FIELDS).await {
+                Ok(devices) => Ok(devices),
+                Err(_) => Err(first),
+            },
         }
-        self.fetch_all_pages::<EcoDevice>("assetSearch", "inOrganizations: $orgIds", ECO_DEVICE_FIELDS, json!({ "orgIds": org_ids }), ", $orgIds: [ID!]!").await
+    }
+
+    async fn eco_devices_with(&self, org_ids: &[String], fields: &str) -> Result<Vec<EcoDevice>, String> {
+        if org_ids.is_empty() {
+            return self.fetch_all_pages::<EcoDevice>("assetSearch", "", fields, json!({}), "").await;
+        }
+        self.fetch_all_pages::<EcoDevice>("assetSearch", "inOrganizations: $orgIds", fields, json!({ "orgIds": org_ids }), ", $orgIds: [ID!]!").await
     }
 
     /// Creates the script, or replaces the one with `existing_id`, and returns its ID.
@@ -393,5 +410,34 @@ mod tests {
         assert_eq!((log[0].action.as_str(), log[0].summary.as_str()), ("script.delete", "Deleted script N-voke migration"));
         assert_eq!((log[1].action.as_str(), log[1].summary.as_str()), ("script.cancel", "Cancelled 2 script tasks"));
         assert_eq!(log[1].variables["ids"], json!(["t1", "t2"]));
+    }
+
+    #[tokio::test]
+    async fn assets_without_inventory_still_read_when_the_inventory_fields_fail_for_them() {
+        let core = Core::for_tests("eco-inventory");
+        // Ecoverse answers "Internal error" once per asset for the inventory fields, as it does before an agent has sent any.
+        core.set_graphql_fake(|query, _| {
+            let node = |id: &str, dev: &str| json!({ "id": id, "name": id, "agentConnection": { "status": "CONNECTED" }, "ncentralDevice": { "deviceId": dev, "server": { "id": "s", "origin": "https://dst.example.com" } } });
+            let nodes = json!([node("a1", "1"), node("a2", "2")]);
+            let page = json!({ "totalCount": 2, "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": nodes });
+            if query.contains("systemInfo") {
+                (200, json!({ "data": null, "errors": [{ "message": "Internal error" }, { "message": "Internal error" }] }).to_string())
+            } else {
+                (200, json!({ "data": { "page": page } }).to_string())
+            }
+        });
+        let devices = core.eco_devices(&[]).await.unwrap();
+        assert_eq!(devices.len(), 2);
+        assert!(devices.iter().all(|d| d.connected() && !d.has_data()), "connected, with no data: waiting for Ecoverse");
+        let seen = dest_asset_states(&devices, "dst.example.com");
+        assert!(seen.values().all(|s| s.connected && !s.has_data));
+    }
+
+    #[tokio::test]
+    async fn a_search_that_fails_both_ways_reports_the_first_error_once_per_message() {
+        let core = Core::for_tests("eco-fails");
+        core.set_graphql_fake(|_, _| (200, json!({ "data": null, "errors": [{ "message": "Internal error" }, { "message": "Internal error" }, { "message": "Internal error" }] }).to_string()));
+        let err = core.eco_devices(&[]).await.unwrap_err();
+        assert_eq!(err, "Internal error (x3)");
     }
 }
