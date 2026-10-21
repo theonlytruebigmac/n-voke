@@ -149,6 +149,12 @@ impl RestError {
     pub fn is_dry_run(&self) -> bool {
         self.message == DRY_RUN_ERROR
     }
+
+    /// A create call for a name that is taken. N-central answers 400 with `OrganizationUnitAlreadyExistException` (the
+    /// spec says 409), so both count.
+    pub fn is_already_there(&self) -> bool {
+        self.status == Some(409) || self.message.contains("AlreadyExist")
+    }
 }
 
 impl std::fmt::Display for RestError {
@@ -575,6 +581,40 @@ impl Core {
             .ok_or_else(|| RestError::unknown_outcome(None, format!("{host} accepted the task but returned no task ID.")))
     }
 
+    /// Creates a customer under a service organization and returns its ID. A name that is already taken is a 409.
+    pub async fn ncentral_create_customer(&self, server_id: &str, service_org_id: &str, name: &str) -> Result<String, RestError> {
+        let so = check_id(service_org_id)?;
+        let host = self.ncentral_server(server_id)?.host;
+        let meta = AuditMeta { action: "migration.structure.customer".into(), summary: format!("Created the customer {name} on {host}") };
+        let path = format!("/api/service-orgs/{so}/customers");
+        let body = self.ncentral_call(server_id, Call::write(Method::Post, &path, Some(json!({ "customerName": name })), meta)).await?;
+        created_id(&body, "customerId", &host)
+    }
+
+    /// Creates a site under a customer and returns its ID. The site endpoint is marked as a preview in N-central's spec.
+    pub async fn ncentral_create_site(&self, server_id: &str, customer_id: &str, name: &str) -> Result<String, RestError> {
+        let customer = check_id(customer_id)?;
+        let host = self.ncentral_server(server_id)?.host;
+        let meta = AuditMeta { action: "migration.structure.site".into(), summary: format!("Created the site {name} on {host}") };
+        let path = format!("/api/customers/{customer}/sites");
+        let body = self.ncentral_call(server_id, Call::write(Method::Post, &path, Some(json!({ "siteName": name })), meta)).await?;
+        created_id(&body, "siteId", &host)
+    }
+
+    /// Removes a device's record from the server, leaving the device itself alone (`removeAgents=false`: nothing is sent to
+    /// it). The record then reads 404. Returns whether there was a record to remove.
+    pub async fn ncentral_delete_device_record(&self, server_id: &str, device_id: &str, label: &str) -> Result<bool, RestError> {
+        let id = check_id(device_id)?;
+        let host = self.ncentral_server(server_id)?.host;
+        let meta = AuditMeta { action: "migration.retire".into(), summary: format!("Removed the old record of {label} from {host}") };
+        let path = format!("/api/devices/{id}");
+        match self.ncentral_call(server_id, Call::write(Method::Delete, &path, None, meta).with_query("removeAgents", false)).await {
+            Ok(_) => Ok(true),
+            Err(e) if e.status == Some(404) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Creates a registration token for a customer or site that has none, and returns it.
     /// A valid token is left unchanged (confirmed in the lab), so this is safe to call
     /// for one that may exist; an expired one's behaviour is not yet known. The token
@@ -592,6 +632,14 @@ impl Core {
         self.ncentral_call(server_id, call).await?;
         self.ncentral_registration_token(server_id, id).await
     }
+}
+
+/// The ID a create call answered with, in the body or under `data`. A 2xx without one is an unknown outcome: it may exist.
+fn created_id(body: &Value, key: &str, host: &str) -> Result<String, RestError> {
+    let found = body.get(key).or_else(|| body.pointer(&format!("/data/{key}")));
+    found
+        .and_then(|v| v.as_str().map(String::from).or_else(|| v.as_u64().map(|n| n.to_string())))
+        .ok_or_else(|| RestError::unknown_outcome(None, format!("{host} accepted the request but returned no {key}. Check whether it was created before trying again.")))
 }
 
 /// The Windows Agent's `softwareId` from the installer list, or the known default.

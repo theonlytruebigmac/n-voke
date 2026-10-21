@@ -90,6 +90,7 @@ impl Core {
         let dest = self.ncentral_server(dest_server_id)?;
         let id = format!("mig-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
         let mut project = Project::new(id, name, &source.id, &dest.id, dest_ecoverse, Utc::now());
+        project.options = self.migration_settings().defaults;
         self.migration_save(&mut project).await?;
         self.record(&AuditEntry::new(
             "migration.project.create",
@@ -297,5 +298,50 @@ mod tests {
         core.migration_release_lease(&project.id, "app-1").await.unwrap();
         assert!(core.migration_lease(&project.id, "app-2").await.unwrap());
         assert_eq!(core.migration_list().await.unwrap().len(), 1, "a lease isn't mistaken for a project");
+    }
+
+    /// Not a check: prints how long saving and loading a large project take, for `cargo test scale -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore]
+    async fn scale_of_the_project_store() {
+        use crate::migration::planner::{DeliveryPath, PlannedDevice};
+        for count in [1_000usize, 10_000] {
+            let core = Core::for_tests("scale");
+            let src = core.save_ncentral_server(None, "Old", "src.example.com", Some("j1".into()), None).await.unwrap();
+            let dst = core.save_ncentral_server(None, "New", "dst.example.com", Some("j2".into()), None).await.unwrap();
+            let mut p = core.migration_create("Big", &src.id, &dst.id, DestEcoverse::NotLinked).await.unwrap();
+            let now = Utc::now();
+            let planned: Vec<PlannedDevice> = (0..count)
+                .map(|i| PlannedDevice {
+                    device_id: format!("{}", 100_000 + i),
+                    name: format!("WORKSTATION-{i:05}"),
+                    source_customer_id: Some("10".into()),
+                    source_site_id: Some("11".into()),
+                    dest_org_unit_id: Some("110".into()),
+                    path: Some(DeliveryPath::Ecoverse),
+                    asset_id: Some(format!("asset-{i}")),
+                    blockers: vec![],
+                    warnings: vec![],
+                    excluded: false,
+                })
+                .collect();
+            p.add_planned(&planned, now);
+            for d in p.devices.iter_mut() {
+                for e in 0..30 {
+                    d.record(now, "poll", &format!("seen on the new server, check-in {e} minutes ago, Ecoverse reporting"));
+                }
+            }
+            let t = std::time::Instant::now();
+            core.migration_save(&mut p).await.unwrap();
+            let save = t.elapsed();
+            let size = std::fs::metadata(core.paths.store_dir().join(format!("migration-{}.enc", p.id))).map(|m| m.len()).unwrap_or(0);
+            let t = std::time::Instant::now();
+            let loaded = core.migration_load(&p.id).await.unwrap().unwrap();
+            let load = t.elapsed();
+            let t = std::time::Instant::now();
+            let view = crate::migration::trackview::track_view(&loaded, &Default::default(), &Default::default(), &Default::default());
+            let track = t.elapsed();
+            println!("{count} devices: file {:.1} MB, save {save:?}, load {load:?}, track page {track:?} (rows {})", size as f64 / 1e6, view.rows.len());
+        }
     }
 }

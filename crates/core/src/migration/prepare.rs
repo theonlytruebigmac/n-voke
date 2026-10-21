@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use chrono::Utc;
 use serde_json::json;
 
 use super::{
@@ -76,6 +77,8 @@ pub struct PrepareView {
     pub script_name: String,
     pub file_name: String,
     pub delivery: Delivery,
+    /// A wave has launched, so the delivery can't be changed any more.
+    pub delivery_locked: bool,
     pub ecoverse: EcoverseCard,
     pub rest: RestCard,
     pub options: ProjectOptions,
@@ -114,6 +117,7 @@ pub fn prepare_view(project: &Project, package: &Package, source_label: &str, so
         script_name: package.script_name(),
         file_name: package.file_name(),
         delivery: project.options.delivery,
+        delivery_locked: project.has_launched(),
         ecoverse: EcoverseCard {
             not_used,
             state: state_of(project.ecoverse_script_id.is_some(), project.ecoverse_script_version.as_deref() == Some(package.version.as_str())),
@@ -172,7 +176,7 @@ fn describe(options: &ProjectOptions) -> String {
         options.task_repeat_minutes,
         options.task_expiry_days,
         if options.retire_source_records { "yes" } else { "no" }
-    )
+    ) + &format!(", delivery {}", if options.delivery == Delivery::RestOnly { "N-central only" } else { "Ecoverse first" })
 }
 
 impl Core {
@@ -268,8 +272,16 @@ impl Core {
         if project.options == options {
             return Ok(());
         }
+        let delivery_changed = project.options.delivery != options.delivery;
+        if delivery_changed && project.has_launched() {
+            return Err("The delivery can't change once a wave has launched: devices have already been sent the migration. Choose a path for a single device in Plan instead.".into());
+        }
         self.record(&AuditEntry::new("migration.options", &format!("Changed the options of {}: {}", project.name, describe(&options)), Ok(()), json!({ "project": project.id })));
         project.options = options;
+        if delivery_changed {
+            project.repath_planned(Utc::now());
+            super::planview::forget_plan(id);
+        }
         self.migration_save(&mut project).await
     }
 }
@@ -440,5 +452,56 @@ mod tests {
         let saved = core.migration_load(&project.id).await.unwrap().unwrap();
         assert_eq!(saved.rest_scripts.get(&saved.dest_server_id).map(|r| r.item_id.as_str()), Some("555"));
         assert!(!saved.rest_scripts.contains_key(&saved.source_server_id));
+    }
+
+    #[tokio::test]
+    async fn the_delivery_can_change_until_a_wave_launches_and_re_paths_the_planned_devices() {
+        use crate::migration::planner::{DeliveryPath, PlannedDevice};
+        let core = Core::for_tests("delivery");
+        core.set_empty_ecoverse();
+        let src = core.save_ncentral_server(None, "Old", "src.example.com", Some("j1".into()), None).await.unwrap();
+        let dst = core.save_ncentral_server(None, "New", "dst.example.com", Some("j2".into()), None).await.unwrap();
+        let mut p = core.migration_create_full("Del", &src.id, &dst.id, DestEcoverse::NotLinked, vec![], vec![]).await.unwrap();
+        let planned = |id: &str, asset: Option<&str>| PlannedDevice {
+            device_id: id.into(),
+            name: format!("PC-{id}"),
+            source_customer_id: Some("10".into()),
+            source_site_id: None,
+            dest_org_unit_id: Some("110".into()),
+            path: Some(if asset.is_some() { DeliveryPath::Ecoverse } else { DeliveryPath::Rest }),
+            asset_id: asset.map(String::from),
+            blockers: vec![],
+            warnings: vec![],
+            excluded: false,
+        };
+        p.add_planned(&[planned("1", Some("a1")), planned("2", Some("a2")), planned("3", None)], chrono::Utc::now());
+        p.path_overrides.insert("2".into(), DeliveryPath::Ecoverse);
+        core.migration_save(&mut p).await.unwrap();
+
+        let mut rest_only = p.options.clone();
+        rest_only.delivery = Delivery::RestOnly;
+        core.migration_prepare_options(&p.id, "me", rest_only.clone()).await.unwrap();
+        let saved = core.migration_load(&p.id).await.unwrap().unwrap();
+        let paths: Vec<_> = saved.devices.iter().map(|d| d.path).collect();
+        assert_eq!(paths, [Some(DeliveryPath::Rest), Some(DeliveryPath::Ecoverse), Some(DeliveryPath::Rest)], "a path the operator chose is kept");
+
+        let mut back = rest_only.clone();
+        back.delivery = Delivery::EcoverseFirst;
+        core.migration_prepare_options(&p.id, "me", back.clone()).await.unwrap();
+        let saved = core.migration_load(&p.id).await.unwrap().unwrap();
+        assert_eq!(saved.devices[0].path, Some(DeliveryPath::Ecoverse));
+        assert_eq!(saved.devices[2].path, Some(DeliveryPath::Rest), "no Ecoverse asset, so N-central");
+        assert!(!prepare_view(&saved, &package("v"), "Old", "h", true, &dest()).delivery_locked);
+
+        let mut saved = saved;
+        saved.create_wave("Pilot", &["1".to_string()], chrono::Utc::now()).unwrap();
+        saved.waves[0].launched_at = Some("2026-10-21T00:00:00Z".into());
+        core.migration_save(&mut saved).await.unwrap();
+        assert!(prepare_view(&saved, &package("v"), "Old", "h", true, &dest()).delivery_locked);
+        let err = core.migration_prepare_options(&p.id, "me", rest_only).await.unwrap_err();
+        assert!(err.contains("once a wave has launched"), "{err}");
+        let mut same_delivery = back;
+        same_delivery.wave_size = 10;
+        core.migration_prepare_options(&p.id, "me", same_delivery).await.unwrap();
     }
 }

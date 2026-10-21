@@ -76,6 +76,7 @@ impl Core {
             customer: customer.map(String::from),
             rest_script_ready: true,
         };
+        super::planview::forget_plan(&project.id);
         let survey = self.migration_survey(&options, Some(project)).await?;
         let name = |id: &str| survey.dest_units.iter().find(|u| u.org_unit_id == id).map_or_else(|| id.to_string(), |u| u.org_unit_name.clone());
         let mut report = TokenReport::default();

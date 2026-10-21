@@ -296,6 +296,7 @@ impl Core {
     pub async fn migration_map_set(&self, id: &str, instance: &str, source_id: &str, decision: Override) -> Result<(), String> {
         let mut project = self.migration_open_for_write(id, instance).await?;
         self.migration_set_mapping(&mut project, source_id, decision)?;
+        super::planview::forget_plan(id);
         self.migration_save(&mut project).await
     }
 
@@ -303,6 +304,7 @@ impl Core {
     pub async fn migration_map_clear(&self, id: &str, instance: &str, source_id: &str) -> Result<(), String> {
         let mut project = self.migration_open_for_write(id, instance).await?;
         if project.mapping_overrides.remove(source_id).is_some() {
+            super::planview::forget_plan(id);
             self.record(&AuditEntry::new("migration.mapping.set", &format!("Went back to the automatic match for source {source_id}"), Ok(()), serde_json::json!({ "project": project.id, "source": source_id })));
             self.migration_save(&mut project).await?;
         }

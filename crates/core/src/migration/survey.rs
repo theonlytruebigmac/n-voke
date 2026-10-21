@@ -11,7 +11,7 @@ use chrono::{Duration, Utc};
 use super::{
     ecoverse::{index_by_ncentral_id, is_linked},
     mapping::{MappingEntry, MappingStatus, apply_overrides, auto_map, normalize_name},
-    planner::{DeliveryPath, PlanInput, PlanOptions, PlanSummary, PlannedDevice, plan, summarize, token_targets},
+    planner::{DeliveryPath, EcoAsset, PlanInput, PlanOptions, PlanSummary, PlannedDevice, plan, summarize, token_targets},
     project::{Delivery, Project},
 };
 use crate::{
@@ -35,13 +35,26 @@ pub struct SurveyOptions {
     pub rest_script_ready: bool,
 }
 
+#[derive(Clone)]
 pub struct ServerSummary {
     pub label: String,
     pub host: String,
     pub info: ServerInfo,
 }
 
+/// What the survey read, kept so the plan can be worked out again (with new choices) without reading the servers.
+#[derive(Clone)]
+pub struct SurveyInputs {
+    pub devices: Vec<Device>,
+    pub tokens: HashMap<String, TokenStatus>,
+    pub eco: HashMap<String, EcoAsset>,
+    pub ecoverse_linked: Option<bool>,
+    pub source_server_id: String,
+}
+
+#[derive(Clone)]
 pub struct Survey {
+    pub inputs: SurveyInputs,
     pub source: ServerSummary,
     pub destination: ServerSummary,
     pub warnings: Vec<String>,
@@ -135,26 +148,38 @@ impl Core {
             }
         };
 
-        let no_overrides = HashMap::new();
-        let no_exclusions = BTreeSet::new();
-        let planned = plan(&PlanInput {
-            devices: &devices,
-            mapping: &mapping,
-            tokens: &tokens,
-            eco: &eco,
-            ecoverse_available: ecoverse_linked == Some(true),
-            rest_script_ready: options.rest_script_ready || project.is_some_and(|p| p.rest_scripts.contains_key(&source.id)),
-            path_overrides: &no_overrides,
-            excluded: &no_exclusions,
-            now,
-            options: PlanOptions::default(),
-        });
+        let inputs = SurveyInputs { devices, tokens: tokens.clone(), eco, ecoverse_linked, source_server_id: source.id.clone() };
+        let planned = plan_devices(&inputs, &mapping, project, options.rest_script_ready, now);
         let summary = summarize(&planned);
-        Ok(Survey { source: ServerSummary { label: source_summary.label, host: source_summary.host, info: source_summary.info }, destination, warnings, source_units, dest_units, mapping, tokens, ecoverse_linked, planned, summary })
+        Ok(Survey {
+            inputs, source: ServerSummary { label: source_summary.label, host: source_summary.host, info: source_summary.info }, destination, warnings, source_units, dest_units, mapping, tokens, ecoverse_linked, planned, summary })
     }
 }
 
+/// The plan for the surveyed devices, with the project's choices (path overrides, devices left out) when there is one.
+fn plan_devices(inputs: &SurveyInputs, mapping: &[MappingEntry], project: Option<&Project>, rest_script_ready: bool, now: chrono::DateTime<Utc>) -> Vec<PlannedDevice> {
+    let (no_overrides, no_left_out) = (HashMap::new(), BTreeSet::new());
+    plan(&PlanInput {
+        devices: &inputs.devices,
+        mapping,
+        tokens: &inputs.tokens,
+        eco: &inputs.eco,
+        ecoverse_available: inputs.ecoverse_linked == Some(true),
+        rest_script_ready: rest_script_ready || project.is_some_and(|p| p.rest_scripts.contains_key(&inputs.source_server_id)),
+        path_overrides: project.map_or(&no_overrides, |p| &p.path_overrides),
+        excluded: project.map_or(&no_left_out, |p| &p.left_out),
+        now,
+        options: PlanOptions::default(),
+    })
+}
+
 impl Survey {
+    /// Works the plan out again from what was read, with the project's current choices. Nothing is read from a server.
+    pub fn replan(&mut self, project: &Project, rest_script_ready: bool) {
+        self.planned = plan_devices(&self.inputs, &self.mapping, Some(project), rest_script_ready, Utc::now());
+        self.summary = summarize(&self.planned);
+    }
+
     /// A plain-text report for a terminal.
     pub fn render(&self) -> String {
         let name_of = |units: &[OrgUnit], id: &str| units.iter().find(|u| u.org_unit_id == id).map_or_else(|| format!("#{id}"), |u| format!("{} [{id}]", u.org_unit_name));

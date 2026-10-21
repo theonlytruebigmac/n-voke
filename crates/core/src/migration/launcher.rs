@@ -132,6 +132,23 @@ pub struct LaunchReport {
     pub failed: Vec<(String, String)>,
     /// Why the launch stopped part-way, when it did: the devices not reached are still waiting in the wave.
     pub stopped: Option<String>,
+    /// The Ecoverse runs this launch started that Activity can watch (those read with the app's own Ecoverse key).
+    pub activity: Vec<ActivityRun>,
+}
+
+/// One Ecoverse run as the Activity page shows it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "ActivityRun.ts"))]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityRun {
+    pub name: String,
+    pub script_id: String,
+    pub script_name: String,
+    pub target_label: String,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub timeout_seconds: i64,
+    /// (task ID, asset ID, device name)
+    pub tasks: Vec<(String, String, String)>,
 }
 
 pub(super) fn launch_params(project: &Project, wave: u32, package: &Package, operation: Operation) -> LaunchParams {
@@ -250,6 +267,17 @@ impl Core {
             let missing: Vec<(usize, Missing)> = match result {
                 Ok(run) => {
                     let (launched, missing) = match_tasks(&requested, &run);
+                    let watchable = self.ncentral_server(&project.source_server_id).is_ok_and(|s| s.ecoverse == crate::ncentral::EcoCredential::AppKey);
+                    if watchable && !launched.is_empty() {
+                        report.activity.push(ActivityRun {
+                            name: input.name.clone(),
+                            script_id: input.script_id.clone(),
+                            script_name: input.script_name.clone(),
+                            target_label: input.target_label.clone(),
+                            timeout_seconds: input.timeout_seconds,
+                            tasks: launched.iter().map(|(i, task_id)| (task_id.clone(), project.devices[*i].asset_id.clone().unwrap_or_default(), project.devices[*i].name.clone())).collect(),
+                        });
+                    }
                     for (i, task_id) in launched {
                         self.mark_launched(project, i, DeliveryPath::Ecoverse, &task_id, "Ecoverse");
                         report.launched_ecoverse += 1;
@@ -678,6 +706,9 @@ mod tests {
         let report = core.migration_launch_wave(&mut p, 1, &package(), Some("script-1")).await.unwrap();
         assert_eq!((report.launched_ecoverse, report.launched_rest, report.failed.len()), (3, 0, 0));
         assert!(p.devices.iter().all(|d| d.stage == Stage::Launched && d.path == Some(DeliveryPath::Ecoverse)));
+        let watched: Vec<usize> = report.activity.iter().map(|r| r.tasks.len()).collect();
+        assert_eq!(watched, [2, 1], "each run is offered to Activity with a task per device, when the app's own key read it");
+        assert_eq!(report.activity[0].tasks[0].2, p.devices[0].name);
         assert!(p.devices[0].task_id.as_deref().is_some_and(|t| t != p.devices[2].task_id.as_deref().unwrap()));
 
         let runs = seen.lock().unwrap().clone();

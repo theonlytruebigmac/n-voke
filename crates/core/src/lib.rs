@@ -57,6 +57,9 @@ pub struct Config {
     /// N-central servers used by agent migration. Their JWTs are in the keychain, never here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ncentral_servers: Vec<ncentral::ServerConfig>,
+    /// How migration tracks devices and what a new project starts with.
+    #[serde(default)]
+    pub migration: migration::settings::MigrationSettings,
 }
 
 fn default_history_days() -> u32 {
@@ -65,7 +68,7 @@ fn default_history_days() -> u32 {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { api_url: DEFAULT_API_URL.to_string(), history_days: default_history_days(), ncentral_servers: vec![] }
+        Self { api_url: DEFAULT_API_URL.to_string(), history_days: default_history_days(), ncentral_servers: vec![], migration: Default::default() }
     }
 }
 
@@ -392,7 +395,7 @@ impl Core {
         let previous = self.load_config();
         let previous_url = previous.api_url.clone();
         let history_days = history_days.unwrap_or(previous.history_days).min(3650);
-        self.save_config(&Config { api_url: api_url.clone(), history_days, ncentral_servers: previous.ncentral_servers.clone() })?;
+        self.save_config(&Config { api_url: api_url.clone(), history_days, ncentral_servers: previous.ncentral_servers.clone(), migration: previous.migration.clone() })?;
         if previous.history_days != history_days {
             let summary = if history_days == 0 { "Stopped saving run history".to_string() } else { format!("Keep run history for {history_days} days") };
             let details = json!({ "from": previous.history_days, "to": history_days });

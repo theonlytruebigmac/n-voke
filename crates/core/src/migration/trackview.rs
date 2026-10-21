@@ -16,7 +16,6 @@ use super::{
     planner::DeliveryPath,
     poller::PollReport,
     project::{EcoState, Event, MatchCandidate, Project, ProjectDevice, Stage},
-    tracker::Thresholds,
     workflow::{DeviceOp, retryable},
 };
 use crate::{Core, ncentral::model::OrgUnit};
@@ -50,14 +49,109 @@ pub struct TrackRow {
     pub waiting_for_ecoverse: bool,
 }
 
+/// The stage strip's groups: the stages read in nine.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "TrackGroup.ts"))]
+#[serde(rename_all = "camelCase")]
+pub enum TrackGroup {
+    Planned,
+    Launched,
+    Staged,
+    Moving,
+    OnNew,
+    /// Healthy in N-central, but Ecoverse isn't receiving its data yet.
+    Waiting,
+    Healthy,
+    Done,
+    NeedsYou,
+}
+
+impl TrackGroup {
+    pub const ALL: [TrackGroup; 9] = [Self::Planned, Self::Launched, Self::Staged, Self::Moving, Self::OnNew, Self::Waiting, Self::Healthy, Self::Done, Self::NeedsYou];
+
+    /// A device is in exactly one group; a device taken out of the project is in none.
+    pub fn of(stage: Stage, waiting_for_ecoverse: bool) -> Option<Self> {
+        Some(match stage {
+            Stage::Planned => Self::Planned,
+            Stage::Launched => Self::Launched,
+            Stage::Staged => Self::Staged,
+            Stage::AgentRemoved => Self::Moving,
+            Stage::Registered => Self::OnNew,
+            Stage::Healthy if waiting_for_ecoverse => Self::Waiting,
+            Stage::Healthy => Self::Healthy,
+            Stage::CleanedUp | Stage::Retired | Stage::Resolved => Self::Done,
+            Stage::Unreachable | Stage::NotPickedUp | Stage::LaunchFailed | Stage::StuckStaged | Stage::Lost | Stage::WrongPlace => Self::NeedsYou,
+            Stage::Excluded => return None,
+        })
+    }
+}
+
+/// Which rows of the device table to send: a filter and a page.
+#[derive(Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "TrackQuery.ts"))]
+#[serde(rename_all = "camelCase", default)]
+pub struct TrackQuery {
+    pub group: Option<TrackGroup>,
+    pub wave: Option<u32>,
+    pub customer: Option<String>,
+    pub text: String,
+    pub offset: usize,
+    /// 0 means the default page.
+    pub limit: usize,
+}
+
+const DEFAULT_PAGE: usize = 200;
+const MAX_PAGE: usize = 1000;
+/// How many devices the "needs you" list shows.
+const NEEDS_YOU_SHOWN: usize = 8;
+
+impl TrackQuery {
+    pub fn all() -> Self {
+        Self::default()
+    }
+
+    fn keeps(&self, row: &TrackRow) -> bool {
+        let in_group = match self.group {
+            None => true,
+            Some(TrackGroup::NeedsYou) => row_needs_you(row),
+            Some(group) => TrackGroup::of(row.stage, row.waiting_for_ecoverse) == Some(group),
+        };
+        let term = self.text.trim().to_lowercase();
+        in_group
+            && self.wave.is_none_or(|w| row.wave == Some(w))
+            && self.customer.as_deref().is_none_or(|c| row.customer == c)
+            && (term.is_empty() || row.name.to_lowercase().contains(&term) || row.customer.to_lowercase().contains(&term))
+    }
+}
+
+fn row_needs_you(row: &TrackRow) -> bool {
+    row.stage.needs_attention() || row.needs_match
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "GroupCount.ts"))]
+#[serde(rename_all = "camelCase")]
+pub struct GroupCount {
+    pub group: TrackGroup,
+    pub count: usize,
+}
+
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "TrackView.ts"))]
 #[serde(rename_all = "camelCase")]
 pub struct TrackView {
+    /// One page of the devices that match the query.
     pub rows: Vec<TrackRow>,
+    pub matching: usize,
+    pub offset: usize,
     /// (number, label) of each wave, for the filter.
     pub waves: Vec<WaveName>,
     pub customers: Vec<String>,
+    /// Devices per group over the whole project. A device with a match to choose also counts under needs you.
+    pub counts: Vec<GroupCount>,
+    /// The first devices that need the person, and how many there are in all.
+    pub needs_you: Vec<TrackRow>,
+    pub needs_you_total: usize,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -203,7 +297,7 @@ fn name_of(names: &HashMap<String, String>, id: Option<&str>) -> Option<String> 
     Some(names.get(id).cloned().unwrap_or_else(|| format!("#{id}")))
 }
 
-pub fn track_view(project: &Project, source_names: &HashMap<String, String>, dest_names: &HashMap<String, String>) -> TrackView {
+pub fn track_view(project: &Project, source_names: &HashMap<String, String>, dest_names: &HashMap<String, String>, query: &TrackQuery) -> TrackView {
     let customer = |d: &ProjectDevice| name_of(source_names, d.source_customer_id.as_deref()).unwrap_or_else(|| "(no customer)".into());
     let rows: Vec<TrackRow> = project
         .devices
@@ -227,7 +321,27 @@ pub fn track_view(project: &Project, source_names: &HashMap<String, String>, des
     let mut customers: Vec<String> = rows.iter().map(|r| r.customer.clone()).collect();
     customers.sort_by_key(|c| c.to_lowercase());
     customers.dedup();
-    TrackView { rows, waves: project.waves.iter().map(|w| WaveName { number: w.number, label: w.label.clone() }).collect(), customers }
+
+    let counts = TrackGroup::ALL
+        .iter()
+        .map(|&group| GroupCount {
+            group,
+            count: rows.iter().filter(|r| if group == TrackGroup::NeedsYou { row_needs_you(r) } else { TrackGroup::of(r.stage, r.waiting_for_ecoverse) == Some(group) }).count(),
+        })
+        .collect();
+    let needs: Vec<&TrackRow> = rows.iter().filter(|r| row_needs_you(r)).collect();
+    let limit = if query.limit == 0 { DEFAULT_PAGE } else { query.limit.min(MAX_PAGE) };
+    let kept: Vec<&TrackRow> = rows.iter().filter(|r| query.keeps(r)).collect();
+    TrackView {
+        matching: kept.len(),
+        offset: query.offset,
+        rows: kept.into_iter().skip(query.offset).take(limit).cloned().collect(),
+        waves: project.waves.iter().map(|w| WaveName { number: w.number, label: w.label.clone() }).collect(),
+        customers,
+        counts,
+        needs_you_total: needs.len(),
+        needs_you: needs.into_iter().take(NEEDS_YOU_SHOWN).cloned().collect(),
+    }
 }
 
 pub fn device_detail(project: &Project, index: usize, source_names: &HashMap<String, String>, dest_names: &HashMap<String, String>) -> Result<DeviceDetail, String> {
@@ -268,7 +382,7 @@ fn names_of(units: &[OrgUnit]) -> HashMap<String, String> {
 
 impl Core {
     /// Customer and site names of a server, kept for a few minutes. When the server can't be read the page shows IDs.
-    async fn unit_names(&self, server_id: &str) -> Names {
+    pub(crate) async fn unit_names(&self, server_id: &str) -> Names {
         if let Some((at, names)) = name_cache().lock().unwrap().get(server_id)
             && at.elapsed() < NAMES_FOR
         {
@@ -290,10 +404,10 @@ impl Core {
         (source, dest)
     }
 
-    pub async fn migration_track_view(&self, id: &str) -> Result<TrackView, String> {
+    pub async fn migration_track_view(&self, id: &str, query: &TrackQuery) -> Result<TrackView, String> {
         let project = self.migration_load(id).await?.ok_or_else(|| format!("There is no migration project {id}."))?;
         let (source, dest) = self.names_for(&project).await;
-        Ok(track_view(&project, &source, &dest))
+        Ok(track_view(&project, &source, &dest, query))
     }
 
     pub async fn migration_device_detail(&self, id: &str, index: usize) -> Result<DeviceDetail, String> {
@@ -325,7 +439,7 @@ impl Core {
 
     /// One tracker pass on the saved project.
     pub async fn migration_poll_digest(&self, id: &str, instance: &str) -> Result<PollDigest, String> {
-        let (_, report) = self.migration_poll_saved(id, instance, &Thresholds::default()).await?;
+        let (_, report) = self.migration_poll_saved(id, instance, &self.migration_settings().thresholds()).await?;
         Ok(digest(&report, &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)))
     }
 }
@@ -374,7 +488,7 @@ mod tests {
     fn rows_carry_names_where_known_ids_where_not_and_the_filters_lists() {
         let mut p = project();
         p.auto_wave("pilot", None, chrono::Utc::now()).unwrap();
-        let view = track_view(&p, &names(&[("10", "Zeta"), ("11", "Acme")]), &names(&[("110", "Zeta")]));
+        let view = track_view(&p, &names(&[("10", "Zeta"), ("11", "Acme")]), &names(&[("110", "Zeta")]), &TrackQuery::all());
         assert_eq!((view.rows[0].customer.as_str(), view.rows[0].destination.as_deref()), ("Zeta", Some("Zeta")));
         assert_eq!(view.rows[1].destination.as_deref(), Some("#111"), "an unknown unit shows its number");
         assert_eq!(view.customers, ["Acme", "Zeta"]);
@@ -429,5 +543,64 @@ mod tests {
         let pick: DeviceCommand = serde_json::from_str(r#"{"kind":"chooseMatch","destDeviceId":"9"}"#).unwrap();
         assert_eq!(pick, DeviceCommand::ChooseMatch { dest_device_id: "9".into() });
         assert_eq!(serde_json::from_str::<DeviceCommand>(r#"{"kind":"probe"}"#).unwrap(), DeviceCommand::Probe);
+    }
+
+    fn with_stages(stages: &[Stage]) -> Project {
+        let now = chrono::Utc::now();
+        let mut p = Project::new("p".into(), "x", "a", "b", DestEcoverse::NotLinked, now);
+        let planned: Vec<PlannedDevice> = (0..stages.len()).map(|i| planned(&i.to_string(), if i % 2 == 0 { "10" } else { "11" }, "110")).collect();
+        p.add_planned(&planned, now);
+        for (d, stage) in p.devices.iter_mut().zip(stages) {
+            d.stage = *stage;
+        }
+        p
+    }
+
+    #[test]
+    fn every_stage_but_excluded_is_in_one_group() {
+        let all = [
+            Stage::Planned, Stage::Unreachable, Stage::Launched, Stage::NotPickedUp, Stage::LaunchFailed, Stage::Staged, Stage::StuckStaged, Stage::AgentRemoved, Stage::Lost, Stage::Registered, Stage::WrongPlace, Stage::Healthy,
+            Stage::CleanedUp, Stage::Retired, Stage::Resolved,
+        ];
+        for stage in all {
+            assert!(TrackGroup::of(stage, false).is_some(), "{stage:?}");
+        }
+        assert_eq!(TrackGroup::of(Stage::Excluded, false), None);
+        assert_eq!((TrackGroup::of(Stage::Healthy, true), TrackGroup::of(Stage::Healthy, false), TrackGroup::of(Stage::Lost, true)), (Some(TrackGroup::Waiting), Some(TrackGroup::Healthy), Some(TrackGroup::NeedsYou)));
+    }
+
+    #[test]
+    fn the_strip_counts_the_whole_project_and_a_query_filters_and_pages_the_table() {
+        let mut stages = vec![Stage::Healthy; 5];
+        stages.extend([Stage::Lost, Stage::NotPickedUp, Stage::Staged, Stage::Excluded]);
+        let mut p = with_stages(&stages);
+        p.dest_ecoverse = DestEcoverse::SameTenant; // linked: a healthy device that Ecoverse hasn't read is waiting
+        p.devices[0].ecoverse = Some(EcoState::Reporting);
+        let view = track_view(&p, &HashMap::new(), &HashMap::new(), &TrackQuery { limit: 2, ..TrackQuery::all() });
+        let count = |g: TrackGroup| view.counts.iter().find(|c| c.group == g).unwrap().count;
+        assert_eq!((count(TrackGroup::Healthy), count(TrackGroup::Waiting), count(TrackGroup::NeedsYou), count(TrackGroup::Staged)), (1, 4, 2, 1));
+        assert_eq!((view.matching, view.rows.len()), (9, 2), "the excluded device is in the table but in no group; the page is two");
+        assert_eq!((view.needs_you_total, view.needs_you.len()), (2, 2));
+
+        let lost = track_view(&p, &HashMap::new(), &HashMap::new(), &TrackQuery { group: Some(TrackGroup::NeedsYou), ..TrackQuery::all() });
+        assert_eq!(lost.rows.iter().map(|r| r.stage).collect::<Vec<_>>(), [Stage::Lost, Stage::NotPickedUp]);
+        let second_page = track_view(&p, &HashMap::new(), &HashMap::new(), &TrackQuery { offset: 2, limit: 2, ..TrackQuery::all() });
+        assert_eq!(second_page.rows.iter().map(|r| r.index).collect::<Vec<_>>(), [2, 3]);
+    }
+
+    #[test]
+    fn a_query_narrows_by_wave_customer_and_text_and_a_device_with_a_match_to_choose_needs_you() {
+        let mut p = with_stages(&[Stage::Planned, Stage::Planned, Stage::Planned]);
+        p.auto_wave("one", Some(2), chrono::Utc::now()).unwrap();
+        p.devices.iter_mut().for_each(|d| d.stage = Stage::Healthy);
+        p.devices[2].match_candidates = vec![MatchCandidate { device_id: "9".into(), name: "PC-A".into() }];
+        let names = names(&[("10", "Zeta"), ("11", "Acme")]);
+        let q = |query: TrackQuery| track_view(&p, &names, &HashMap::new(), &query).rows.iter().map(|r| r.index).collect::<Vec<_>>();
+        assert_eq!(q(TrackQuery { wave: Some(1), ..TrackQuery::all() }), [0, 1]);
+        assert_eq!(q(TrackQuery { customer: Some("Acme".into()), ..TrackQuery::all() }), [1]);
+        assert_eq!(q(TrackQuery { text: "PC-2".into(), ..TrackQuery::all() }), [2]);
+        assert_eq!(q(TrackQuery { group: Some(TrackGroup::NeedsYou), ..TrackQuery::all() }), [2]);
+        let view = track_view(&p, &names, &HashMap::new(), &TrackQuery::all());
+        assert_eq!(view.needs_you_total, 1);
     }
 }

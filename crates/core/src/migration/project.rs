@@ -3,7 +3,7 @@
 //! every device's stage and history, and is saved in its own encrypted store.
 //! Stages and their allowed moves are those in docs/migration/06-tracking.md.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -303,6 +303,12 @@ pub struct Project {
     pub options: ProjectOptions,
     /// The operator's mapping decisions, by source org unit ID. The automatic mapping is recomputed.
     pub mapping_overrides: HashMap<String, Override>,
+    /// The operator's choice of delivery path for a device, by source device ID, over the suggested one.
+    #[serde(default)]
+    pub path_overrides: HashMap<String, DeliveryPath>,
+    /// Devices the operator took out of the project, by source device ID, so planning leaves them out too.
+    #[serde(default)]
+    pub left_out: BTreeSet<String>,
     /// Uploaded endpoint script per server ID.
     pub rest_scripts: HashMap<String, RestScript>,
     /// Ecoverse organizations to search for the source's assets, and the destination's when it is linked.
@@ -353,6 +359,8 @@ impl Project {
             dest_ecoverse,
             options: ProjectOptions::default(),
             mapping_overrides: HashMap::new(),
+            path_overrides: HashMap::new(),
+            left_out: BTreeSet::new(),
             rest_scripts: HashMap::new(),
             source_ecoverse_org_ids: vec![],
             dest_ecoverse_org_ids: vec![],
@@ -441,6 +449,26 @@ impl Project {
     /// destination is linked to Ecoverse. They are registered, but not fully working.
     pub fn ecoverse_waiting(&self) -> usize {
         self.devices.iter().filter(|d| self.waiting_for_ecoverse(d)).count()
+    }
+
+    /// After the delivery changes: planned devices the operator hasn't chosen a path for take the one the delivery
+    /// gives (Ecoverse when delivery allows it and the device has an Ecoverse asset, otherwise N-central).
+    pub fn repath_planned(&mut self, now: DateTime<Utc>) {
+        let rest_only = self.options.delivery == Delivery::RestOnly;
+        let chosen = self.path_overrides.clone();
+        for device in self.devices.iter_mut().filter(|d| d.stage == Stage::Planned && !chosen.contains_key(&d.source_device_id)) {
+            let path = if !rest_only && device.asset_id.is_some() { DeliveryPath::Ecoverse } else { DeliveryPath::Rest };
+            if device.path != Some(path) {
+                device.path = Some(path);
+                device.record(now, "path", &format!("Delivery changed: now planned through {}", if path == DeliveryPath::Ecoverse { "Ecoverse" } else { "N-central" }));
+            }
+        }
+        self.updated_at = stamp(now);
+    }
+
+    /// A wave has been launched, so devices have been sent the migration and the delivery can no longer change.
+    pub fn has_launched(&self) -> bool {
+        self.waves.iter().any(|w| w.launched_at.is_some())
     }
 
     /// Healthy in N-central, but its Ecoverse asset hasn't sent data (or hasn't been read yet) and the destination is

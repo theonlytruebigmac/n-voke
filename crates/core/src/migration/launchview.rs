@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::{
     launcher::{LaunchReport, plan_wave},
@@ -34,6 +34,37 @@ pub struct LaunchView {
     pub unassigned: usize,
     /// The project's wave size, the default for a new wave.
     pub wave_size: u32,
+}
+
+/// A planned device that isn't in a wave yet, to choose from.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "WaveCandidate.ts"))]
+#[serde(rename_all = "camelCase")]
+pub struct WaveCandidate {
+    pub device_id: String,
+    pub name: String,
+    pub customer: String,
+    pub path: Option<super::planner::DeliveryPath>,
+}
+
+#[derive(Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "CandidateQuery.ts"))]
+#[serde(rename_all = "camelCase", default)]
+pub struct CandidateQuery {
+    pub text: String,
+    pub offset: usize,
+    /// 0 means the default page.
+    pub limit: usize,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "CandidatePage.ts"))]
+#[serde(rename_all = "camelCase")]
+pub struct CandidatePage {
+    /// Every device waiting for a wave, and how many match the search.
+    pub waiting: usize,
+    pub matching: usize,
+    pub rows: Vec<WaveCandidate>,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -80,6 +111,27 @@ pub struct LaunchResult {
     /// In dry-run: what would have been sent, with passwords redacted. Empty for a real launch.
     pub dry_run: Vec<DryRunEntry>,
     pub was_dry_run: bool,
+}
+
+/// The devices waiting for a wave (planned, and not in one), by name, filtered and paged.
+pub fn wave_candidates(project: &Project, customer_names: &std::collections::HashMap<String, String>, query: &CandidateQuery) -> CandidatePage {
+    let term = query.text.trim().to_lowercase();
+    let mut waiting: Vec<WaveCandidate> = project
+        .devices
+        .iter()
+        .filter(|d| d.stage == Stage::Planned && d.wave.is_none())
+        .map(|d| WaveCandidate {
+            device_id: d.source_device_id.clone(),
+            name: d.name.clone(),
+            customer: d.source_customer_id.as_deref().map(|c| customer_names.get(c).cloned().unwrap_or_else(|| format!("#{c}"))).unwrap_or_else(|| "(no customer)".into()),
+            path: d.path,
+        })
+        .collect();
+    waiting.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(a.device_id.cmp(&b.device_id)));
+    let total = waiting.len();
+    let kept: Vec<WaveCandidate> = waiting.into_iter().filter(|c| term.is_empty() || c.name.to_lowercase().contains(&term) || c.customer.to_lowercase().contains(&term)).collect();
+    let limit = if query.limit == 0 { 200 } else { query.limit.min(1000) };
+    CandidatePage { waiting: total, matching: kept.len(), rows: kept.into_iter().skip(query.offset).take(limit).collect() }
 }
 
 pub fn launch_view(project: &Project) -> LaunchView {
@@ -158,6 +210,24 @@ impl Core {
             return Err("A wave needs at least one device.".into());
         }
         self.migration_wave_saved(id, instance, label, Some(max)).await.map(|(_, message)| message)
+    }
+
+    /// The devices waiting for a wave, to choose from.
+    pub async fn migration_wave_candidates(&self, id: &str, query: &CandidateQuery) -> Result<CandidatePage, String> {
+        let project = self.migration_load(id).await?.ok_or_else(|| format!("There is no migration project {id}."))?;
+        let names = self.unit_names(&project.source_server_id).await;
+        Ok(wave_candidates(&project, &names, query))
+    }
+
+    /// Makes a wave of exactly these devices (planned, and not in a wave yet).
+    pub async fn migration_wave_create_from(&self, id: &str, instance: &str, label: &str, device_ids: Vec<String>) -> Result<String, String> {
+        if device_ids.is_empty() {
+            return Err("Choose at least one device for the wave.".into());
+        }
+        let mut project = self.migration_open_for_write(id, instance).await?;
+        let number = project.create_wave(label, &device_ids, chrono::Utc::now())?;
+        self.migration_save(&mut project).await?;
+        Ok(format!("Made wave {number} with {} device{}.", device_ids.len(), if device_ids.len() == 1 { "" } else { "s" }))
     }
 
     pub async fn migration_launch_preview(&self, id: &str, wave: u32) -> Result<LaunchPreview, String> {
@@ -302,5 +372,40 @@ mod tests {
         let error = core.migration_launch_saved(&p.id, "me", 1, true).await.unwrap_err();
         assert!(error.contains("Publish the endpoint script"), "{error}");
         assert!(!core.is_dry_run(), "dry-run goes back to what it was");
+    }
+
+    #[test]
+    fn waiting_devices_are_listed_by_name_searchable_and_paged_and_a_device_in_a_wave_is_not_among_them() {
+        let mut p = project();
+        p.auto_wave("one", Some(1), chrono::Utc::now()).unwrap();
+        let names: std::collections::HashMap<String, String> = [("10".to_string(), "Acme".to_string())].into();
+        let page = wave_candidates(&p, &names, &CandidateQuery::default());
+        assert_eq!((page.waiting, page.matching, page.rows.len()), (3, 3, 3), "PC-1 is in wave one");
+        assert_eq!(page.rows.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["PC-2", "PC-3", "PC-4"]);
+        assert_eq!(page.rows[0].customer, "Acme");
+        let searched = wave_candidates(&p, &names, &CandidateQuery { text: "pc-3".into(), ..Default::default() });
+        assert_eq!((searched.waiting, searched.matching), (3, 1));
+        let paged = wave_candidates(&p, &names, &CandidateQuery { offset: 1, limit: 1, ..Default::default() });
+        assert_eq!(paged.rows[0].name, "PC-3");
+    }
+
+    #[tokio::test]
+    async fn a_wave_of_chosen_devices_takes_exactly_those_and_refuses_one_that_is_gone_or_taken() {
+        let core = Core::for_tests("choosewave");
+        core.set_empty_ecoverse();
+        let src = core.save_ncentral_server(None, "Old", "src.example.com", Some("j1".into()), None).await.unwrap();
+        let dst = core.save_ncentral_server(None, "New", "dst.example.com", Some("j2".into()), None).await.unwrap();
+        let mut p = core.migration_create_full("C", &src.id, &dst.id, DestEcoverse::NotLinked, vec![], vec![]).await.unwrap();
+        p.add_planned(&[planned("1", "110", DeliveryPath::Rest, None), planned("2", "110", DeliveryPath::Rest, None), planned("3", "110", DeliveryPath::Rest, None)], chrono::Utc::now());
+        core.migration_save(&mut p).await.unwrap();
+
+        assert!(core.migration_wave_create_from(&p.id, "me", "", vec![]).await.is_err());
+        let message = core.migration_wave_create_from(&p.id, "me", "Pilot", vec!["1".into(), "3".into()]).await.unwrap();
+        assert!(message.contains("wave 1 with 2 devices"), "{message}");
+        let saved = core.migration_load(&p.id).await.unwrap().unwrap();
+        assert_eq!(saved.devices.iter().map(|d| d.wave).collect::<Vec<_>>(), [Some(1), None, Some(1)]);
+        assert_eq!(saved.waves[0].label, "Pilot");
+        assert!(core.migration_wave_create_from(&p.id, "me", "", vec!["1".into()]).await.unwrap_err().contains("isn't waiting"), "already in a wave");
+        assert!(core.migration_wave_create_from(&p.id, "me", "", vec!["nope".into()]).await.is_err());
     }
 }
