@@ -15,7 +15,7 @@ use nvoke_core::{
         launchview::{CandidatePage, CandidateQuery, LaunchPreview, LaunchResult, LaunchView},
         mapview::{MapDetails, MapView},
         planview::{DeviceChoice, PlanAdded, PlanQuery, PlanView},
-        prepare::{PrepareView, ScriptSide},
+        prepare::{LinkChoice, PrepareView, ScriptSide},
         project::{Delivery, DestEcoverse, ProjectOptions, ScriptOrg},
         store::ProjectSummary,
         settings::MigrationSettings,
@@ -243,6 +243,14 @@ async fn project_device_choice(core: State<'_, Core>, locks: State<'_, ProjectLo
     let lock = locks.get(&id);
     let _held = lock.lock().await;
     core.migration_device_choice(&id, &instance(), &device_id, choice).await
+}
+
+/// Says whether the project's destination is linked to Ecoverse, which decides whether moved devices are checked there.
+#[tauri::command]
+async fn project_ecoverse_link(core: State<'_, Core>, locks: State<'_, ProjectLocks>, id: String, choice: LinkChoice) -> Result<(), String> {
+    let lock = locks.get(&id);
+    let _held = lock.lock().await;
+    core.migration_set_ecoverse_link(&id, &instance(), choice).await
 }
 
 #[tauri::command]
@@ -593,6 +601,7 @@ pub fn run() {
             project_export_script,
             project_rest_script,
             project_options,
+            project_ecoverse_link,
             store_get,
             store_set,
             store_remove,

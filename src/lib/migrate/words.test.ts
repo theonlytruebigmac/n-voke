@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ECO_WORDS, STAGE_WORDS, describeStage, ecoWords, eventWords, stageView } from "./words";
+import { ECO_WORDS, STAGE_WORDS, describeStage, ecoWords, eventWords, movedBanner, stageView } from "./words";
 
 describe("STAGE_WORDS", () => {
   const entries = Object.entries(STAGE_WORDS);
@@ -67,5 +67,14 @@ describe("a healthy device and Ecoverse", () => {
     expect(eventWords("stage", "Planned")).toEqual({ title: STAGE_WORDS.planned.short, body: "" });
     expect(eventWords("poll", "seen")).toEqual({ title: "Checked", body: "seen" });
     expect(eventWords("custom", "x").title).toBe("Custom");
+  });
+
+  it("only says Ecoverse is receiving a device's data when Ecoverse was checked", () => {
+    expect(movedBanner(true).rest).toContain("Ecoverse is receiving its data");
+    const unchecked = movedBanner(false);
+    expect(`${unchecked.lead} ${unchecked.rest}`).not.toMatch(/receiving its data|and is working|fully working/);
+    expect(unchecked.rest).toContain("not checked");
+    expect(ECO_WORDS.notLinked.short).toBe("Ecoverse not checked");
+    expect(ECO_WORDS.notLinked.long).toContain("not looked at");
   });
 });

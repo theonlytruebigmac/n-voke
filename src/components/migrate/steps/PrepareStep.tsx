@@ -1,7 +1,7 @@
 import { Download } from "lucide-react";
 import { useEffect, useState } from "react";
 import { defaultScriptOrg, searchScriptOrgs as searchOrgs } from "../../../lib/migrate/api";
-import type { EcoverseCard as EcoverseCardData, PrepareView, RestCard as RestCardData, ScriptOrg, ScriptSide, ScriptState } from "../../../lib/migrate/bindings";
+import type { EcoverseCard as EcoverseCardData, LinkChoice, PrepareView, RestCard as RestCardData, ScriptOrg, ScriptSide, ScriptState } from "../../../lib/migrate/bindings";
 import { parseOptions, sameOptions, toForm, type OptionsForm } from "../../../lib/migrate/options";
 import { usePrepare, usePrepareActions } from "../../../lib/migrate/queries";
 import { Combobox } from "../../Combobox";
@@ -155,6 +155,42 @@ function RestCard({ projectId, view, side, card }: { projectId: string; view: Pr
   );
 }
 
+const LINK_CHOICES: { value: LinkChoice; title: string; text: string }[] = [
+  { value: "notLinked", title: "Not linked", text: "Ecoverse is not looked at after a device moves. Devices are tracked through N-central only, and nothing is claimed about Ecoverse." },
+  { value: "sameTenant", title: "Same tenant as the source", text: "Devices show up in the same Ecoverse tenant again after the move. Ecoverse is checked, and a device isn't fully working until it is sending asset data there." },
+  { value: "otherTenant", title: "Another tenant", text: "Devices show up in the destination's own Ecoverse tenant. Needs an Ecoverse token saved for the destination server." },
+];
+
+/** Whether the destination is linked to Ecoverse decides whether a moved device is checked there, so it is asked here and can be changed. */
+function EcoverseLinkCard({ projectId, view }: { projectId: string; view: PrepareView }) {
+  const { ecoverseLink } = usePrepareActions(projectId);
+  return (
+    <Card id="prepare-ecoverse-link" title="Is the destination linked to Ecoverse?" aside={<Status tone={view.ecoverseLink === "notLinked" ? "muted" : "ok"} label={view.ecoverseLink === "notLinked" ? "Not checked" : "Checked"} />}>
+      <p className="text-sm text-muted">
+        This decides what <span className="font-medium">healthy</span> means. When the destination is linked, a device only counts as fully working once Ecoverse is receiving its asset data (name, serial number, addresses). When it isn't, Ecoverse is never read and the app says so.
+      </p>
+      <fieldset className="space-y-2" disabled={ecoverseLink.isPending}>
+        {LINK_CHOICES.map((o) => {
+          const blocked = o.value === "otherTenant" && !view.otherTenantAllowed;
+          return (
+            <label
+              key={o.value}
+              className={`flex items-start gap-2.5 rounded-md border border-border px-3 py-2 has-[:checked]:border-accent has-[:checked]:bg-accent-soft ${blocked ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}
+            >
+              <input type="radio" name="ecoverse-link" className="mt-1" disabled={blocked} checked={view.ecoverseLink === o.value} onChange={() => ecoverseLink.mutate(o.value)} />
+              <span className="text-sm">
+                <span className="font-medium">{o.title}</span>
+                <span className="block text-xs text-muted">{o.text}</span>
+              </span>
+            </label>
+          );
+        })}
+      </fieldset>
+      {ecoverseLink.isError && <ErrorNote>{String(ecoverseLink.error)}</ErrorNote>}
+    </Card>
+  );
+}
+
 function OptionsCard({ projectId, view }: { projectId: string; view: PrepareView }) {
   const { options } = usePrepareActions(projectId);
   const [form, setForm] = useState<OptionsForm>(toForm(view.options));
@@ -231,6 +267,7 @@ export function PrepareStep({ projectId, onBack, onContinue }: { projectId: stri
           <RestCard projectId={projectId} view={view} side="source" card={view.rest} />
           {view.destination?.ecoverse && <EcoverseCard projectId={projectId} view={view} side="destination" card={view.destination.ecoverse} />}
           {view.destination && <RestCard projectId={projectId} view={view} side="destination" card={view.destination.rest} />}
+          <EcoverseLinkCard projectId={projectId} view={view} />
           <OptionsCard projectId={projectId} view={view} />
           <div className="flex items-center justify-between">
             <Button size="sm" onClick={onBack}>

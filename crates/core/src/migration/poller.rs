@@ -48,12 +48,12 @@ const SETTLED_RECHECK: Duration = Duration::minutes(15);
 /// Whether the pass has to read anything for this device. A healthy device with no Ecoverse to wait for has nothing left
 /// to find out (its only change is the review period ending, which needs the clock and not a server); one that Ecoverse
 /// is receiving data from is looked at again every quarter of an hour, in case that stops.
-fn needs_reading(device: &ProjectDevice, now: DateTime<Utc>) -> bool {
+fn needs_reading(device: &ProjectDevice, now: DateTime<Utc>, linked: bool) -> bool {
     if device.stage != Stage::Healthy {
         return true;
     }
     match device.ecoverse {
-        Some(EcoState::NotLinked) => false,
+        Some(EcoState::NotLinked) => linked,
         Some(EcoState::Reporting) => device.ecoverse_read_at.as_deref().and_then(|at| DateTime::parse_from_rfc3339(at).ok()).is_none_or(|at| now - at.with_timezone(&Utc) >= SETTLED_RECHECK),
         _ => true,
     }
@@ -91,7 +91,7 @@ impl Core {
         if work.is_empty() {
             return report;
         }
-        let (read, settled): (Vec<usize>, Vec<usize>) = work.iter().partition(|&&i| needs_reading(&project.devices[i], now));
+        let (read, settled): (Vec<usize>, Vec<usize>) = work.iter().partition(|&&i| needs_reading(&project.devices[i], now, project.dest_ecoverse != DestEcoverse::NotLinked));
         let mut observed = self.observe(project, &read, now, &mut report).await;
         observed.extend(settled.into_iter().map(|i| (i, Observation::default(), Found::default())));
 

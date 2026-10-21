@@ -22,7 +22,7 @@ export interface StepStatus {
   notes: Partial<Record<StepId, string>>;
 }
 
-type Summary = Pick<ProjectSummary, "devices" | "stageCounts"> & { ecoverseWaiting?: number; closed?: boolean };
+type Summary = Pick<ProjectSummary, "devices" | "stageCounts"> & { ecoverseWaiting?: number; ecoverseChecked?: boolean; closed?: boolean };
 
 /** The endpoint script is where the project needs it: in Ecoverse when Ecoverse is used, otherwise in the repository. */
 export function scriptsReady(view: Pick<PrepareView, "ecoverse" | "rest">): boolean {
@@ -60,7 +60,7 @@ export function stepStatus(p: Summary | undefined, prepare: Pick<PrepareView, "e
 
   if (readyToFinish(p)) {
     marks.track = "done";
-    notes.track = "Everything has moved and is working";
+    notes.track = p.ecoverseChecked === false ? "Everything has moved (Ecoverse was not checked)" : "Everything has moved and is working";
   }
   if (p.closed) {
     marks.finish = "done";

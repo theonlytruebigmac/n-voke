@@ -47,6 +47,7 @@ import {
   removeServer,
   saveServer,
   setMapping,
+  setEcoverseLink,
   setOptions,
   setRestScript,
   setServerEcoverse,
@@ -142,6 +143,11 @@ export function usePrepareActions(id: string) {
     publish: useMutation({ mutationFn: ({ side, org }: { side: ScriptSide; org: ScriptOrg }) => publishScript(id, side, org), onSuccess: refresh }),
     exportScript: useMutation({ mutationFn: exportScript }),
     restScript: useMutation({ mutationFn: ({ side, itemId, version }: { side: ScriptSide; itemId: string; version: string }) => setRestScript(id, side, itemId, version), onSuccess: refresh }),
+    // Whether Ecoverse is checked changes what every later screen says about a device, so all of them are read again.
+    ecoverseLink: useMutation({
+      mutationFn: (choice: Parameters<typeof setEcoverseLink>[1]) => setEcoverseLink(id, choice),
+      onSuccess: () => Promise.all([refresh(), ...["plan", "launch", "track", "finish", "device"].map((what) => qc.invalidateQueries({ queryKey: ["migrate", what, id] })), qc.invalidateQueries({ queryKey: ["migrate", "projects"] })]),
+    }),
     // A delivery change re-paths the planned devices, so what Plan, Launch and Track show changes too.
     options: useMutation({
       mutationFn: (options: Parameters<typeof setOptions>[1]) => setOptions(id, options),

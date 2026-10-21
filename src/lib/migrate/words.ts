@@ -88,7 +88,11 @@ export const ECO_WORDS: Record<EcoState | "unread", EcoWords> = {
     long: "Registered with Ecoverse and shown there, but no asset data has arrived yet. Until it does the device isn't fully working: its name, serial number and addresses are unknown and scripts can't run on it. This commonly takes 20 to 60 minutes. If the agent's first attempt to fetch its setup fails, it tries again at its next hourly check, so it can take up to about an hour and a half.",
   },
   notSeen: { short: "Not in Ecoverse yet", tone: "warn", long: "The new Ecoverse agent is still setting up, and the device isn't in the destination's Ecoverse yet. This commonly takes 20 to 60 minutes and doesn't block the move. If its first attempt fails it tries again at its next hourly check, so it can take up to about an hour and a half." },
-  notLinked: { short: "Not in Ecoverse", tone: "muted", long: "The destination isn't linked to Ecoverse, so the device isn't expected there." },
+  notLinked: {
+    short: "Ecoverse not checked",
+    tone: "muted",
+    long: "This project says the destination isn't linked to Ecoverse, so Ecoverse is not looked at and nothing is known about this device there. If the destination is linked, say so in Prepare and the next pass checks whether Ecoverse is receiving its data.",
+  },
   unread: { short: "Ecoverse not read yet", tone: "muted", long: "Ecoverse hasn't been read for this device yet. It is read on each pass." },
 };
 
@@ -124,4 +128,14 @@ export function eventWords(kind: string, detail: string): { title: string; body:
     if (known) return { title: known.short, body: rest.join(": ") };
   }
   return { title: EVENT_KINDS[kind] ?? kind.charAt(0).toUpperCase() + kind.slice(1), body: detail };
+}
+
+/**
+ * What the "everything has moved" banner may claim. Ecoverse is only mentioned as receiving data when it was checked:
+ * a project whose destination isn't linked never reads it, so "healthy" there means only that the agent checks in.
+ */
+export function movedBanner(ecoverseChecked: boolean): { lead: string; rest: string } {
+  return ecoverseChecked
+    ? { lead: "Everything has moved and is working.", rest: "Each device is healthy and Ecoverse is receiving its data. What's left is in Finish: a report, and tidying up the migration's records." }
+    : { lead: "Everything has moved.", rest: "Each device is healthy in N-central. Ecoverse was not checked, because this project says the destination isn't linked to Ecoverse. If it is, say so in Prepare and the next pass checks whether Ecoverse is receiving each device's data." };
 }

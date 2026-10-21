@@ -61,7 +61,7 @@ export function Workspace({ projectId, onBack }: { projectId: string; onBack: ()
             {step === "prepare" && <PrepareStep projectId={projectId} onBack={() => setStep("map")} onContinue={() => setStep("plan")} />}
             {step === "plan" && <PlanStep projectId={projectId} onGo={setStep} />}
             {step === "launch" && <LaunchStep projectId={projectId} onGo={setStep} />}
-            {step === "track" && <TrackStep projectId={projectId} onContinue={() => setStep("finish")} />}
+            {step === "track" && <TrackStep projectId={projectId} onContinue={() => setStep("finish")} onPrepare={() => setStep("prepare")} />}
             {step === "finish" && <FinishStep projectId={projectId} onOptions={() => setStep("prepare")} />}
           </div>
         </div>

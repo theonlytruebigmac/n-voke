@@ -18,7 +18,7 @@ export function ProjectStatus({ project, onReview }: { project: ProjectSummary; 
           <div className="h-full rounded-full bg-ok transition-[width]" style={{ width: `${Math.round(fraction * 100)}%` }} />
         </div>
         <span className="tabular-nums text-muted">
-          {done} of {total} moved and working
+          {done} of {total} {project.ecoverseChecked ? "moved and working" : "moved and healthy"}
         </span>
       </div>
       {waiting > 0 && <span className="text-warn">{waiting} waiting for Ecoverse</span>}
@@ -28,7 +28,7 @@ export function ProjectStatus({ project, onReview }: { project: ProjectSummary; 
           <span className="text-muted">· Review</span>
         </Button>
       ) : done100 ? (
-        <span className="text-ok">Everything has moved and is working</span>
+        <span className="text-ok">{project.ecoverseChecked ? "Everything has moved and is working" : "Everything has moved"}</span>
       ) : null}
     </div>
   );

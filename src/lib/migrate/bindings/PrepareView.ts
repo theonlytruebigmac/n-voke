@@ -2,6 +2,7 @@
 import type { Delivery } from "./Delivery";
 import type { DestinationCards } from "./DestinationCards";
 import type { EcoverseCard } from "./EcoverseCard";
+import type { LinkChoice } from "./LinkChoice";
 import type { ProjectOptions } from "./ProjectOptions";
 import type { RestCard } from "./RestCard";
 
@@ -10,6 +11,14 @@ export type PrepareView = {
  * For example `0.1.0+fa1d1a0`.
  */
 scriptVersion: string, scriptName: string, fileName: string, delivery: Delivery, 
+/**
+ * Whether the destination is linked to Ecoverse, which decides whether a moved device is checked there.
+ */
+ecoverseLink: LinkChoice, 
+/**
+ * Another tenant needs an Ecoverse token saved for the destination server.
+ */
+otherTenantAllowed: boolean, 
 /**
  * A wave has launched, so the delivery can't be changed any more.
  */

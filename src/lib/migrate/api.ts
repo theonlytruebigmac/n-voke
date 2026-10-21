@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { StructurePreview, StructureReport, RetireReport, RetireView, CandidatePage, CandidateQuery, DeviceChoice, MigrationSettings, PlanQuery, TrackQuery, CleanupReport, ConnectReport, DeviceCommand, DeviceDetail, FinishView, LaunchPreview, LaunchResult, LaunchView, PlanAdded, PlanView, PollDigest, ReportFormat, TrackView, Delivery, DestEcoverse, EcoCredential, MapDetails, MapView, Override, PrepareView, ProjectOptions, ScriptSide, ProjectSummary, ScriptOrg, ServerInfo, ServerView, TokenReport } from "./bindings";
+import type { LinkChoice, StructurePreview, StructureReport, RetireReport, RetireView, CandidatePage, CandidateQuery, DeviceChoice, MigrationSettings, PlanQuery, TrackQuery, CleanupReport, ConnectReport, DeviceCommand, DeviceDetail, FinishView, LaunchPreview, LaunchResult, LaunchView, PlanAdded, PlanView, PollDigest, ReportFormat, TrackView, Delivery, DestEcoverse, EcoCredential, MapDetails, MapView, Override, PrepareView, ProjectOptions, ScriptSide, ProjectSummary, ScriptOrg, ServerInfo, ServerView, TokenReport } from "./bindings";
 
 // Thin typed wrappers over the Tauri commands. No logic lives here: the rules are in nvoke-core, and the types
 // come from the Rust types (`npm run bindings`), so this file only names the commands.
@@ -56,6 +56,7 @@ export const defaultScriptOrg = (id: string, side: ScriptSide) => invoke<ScriptO
 export const publishScript = (id: string, side: ScriptSide, org: ScriptOrg) => invoke<string>("project_publish", { id, side, org });
 export const exportScript = () => invoke<string>("project_export_script");
 export const setRestScript = (id: string, side: ScriptSide, itemId: string, version: string) => invoke<void>("project_rest_script", { id, side, itemId, version });
+export const setEcoverseLink = (id: string, choice: LinkChoice) => invoke<void>("project_ecoverse_link", { id, choice });
 export const setOptions = (id: string, options: ProjectOptions) => invoke<void>("project_options", { id, options });
 
 export const forgetReads = (id: string) => invoke<void>("project_forget_reads", { id });

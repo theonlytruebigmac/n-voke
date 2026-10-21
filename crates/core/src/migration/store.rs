@@ -41,6 +41,9 @@ pub struct ProjectSummary {
     pub stage_counts: BTreeMap<Stage, usize>,
     /// Healthy in N-central but not yet sending asset data to Ecoverse: registered, not fully working.
     pub ecoverse_waiting: usize,
+    /// The destination is linked to Ecoverse, so "healthy" includes Ecoverse receiving the device's asset data. When it
+    /// isn't, Ecoverse is never looked at and nothing may be said about it.
+    pub ecoverse_checked: bool,
 }
 
 impl ProjectSummary {
@@ -56,6 +59,7 @@ impl ProjectSummary {
             closed: project.is_closed(),
             stage_counts: project.stage_counts(),
             ecoverse_waiting: project.ecoverse_waiting(),
+            ecoverse_checked: project.dest_ecoverse != DestEcoverse::NotLinked,
         }
     }
 }

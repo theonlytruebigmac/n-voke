@@ -35,6 +35,7 @@ export type * from "./LaunchPreview";
 export type * from "./LaunchReport";
 export type * from "./LaunchResult";
 export type * from "./LaunchView";
+export type * from "./LinkChoice";
 export type * from "./MapDetails";
 export type * from "./MapRow";
 export type * from "./MapView";

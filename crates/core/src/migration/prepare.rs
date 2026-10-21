@@ -68,6 +68,27 @@ pub struct DestinationCards {
     pub rest: RestCard,
 }
 
+/// Whether the destination server is linked to Ecoverse, and how: the answer decides whether Ecoverse is looked at after a
+/// device has moved.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "LinkChoice.ts"))]
+#[serde(rename_all = "camelCase")]
+pub enum LinkChoice {
+    NotLinked,
+    SameTenant,
+    OtherTenant,
+}
+
+impl LinkChoice {
+    pub fn of(link: &DestEcoverse) -> Self {
+        match link {
+            DestEcoverse::NotLinked => Self::NotLinked,
+            DestEcoverse::SameTenant => Self::SameTenant,
+            DestEcoverse::OtherTenant { .. } => Self::OtherTenant,
+        }
+    }
+}
+
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "PrepareView.ts"))]
 #[serde(rename_all = "camelCase")]
@@ -77,6 +98,10 @@ pub struct PrepareView {
     pub script_name: String,
     pub file_name: String,
     pub delivery: Delivery,
+    /// Whether the destination is linked to Ecoverse, which decides whether a moved device is checked there.
+    pub ecoverse_link: LinkChoice,
+    /// Another tenant needs an Ecoverse token saved for the destination server.
+    pub other_tenant_allowed: bool,
     /// A wave has launched, so the delivery can't be changed any more.
     pub delivery_locked: bool,
     pub ecoverse: EcoverseCard,
@@ -94,6 +119,8 @@ pub struct DestinationInfo<'a> {
     pub host: &'a str,
     /// The destination server's devices can be reached through Ecoverse (it has a key).
     pub ecoverse_used: bool,
+    /// It has an Ecoverse token of its own, which a destination in another tenant needs.
+    pub has_own_token: bool,
 }
 
 /// Where the script stands for a project. `ecoverse_used`: the project's delivery and the source server's key both
@@ -117,6 +144,8 @@ pub fn prepare_view(project: &Project, package: &Package, source_label: &str, so
         script_name: package.script_name(),
         file_name: package.file_name(),
         delivery: project.options.delivery,
+        ecoverse_link: LinkChoice::of(&project.dest_ecoverse),
+        other_tenant_allowed: dest.has_own_token,
         delivery_locked: project.has_launched(),
         ecoverse: EcoverseCard {
             not_used,
@@ -185,7 +214,7 @@ impl Core {
         let project = self.migration_load(id).await?.ok_or_else(|| format!("There is no migration project {id}."))?;
         let source = self.ncentral_server(&project.source_server_id)?;
         let dest = self.ncentral_server(&project.dest_server_id)?;
-        let dest_info = DestinationInfo { label: &dest.label, host: &dest.host, ecoverse_used: self.server_uses_ecoverse(&dest.id) };
+        let dest_info = DestinationInfo { label: &dest.label, host: &dest.host, ecoverse_used: self.server_uses_ecoverse(&dest.id), has_own_token: self.dest_has_own_token(&dest.id).await };
         Ok(prepare_view(&project, &Package::embedded()?, &source.label, &source.host, self.server_uses_ecoverse(&source.id), &dest_info))
     }
 
@@ -265,6 +294,48 @@ impl Core {
         self.migration_save(&mut project).await
     }
 
+    async fn dest_has_own_token(&self, server_id: &str) -> bool {
+        self.ncentral_servers().await.ok().and_then(|list| list.into_iter().find(|s| s.id == server_id)).is_some_and(|s| s.ecoverse == crate::ncentral::EcoCredential::Own && s.has_ecoverse_token)
+    }
+
+    /// Says whether the destination is linked to Ecoverse. Until it is, Ecoverse is never looked at for a device that has
+    /// moved, and the page says so rather than claiming it receives the device's data. Changing it makes the next pass read
+    /// Ecoverse again for every device that has moved.
+    pub async fn migration_set_ecoverse_link(&self, id: &str, instance: &str, choice: LinkChoice) -> Result<(), String> {
+        let mut project = self.migration_open_for_write(id, instance).await?;
+        if LinkChoice::of(&project.dest_ecoverse) == choice {
+            return Ok(());
+        }
+        let link = match choice {
+            LinkChoice::NotLinked => DestEcoverse::NotLinked,
+            LinkChoice::SameTenant => DestEcoverse::SameTenant,
+            LinkChoice::OtherTenant => {
+                if project.is_reinstall() {
+                    return Err("A reinstall stays on the same server, so it can't move to another tenant.".into());
+                }
+                let server = self.ncentral_server(&project.dest_server_id)?;
+                if !self.dest_has_own_token(&server.id).await {
+                    return Err(format!("A destination in another Ecoverse tenant needs an Ecoverse token saved for {}. Add it under Manage servers.", server.label));
+                }
+                DestEcoverse::OtherTenant { tenant_id: server.ecoverse_tenant.unwrap_or(server.host) }
+            }
+        };
+        let words = match choice {
+            LinkChoice::NotLinked => "not linked to Ecoverse",
+            LinkChoice::SameTenant => "in the same Ecoverse tenant as the source",
+            LinkChoice::OtherTenant => "in another Ecoverse tenant",
+        };
+        self.record(&AuditEntry::new("migration.options", &format!("Said the destination of {} is {words}", project.name), Ok(()), json!({ "project": project.id })));
+        project.dest_ecoverse = link;
+        // What Ecoverse showed under the old answer means nothing under the new one: read it again.
+        for d in &mut project.devices {
+            d.ecoverse = None;
+            d.ecoverse_read_at = None;
+        }
+        super::planview::forget_plan(id);
+        self.migration_save(&mut project).await
+    }
+
     /// Changes how the project behaves from now on. Devices already launched keep what they were sent.
     pub async fn migration_prepare_options(&self, id: &str, instance: &str, options: ProjectOptions) -> Result<(), String> {
         validate_options(&options)?;
@@ -296,7 +367,7 @@ mod tests {
     }
 
     fn dest() -> DestinationInfo<'static> {
-        DestinationInfo { label: "New", host: "new.example.com", ecoverse_used: true }
+        DestinationInfo { label: "New", host: "new.example.com", ecoverse_used: true, has_own_token: true }
     }
 
     fn project() -> Project {
@@ -503,5 +574,31 @@ mod tests {
         let mut same_delivery = back;
         same_delivery.wave_size = 10;
         core.migration_prepare_options(&p.id, "me", same_delivery).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_ecoverse_link_can_be_changed_and_only_a_destination_with_its_own_token_can_be_another_tenant() {
+        let core = Core::for_tests("link");
+        core.set_empty_ecoverse();
+        let src = core.save_ncentral_server(None, "Old", "src.example.com", Some("j1".into()), None).await.unwrap();
+        let dst = core.save_ncentral_server(None, "New", "dst.example.com", Some("j2".into()), None).await.unwrap();
+        let mut p = core.migration_create_full("Link", &src.id, &dst.id, DestEcoverse::NotLinked, vec![], vec![]).await.unwrap();
+        p.devices = vec![];
+        let view = core.migration_prepare_view(&p.id).await.unwrap();
+        assert_eq!((view.ecoverse_link, view.other_tenant_allowed), (LinkChoice::NotLinked, false));
+
+        core.migration_set_ecoverse_link(&p.id, "me", LinkChoice::SameTenant).await.unwrap();
+        assert_eq!(core.migration_load(&p.id).await.unwrap().unwrap().dest_ecoverse, DestEcoverse::SameTenant);
+        assert_eq!(core.migration_summary(&p.id).await.unwrap().ecoverse_checked, true);
+
+        let err = core.migration_set_ecoverse_link(&p.id, "me", LinkChoice::OtherTenant).await.unwrap_err();
+        assert!(err.contains("needs an Ecoverse token"), "{err}");
+        core.set_server_ecoverse(&dst.id, crate::ncentral::EcoCredential::Own, Some("tok".into())).await.unwrap();
+        assert!(core.migration_prepare_view(&p.id).await.unwrap().other_tenant_allowed);
+        core.migration_set_ecoverse_link(&p.id, "me", LinkChoice::OtherTenant).await.unwrap();
+        assert!(matches!(core.migration_load(&p.id).await.unwrap().unwrap().dest_ecoverse, DestEcoverse::OtherTenant { .. }));
+
+        core.migration_set_ecoverse_link(&p.id, "me", LinkChoice::NotLinked).await.unwrap();
+        assert_eq!(core.migration_summary(&p.id).await.unwrap().ecoverse_checked, false, "not linked: Ecoverse isn't checked, and nothing may say it is");
     }
 }

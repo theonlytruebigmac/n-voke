@@ -6,7 +6,7 @@ import { useDeviceActions, useProject, useTrack, useTracker } from "../../../lib
 import { readyToFinish } from "../../../lib/migrate/progress";
 import { GROUP_LABELS, ago } from "../../../lib/migrate/track";
 import { useDebounced } from "../../../lib/useDebounced";
-import { describeStage, ecoWords, STAGE_WORDS, stageView } from "../../../lib/migrate/words";
+import { describeStage, ecoWords, movedBanner, STAGE_WORDS, stageView } from "../../../lib/migrate/words";
 import { Button, ErrorNote, Status, Table, inputClass, selectClass } from "../../ui";
 import { DeviceSheet } from "../parts/DeviceSheet";
 
@@ -83,7 +83,7 @@ function NeedsYou({ kinds, total, now, onOpen, onShowAll }: { kinds: NeedKind[];
 }
 
 /** The home of a running project: the stages, what needs the person, and every device (step 6 in docs/migration/11-gui-design.md). */
-export function TrackStep({ projectId, onContinue }: { projectId: string; onContinue: () => void }) {
+export function TrackStep({ projectId, onContinue, onPrepare }: { projectId: string; onContinue: () => void; onPrepare: () => void }) {
   const project = useProject(projectId);
   const tracker = useTracker(projectId, true);
   const { poll } = useDeviceActions(projectId);
@@ -144,11 +144,18 @@ export function TrackStep({ projectId, onContinue }: { projectId: string; onCont
       {project.data && readyToFinish(project.data) && (
         <div className="flex items-center justify-between gap-3 rounded-lg border border-ok/40 bg-ok-soft px-4 py-3">
           <p className="text-sm">
-            <span className="font-medium">Everything has moved and is working.</span> Each device is healthy and Ecoverse is receiving its data. What's left is in Finish: a report, and tidying up the migration's records.
+            <span className="font-medium">{movedBanner(project.data.ecoverseChecked).lead}</span> {movedBanner(project.data.ecoverseChecked).rest}
           </p>
-          <Button size="sm" variant="primary" onClick={onContinue}>
-            Continue to Finish
-          </Button>
+          <div className="flex shrink-0 items-center gap-2">
+            {!project.data.ecoverseChecked && (
+              <Button size="sm" onClick={onPrepare}>
+                Check Ecoverse in Prepare
+              </Button>
+            )}
+            <Button size="sm" variant="primary" onClick={onContinue}>
+              Continue to Finish
+            </Button>
+          </div>
         </div>
       )}
       {view && <NeedsYou kinds={view.needsYou} total={view.needsYouTotal} now={now} onOpen={setOpen} onShowAll={() => narrow(() => setGroup("needsYou"))} />}

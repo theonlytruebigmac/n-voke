@@ -8,4 +8,9 @@ export type ProjectSummary = { id: string, name: string, sourceServerId: string,
 /**
  * Healthy in N-central but not yet sending asset data to Ecoverse: registered, not fully working.
  */
-ecoverseWaiting: number, };
+ecoverseWaiting: number, 
+/**
+ * The destination is linked to Ecoverse, so "healthy" includes Ecoverse receiving the device's asset data. When it
+ * isn't, Ecoverse is never looked at and nothing may be said about it.
+ */
+ecoverseChecked: boolean, };
