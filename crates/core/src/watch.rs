@@ -32,6 +32,7 @@ pub fn watched_job(task_id: &str, snapshot: &TaskSnapshot, device_name: &str, no
         created_at: snapshot.created_at.clone().unwrap_or_else(|| now.to_rfc3339_opts(SecondsFormat::Millis, true)),
         timeout_seconds: 0,
         warnings: None,
+        migration_project: None,
         tasks: vec![task],
     }
 }

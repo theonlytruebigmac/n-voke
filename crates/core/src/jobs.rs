@@ -38,6 +38,9 @@ pub struct Job {
     /// Per-device problems reported when the run was created.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warnings: Option<Vec<String>>,
+    /// The migration project that started it, so deleting the project removes its entries from Activity too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration_project: Option<String>,
     pub tasks: Vec<JobTask>,
 }
 
@@ -170,6 +173,7 @@ mod tests {
             created_at: at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             timeout_seconds: 0,
             warnings: None,
+            migration_project: None,
             tasks: vec![task(watching, None)],
         }
     }

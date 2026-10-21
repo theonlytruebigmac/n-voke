@@ -1,6 +1,6 @@
 [package]
 name = "n-voke"
-version = "0.1.2"
+version = "0.2.0"
 license = "MIT"
 description = "Run N-able repository scripts on devices and watch the results"
 authors = ["theonlytruebigmac"]
@@ -22,6 +22,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 nvoke-core = { path = "../crates/core" }
 serde_json = "1"
+tokio = { version = "1", features = ["time", "sync"] }
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

@@ -25,6 +25,8 @@ use crate::KEYRING_SERVICE;
 const KEYRING_DATA_KEY: &str = "data-key";
 /// File header: format name + version, so the format can change later.
 const MAGIC: &[u8; 4] = b"SRv1";
+/// Header of a file sealed under its own key (a migration project), not the app's data key.
+const MAGIC_OWN_KEY: &[u8; 4] = b"SRp1";
 const NONCE_LEN: usize = 24;
 
 pub struct Vault {
@@ -72,6 +74,28 @@ impl Vault {
         open_with(&self.cipher()?, sealed)
     }
 
+    /// A new random key for one thing that must be destroyable on its own (a migration project).
+    pub fn new_own_key() -> Vec<u8> {
+        Key::<XChaCha20Poly1305>::generate().to_vec()
+    }
+
+    /// Seals under a key of its own instead of the app's data key. Destroying that key destroys the data, wherever
+    /// copies of the file are left (a backup, a snapshot, blocks the disk didn't overwrite).
+    pub fn seal_own(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, String> {
+        let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(|_| "The data key has the wrong length".to_string())?;
+        seal_magic(&cipher, MAGIC_OWN_KEY, plaintext)
+    }
+
+    pub fn open_own(key: &[u8], sealed: &[u8]) -> Result<Vec<u8>, String> {
+        let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(|_| "The data key has the wrong length".to_string())?;
+        open_magic(&cipher, MAGIC_OWN_KEY, sealed)
+    }
+
+    /// Whether a file was sealed under a key of its own.
+    pub fn is_own_key(sealed: &[u8]) -> bool {
+        sealed.starts_with(MAGIC_OWN_KEY)
+    }
+
     /// One sealed record as a single text line (for append-only logs).
     pub fn seal_line(&self, plaintext: &str) -> Result<String, String> {
         Ok(B64.encode(self.seal(plaintext.as_bytes())?))
@@ -100,17 +124,25 @@ fn load_or_create_key() -> Result<XChaCha20Poly1305, String> {
 }
 
 fn seal_with(cipher: &XChaCha20Poly1305, plaintext: &[u8]) -> Result<Vec<u8>, String> {
+    seal_magic(cipher, MAGIC, plaintext)
+}
+
+fn seal_magic(cipher: &XChaCha20Poly1305, magic: &[u8; 4], plaintext: &[u8]) -> Result<Vec<u8>, String> {
     let nonce = XNonce::generate();
     let ciphertext = cipher.encrypt(&nonce, plaintext).map_err(|_| "Encryption failed".to_string())?;
-    let mut out = Vec::with_capacity(MAGIC.len() + NONCE_LEN + ciphertext.len());
-    out.extend_from_slice(MAGIC);
+    let mut out = Vec::with_capacity(magic.len() + NONCE_LEN + ciphertext.len());
+    out.extend_from_slice(magic);
     out.extend_from_slice(nonce.as_slice());
     out.extend_from_slice(&ciphertext);
     Ok(out)
 }
 
 fn open_with(cipher: &XChaCha20Poly1305, sealed: &[u8]) -> Result<Vec<u8>, String> {
-    if sealed.len() < MAGIC.len() + NONCE_LEN || &sealed[..MAGIC.len()] != MAGIC {
+    open_magic(cipher, MAGIC, sealed)
+}
+
+fn open_magic(cipher: &XChaCha20Poly1305, magic: &[u8; 4], sealed: &[u8]) -> Result<Vec<u8>, String> {
+    if sealed.len() < MAGIC.len() + NONCE_LEN || &sealed[..MAGIC.len()] != magic {
         return Err("Not an encrypted N-voke file".into());
     }
     let nonce = XNonce::try_from(&sealed[MAGIC.len()..MAGIC.len() + NONCE_LEN]).map_err(|_| "Bad nonce".to_string())?;
@@ -184,6 +216,33 @@ pub fn private_append(path: &Path) -> Result<fs::File, String> {
     options.open(path).map_err(|e| format!("Couldn't write {}: {e}", path.display()))
 }
 
+/// Overwrites a file with random bytes, flushes it to disk and deletes it. The data is encrypted anyway; this only
+/// removes what a copy of the file could be read from. On a solid-state or copy-on-write disk the old blocks may
+/// survive an overwrite, so the guarantee is destroying the key (see `seal_own`), not this.
+pub fn shred_file(path: &Path) -> Result<(), String> {
+    let len = match fs::metadata(path) {
+        Ok(m) => m.len(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.to_string()),
+    };
+    let overwrite = (|| {
+        let mut f = fs::OpenOptions::new().write(true).open(path)?;
+        let mut left = len;
+        while left > 0 {
+            let chunk = Key::<XChaCha20Poly1305>::generate();
+            let bytes = chunk.as_slice();
+            let n = (left as usize).min(bytes.len());
+            f.write_all(&bytes[..n])?;
+            left -= n as u64;
+        }
+        f.sync_all()
+    })();
+    // A failed overwrite must not leave the file behind: remove it regardless, and say if it couldn't be overwritten.
+    let removed = fs::remove_file(path).map_err(|e| e.to_string());
+    removed?;
+    overwrite.map_err(|e| format!("{} was removed but could not be overwritten first: {e}", path.display()))
+}
+
 /// Moves an unreadable file aside (keeping it for inspection) so the app can start fresh.
 pub fn set_aside(path: &Path) -> PathBuf {
     let aside = path.with_extension("unreadable");
@@ -197,6 +256,35 @@ mod tests {
 
     fn cipher() -> XChaCha20Poly1305 {
         XChaCha20Poly1305::new(&Key::<XChaCha20Poly1305>::generate())
+    }
+
+    #[test]
+    fn a_file_sealed_under_its_own_key_opens_only_with_that_key() {
+        let key = Vault::new_own_key();
+        let sealed = Vault::seal_own(&key, b"project data").unwrap();
+        assert!(Vault::is_own_key(&sealed));
+        assert!(!sealed.windows(12).any(|w| w == b"project data"));
+        assert_eq!(Vault::open_own(&key, &sealed).unwrap(), b"project data");
+        assert!(Vault::open_own(&Vault::new_own_key(), &sealed).is_err(), "another key can't open it");
+        assert!(Vault::open_own(&key, &seal_with(&cipher(), b"x").unwrap()).is_err(), "and it isn't mistaken for an app-key file");
+    }
+
+    #[test]
+    fn a_shredded_file_is_overwritten_first_and_then_gone() {
+        let dir = std::env::temp_dir().join(format!("nvoke-shred-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secret.enc");
+        fs::write(&path, vec![0xAAu8; 200_000]).unwrap();
+        // Hold the file open to see what the overwrite wrote before the name was removed.
+        let held = fs::File::open(&path).unwrap();
+        shred_file(&path).unwrap();
+        assert!(!path.exists());
+        let mut seen = Vec::new();
+        std::io::Read::read_to_end(&mut &held, &mut seen).unwrap();
+        assert_eq!(seen.len(), 200_000, "the same length was overwritten");
+        assert!(seen.iter().any(|b| *b != 0xAA) && seen.iter().filter(|b| **b == 0xAA).count() < 10_000, "with something else");
+        assert!(shred_file(&path).is_ok(), "a file that isn't there is fine");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

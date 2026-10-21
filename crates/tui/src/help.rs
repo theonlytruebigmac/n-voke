@@ -128,7 +128,7 @@ pub fn help_sections(app: &App) -> Vec<Section> {
     sections.push(section(
         "Everywhere",
         &[
-            ("1-5  tab", "go to a page"),
+            ("1-6  tab", "go to a page"),
             ("↑ ↓  → ←", "move through the menu, step into a page, step back out"),
             ("?", "this help"),
             ("q  ctrl-c", "quit (q is off while a form is open: esc leaves it)"),

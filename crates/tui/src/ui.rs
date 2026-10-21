@@ -854,7 +854,7 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &SettingsForm) {
 }
 
 /// Draws a labelled text field and returns where the cursor goes if it has focus.
-fn draw_field(frame: &mut Frame, area: Rect, label: &str, input: &TextInput, focused: bool) -> (u16, u16) {
+pub(crate) fn draw_field(frame: &mut Frame, area: Rect, label: &str, input: &TextInput, focused: bool) -> (u16, u16) {
     let border = Style::new().fg(if focused { ACCENT } else { BORDER });
     let block = Block::bordered().border_type(BorderType::Rounded).title(format!(" {label} ")).border_style(border);
     let inner = block.inner(area);
@@ -1228,6 +1228,7 @@ mod tests {
             created_at: (Utc::now() - chrono::Duration::minutes(minutes_ago)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             timeout_seconds: 300,
             warnings: None,
+            migration_project: None,
             tasks,
         }
     }
@@ -1364,6 +1365,7 @@ mod tests {
             name: "Run Cleanup".into(),
             timeout_seconds: 120,
             inputs: vec![RunInput { name: "Pass".into(), variable: "pw".into(), kind: InputType::Password, value: InputValue { string_value: Some("hunter2-secret".into()), ..Default::default() } }],
+            run_when_online: false,
         };
         let result = rt.block_on(app.core().run_script(&input));
         assert_eq!(result.err().as_deref(), Some(nvoke_core::DRY_RUN_ERROR));

@@ -38,8 +38,9 @@ Built so far:
 - **Tags:** browse and search every tag; see a static tag's devices or a dynamic tag's rule in words. `n` creates a static or dynamic tag (a rule editor with a live preview of the devices it matches), `e` edits, `+` adds devices to a static tag, `x` removes ticked devices or deletes the tag, and `R` starts a run on the tag. From a run in Activity, `T` puts its devices in a tag (or creates one for them).
 - **Watch task:** `W` in Activity follows a run started elsewhere (such as by `Invoke-NableScriptRun.ps1`) by its task ID.
 - **Audit log** and **Settings.**
+- **Migrate (desktop app only, in development):** move Windows devices from one N-central server to another, or reinstall the agent on the same server, and follow every device until it is healthy on the destination. A project goes through Connect, Map, Prepare, Plan, Launch, Track and Finish; waves are launched with a confirmation first, because launching removes the old agents. It has been tested on lab servers but is not yet proven at scale, so treat it as experimental. The design is in [`docs/migration/`](docs/migration/README.md). The terminal app does not have it.
 
-The terminal app now covers everything the desktop app does. If both apps are open at once, the one that saves last wins, so run history is best used from one at a time.
+The terminal app covers everything the desktop app does except Migrate. If both apps are open at once, the one that saves last wins, so run history is best used from one at a time.
 
 ## Setup
 
@@ -78,7 +79,8 @@ See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full guide: setup, debugg
 | `crates/core/src/lib.rs` | Shared core: keychain storage, settings file, and the `graphql` call that sends every API request |
 | `crates/core/src/audit.rs` | Audit log: every mutation is recorded automatically by `graphql` |
 | `crates/core/src/vault.rs` | Encryption at rest (data key in the OS keychain) |
-| `crates/core/src/` (the other modules) | The same domain logic as `src/lib/`, in Rust, for the terminal app: `api`, `collections`, `run`, `tags`, `watch`, `task_state`, `jobs`, `job_store`, `poll`, `rules`, `inputs`, `sync`, `targets`. Saved history uses the desktop app's exact JSON |
+| `crates/core/src/migration/`, `crates/core/src/ncentral/`, `crates/core/src/credentials.rs` | Agent migration: the N-central REST client, projects and their store, mapping, planner, launcher, tracker, poller, reports. The endpoint scripts that run on devices are in `scripts/migration/endpoint/` |
+| `crates/core/src/` (the other modules) | The same domain logic as `src/lib/`, in Rust (the terminal app uses it): `api`, `collections`, `run`, `tags`, `watch`, `task_state`, `jobs`, `job_store`, `poll`, `rules`, `inputs`, `sync`, `targets`. Saved history uses the desktop app's exact JSON |
 | `src-tauri/src/lib.rs` | Desktop app: exposes the core to the web view as Tauri commands |
 | `crates/tui/` | Terminal app (`nvoke`): ratatui interface over the core. Shares the desktop app's API key, settings and run history |
 | `src/lib/api.ts` | GraphQL queries and mutations |

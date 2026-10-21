@@ -2429,12 +2429,13 @@ dependencies = [
 
 [[package]]
 name = "n-voke"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "nvoke-core",
  "serde_json",
  "tauri",
  "tauri-build",
+ "tokio",
 ]
 
 [[package]]
@@ -2575,17 +2576,19 @@ dependencies = [
 
 [[package]]
 name = "nvoke-core"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "base64 0.23.1",
  "chacha20poly1305",
  "chrono",
  "dirs 6.0.0",
+ "flate2",
  "keyring",
  "regex",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "uuid",
 ]

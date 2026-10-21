@@ -1,20 +1,23 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { ListChecks, Play, ScrollText, Settings as SettingsIcon, Tags } from "lucide-react";
+import { ArrowRightLeft, ListChecks, Play, ScrollText, Settings as SettingsIcon, Tags } from "lucide-react";
 import { PersistQueryClientProvider } from "@tanstack/react-query-persist-client";
 import logo from "./assets/logo.png";
 import { getSettings, type Settings } from "./lib/api";
 import { orgsQuery, tagsQuery } from "./lib/collections";
+import { useProjects } from "./lib/migrate/queries";
 import { persistOptions, queryClient } from "./lib/queryClient";
 import { initJobs, isJobActive, setHistoryDays, useJobs } from "./lib/jobs";
 import type { RunDraft } from "./lib/targets";
 import { ActivityPage } from "./components/ActivityPage";
 import { AuditPage } from "./components/AuditPage";
+import { PageBoundary } from "./components/PageBoundary";
+import { MigratePage } from "./components/migrate/MigratePage";
 import { RunPage } from "./components/RunPage";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { TagsPage } from "./components/TagsPage";
 import { ErrorNote, TooltipProvider } from "./components/ui";
 
-type Page = "run" | "activity" | "tags" | "audit";
+type Page = "run" | "activity" | "migrate" | "tags" | "audit";
 
 function NavItem({ icon, label, active, count, onClick }: { icon: ReactNode; label: string; active: boolean; count?: number; onClick: () => void }) {
   return (
@@ -30,6 +33,13 @@ function NavItem({ icon, label, active, count, onClick }: { icon: ReactNode; lab
       {!!count && <span className="text-xs text-accent tabular-nums">{count}</span>}
     </button>
   );
+}
+
+/** The Migrate entry shows how many devices across all projects need a person. */
+function MigrateNavItem({ active, onClick }: { active: boolean; onClick: () => void }) {
+  const { data } = useProjects();
+  const needYou = (data ?? []).reduce((n, p) => n + p.attention, 0);
+  return <NavItem icon={<ArrowRightLeft />} label="Migrate" active={active} count={needYou} onClick={onClick} />;
 }
 
 export default function App() {
@@ -86,6 +96,7 @@ export default function App() {
             <div className="space-y-0.5">
               <NavItem icon={<Play />} label="Run" active={page === "run"} onClick={() => setPage("run")} />
               <NavItem icon={<ListChecks />} label="Activity" active={page === "activity"} count={activeJobs} onClick={() => setPage("activity")} />
+              <MigrateNavItem active={page === "migrate"} onClick={() => setPage("migrate")} />
               <NavItem icon={<Tags />} label="Tags" active={page === "tags"} onClick={() => setPage("tags")} />
               <NavItem icon={<ScrollText />} label="Audit log" active={page === "audit"} onClick={() => setPage("audit")} />
             </div>
@@ -105,6 +116,11 @@ export default function App() {
               <RunPage ready={ready} draft={draft} onStarted={showJob} onOpenSettings={() => setShowSettings(true)} />
             </div>
             {page === "activity" && <ActivityPage jobs={jobs} selectedId={selectedJobId} onSelect={setSelectedJobId} onDraft={openDraft} ready={ready} />}
+            {page === "migrate" && (
+              <PageBoundary name="Migrate">
+                <MigratePage ecoverseReady={ready} />
+              </PageBoundary>
+            )}
             {page === "tags" && <TagsPage ready={ready} onDraft={openDraft} />}
             {page === "audit" && <AuditPage />}
           </main>

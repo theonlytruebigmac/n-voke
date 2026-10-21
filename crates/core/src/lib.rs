@@ -7,11 +7,14 @@
 pub mod api;
 pub mod audit;
 pub mod collections;
+pub mod credentials;
 pub mod inputs;
 pub mod job_store;
 pub mod jobs;
 pub mod poll;
 pub mod model;
+pub mod migration;
+pub mod ncentral;
 pub mod run;
 pub mod rules;
 pub mod sync;
@@ -51,6 +54,12 @@ pub struct Config {
     /// How long run history is kept on disk, in days; 0 = don't save it at all.
     #[serde(default = "default_history_days")]
     pub history_days: u32,
+    /// N-central servers used by agent migration. Their JWTs are in the keychain, never here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ncentral_servers: Vec<ncentral::ServerConfig>,
+    /// How migration tracks devices and what a new project starts with.
+    #[serde(default)]
+    pub migration: migration::settings::MigrationSettings,
 }
 
 fn default_history_days() -> u32 {
@@ -59,7 +68,7 @@ fn default_history_days() -> u32 {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { api_url: DEFAULT_API_URL.to_string(), history_days: default_history_days() }
+        Self { api_url: DEFAULT_API_URL.to_string(), history_days: default_history_days(), ncentral_servers: vec![], migration: Default::default() }
     }
 }
 
@@ -103,7 +112,7 @@ const RATE_LIMITED: &str = "HTTP 429: N-able is rate limiting requests. Wait a m
 
 /// A 429 means the request was refused unprocessed, so asking again is safe, mutations included.
 const RATE_LIMIT_RETRIES: u32 = 2;
-const MAX_RETRY_WAIT_SECS: u64 = 10;
+pub(crate) const MAX_RETRY_WAIT_SECS: u64 = 10;
 
 /// Whether `error` is the rate-limit refusal, so callers can hold off instead of asking again at once.
 pub fn is_rate_limited(error: &str) -> bool {
@@ -112,7 +121,7 @@ pub fn is_rate_limited(error: &str) -> bool {
 
 /// How long to wait before retry number `attempt` (from 0): the server's `Retry-After` seconds if it gave
 /// them, otherwise 2s then 4s. Never more than `MAX_RETRY_WAIT_SECS`, never nothing.
-fn retry_wait(retry_after: Option<&str>, attempt: u32) -> Duration {
+pub(crate) fn retry_wait(retry_after: Option<&str>, attempt: u32) -> Duration {
     let secs = retry_after.and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(2u64 << attempt.min(4));
     Duration::from_secs(secs.clamp(1, MAX_RETRY_WAIT_SECS))
 }
@@ -127,6 +136,7 @@ pub fn is_dry_run_error(error: &str) -> bool {
 
 /// A change that dry-run mode held back: what would have been sent.
 #[derive(Serialize, Clone, Debug)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "DryRunEntry.ts"))]
 #[serde(rename_all = "camelCase")]
 pub struct DryRunEntry {
     pub timestamp: String,
@@ -135,6 +145,7 @@ pub struct DryRunEntry {
     /// The GraphQL operation name, e.g. "RunScript".
     pub operation: Option<String>,
     /// The exact variables that would have been sent, with password inputs redacted.
+    #[cfg_attr(feature = "ts", ts(type = "unknown"))]
     pub variables: Value,
 }
 
@@ -179,7 +190,7 @@ impl Paths {
 
 /// Keychain calls can block (D-Bus round trips, unlock prompts), so they run
 /// off the async runtime's worker threads.
-async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+pub(crate) async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
     tokio::task::spawn_blocking(f).await.map_err(|e| e.to_string())?
 }
 
@@ -197,6 +208,13 @@ fn read_stored_key() -> Result<Option<String>, String> {
     }
 }
 
+type GraphQlFake = Arc<dyn Fn(&str, &Value) -> (u16, String) + Send + Sync>;
+
+tokio::task_local! {
+    /// An Ecoverse key that applies to the current call only, instead of the app's key (see `Core::with_ecoverse`).
+    pub(crate) static ECO_KEY: String;
+}
+
 pub struct Core {
     paths: Paths,
     http: reqwest::Client,
@@ -205,6 +223,15 @@ pub struct Core {
     api_key: Mutex<Option<String>>,
     vault: Arc<Vault>,
     audit: AuditLog,
+    /// Other secrets (N-central JWTs, further Ecoverse keys), by keychain account.
+    secrets: Arc<dyn credentials::SecretStore>,
+    /// N-central REST sessions and limits.
+    rest: ncentral::rest::RestState,
+    /// Answers every GraphQL request itself, for tests of code built on the client.
+    graphql_override: Mutex<Option<GraphQlFake>>,
+    /// The key the last GraphQL request used, so tests can check which key a call was made with.
+    #[cfg(test)]
+    pub(crate) last_key_used: Mutex<Option<String>>,
     /// Dry run: reads work as normal, but nothing that changes N-able is sent.
     dry_run: AtomicBool,
     dry_run_log: Mutex<Vec<DryRunEntry>>,
@@ -227,7 +254,20 @@ impl Core {
         let vault = Arc::new(Vault::new());
         let audit = AuditLog::new(vault.clone(), paths.data_dir.clone());
         let dry_run = std::env::var_os("NVOKE_DRY_RUN").is_some_and(|v| !v.is_empty() && v != "0");
-        Ok(Self { paths, http, api_key: Mutex::new(None), vault, audit, dry_run: AtomicBool::new(dry_run), dry_run_log: Mutex::new(vec![]) })
+        Ok(Self {
+            paths,
+            http,
+            api_key: Mutex::new(None),
+            vault,
+            audit,
+            secrets: Arc::new(credentials::BundleStore::new(credentials::KeyringStore)),
+            rest: Default::default(),
+            graphql_override: Mutex::new(None),
+            #[cfg(test)]
+            last_key_used: Mutex::new(None),
+            dry_run: AtomicBool::new(dry_run),
+            dry_run_log: Mutex::new(vec![]),
+        })
     }
 
     /// A core for tests of code built on it: its own throwaway directory, a fake API key, and an
@@ -242,9 +282,23 @@ impl Core {
         fs::write(paths.config_file(), r#"{ "apiUrl": "https://127.0.0.1:9/graphql", "historyDays": 30 }"#).unwrap();
         let mut core = Core::new_in(paths, "test").unwrap();
         core.vault = Arc::new(Vault::for_tests());
+        core.secrets = Arc::new(credentials::MemoryStore::default());
         *core.api_key.lock().unwrap() = Some("test-key-not-real".into());
         core.set_dry_run(false);
         Arc::new(core)
+    }
+
+    /// Makes every GraphQL request be answered by `fake(query, variables)` with (HTTP status, body text),
+    /// without touching the network. Mutations still go through dry-run and audit first.
+    #[doc(hidden)]
+    pub fn set_graphql_fake(&self, fake: impl Fn(&str, &Value) -> (u16, String) + Send + Sync + 'static) {
+        *self.graphql_override.lock().unwrap() = Some(Arc::new(fake));
+    }
+
+    /// Makes Ecoverse answer every asset search with no assets, so a test that doesn't care about Ecoverse doesn't wait on a connection.
+    #[doc(hidden)]
+    pub fn set_empty_ecoverse(&self) {
+        self.set_graphql_fake(|_, _| (200, json!({ "data": { "page": { "totalCount": 0, "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [] } } }).to_string()));
     }
 
     pub fn set_dry_run(&self, on: bool) {
@@ -271,14 +325,13 @@ impl Core {
             Some(meta) => (meta.action.clone(), meta.summary.clone()),
             None => ("mutation".to_string(), format!("Ran {}", operation.as_deref().unwrap_or("a mutation"))),
         };
+        self.push_dry_run(action, summary, operation, audit::redact(variables));
+    }
+
+    /// Records a change dry-run held back. `variables` must already be redacted.
+    pub(crate) fn push_dry_run(&self, action: String, summary: String, operation: Option<String>, variables: Value) {
         let mut log = self.dry_run_log.lock().unwrap();
-        log.push(DryRunEntry {
-            timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            action,
-            summary,
-            operation,
-            variables: audit::redact(variables),
-        });
+        log.push(DryRunEntry { timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true), action, summary, operation, variables });
         if log.len() > MAX_DRY_RUN_ENTRIES {
             log.remove(0);
         }
@@ -342,7 +395,7 @@ impl Core {
         let previous = self.load_config();
         let previous_url = previous.api_url.clone();
         let history_days = history_days.unwrap_or(previous.history_days).min(3650);
-        self.save_config(&Config { api_url: api_url.clone(), history_days })?;
+        self.save_config(&Config { api_url: api_url.clone(), history_days, ncentral_servers: previous.ncentral_servers.clone(), migration: previous.migration.clone() })?;
         if previous.history_days != history_days {
             let summary = if history_days == 0 { "Stopped saving run history".to_string() } else { format!("Keep run history for {history_days} days") };
             let details = json!({ "from": previous.history_days, "to": history_days });
@@ -430,7 +483,14 @@ impl Core {
     }
 
     async fn send_graphql(&self, query: &str, variables: &Value) -> Result<GraphQlResponse, String> {
-        let key = self.current_key().await?.ok_or("No API key is configured. Add one in Settings.")?;
+        let key = match ECO_KEY.try_with(|k| k.clone()) {
+            Ok(scoped) => scoped,
+            Err(_) => self.current_key().await?.ok_or("No API key is configured. Add one in Settings.")?,
+        };
+        #[cfg(test)]
+        {
+            *self.last_key_used.lock().unwrap() = Some(key.clone());
+        }
         let url = self.load_config().api_url;
 
         // Developer aid: NVOKE_LOG_REQUESTS=1 prints one line per API request.
@@ -438,6 +498,11 @@ impl Core {
             let condensed = query.split_whitespace().collect::<Vec<_>>().join(" ");
             let op: String = condensed.chars().take(110).collect();
             eprintln!("[graphql] {op}");
+        }
+
+        if let Some(fake) = self.graphql_override.lock().unwrap().clone() {
+            let (status, text) = fake(query, variables);
+            return Ok(GraphQlResponse { status, body: response_body(status, &text)? });
         }
 
         let mut attempt = 0;
@@ -521,10 +586,39 @@ impl Core {
 
     /// Deletes all stored history and cached data (not the audit log or settings).
     pub async fn clear_local_data(&self) -> Result<(), String> {
-        let result = match fs::remove_dir_all(self.paths.store_dir()) {
+        // Migration projects first: each one's data key is destroyed, then every file is overwritten and removed.
+        let dir = self.paths.store_dir();
+        let secrets = self.secrets.clone();
+        let shredded = blocking(move || {
+            let entries = match fs::read_dir(&dir) {
+                Ok(e) => e,
+                Err(_) => return Ok(()),
+            };
+            let mut first_error = None;
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if let Some(id) = name.strip_prefix("migration-").and_then(|n| n.strip_suffix(".enc")).filter(|n| !n.starts_with("lease-"))
+                    && let Err(e) = secrets.delete(&migration::store::project_key_account(id))
+                {
+                    first_error.get_or_insert(e);
+                }
+                if entry.path().is_file()
+                    && let Err(e) = vault::shred_file(&entry.path())
+                {
+                    first_error.get_or_insert(e);
+                }
+            }
+            first_error.map_or(Ok(()), Err)
+        })
+        .await;
+        migration::forget_all_memory();
+        let result = match shredded.and_then(|()| match fs::remove_dir_all(self.paths.store_dir()) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(format!("Couldn't clear local data: {e}")),
+        }) {
+            Ok(()) => Ok(()),
+            Err(e) => Err(e),
         };
         self.audit.append(&AuditEntry::new("data.clear", "Cleared run history and cached data", result.clone(), Value::Null));
         result
@@ -640,6 +734,7 @@ mod tests {
                 api::RunInput { name: "Mode".into(), variable: "mode".into(), kind: InputType::String, value: InputValue { string_value: Some("fast".into()), ..Default::default() } },
                 api::RunInput { name: "Pass".into(), variable: "pw".into(), kind: InputType::Password, value: InputValue { string_value: Some("s3cret-value".into()), ..Default::default() } },
             ],
+            run_when_online: false,
         };
         assert_eq!(core.run_script(&input).await.err().as_deref(), Some(DRY_RUN_ERROR));
         let entry = &core.dry_run_log()[0];

@@ -602,7 +602,7 @@ impl App {
                 self.dry_table.select((!self.core.dry_run_log().is_empty()).then_some(0));
                 self.dry_scroll = 0;
             }
-            KeyCode::Char(c @ '1'..='5') => self.go(Page::ALL[c as usize - '1' as usize]),
+            KeyCode::Char(c @ '1'..='6') => self.go(Page::ALL[c as usize - '1' as usize]),
             KeyCode::Tab => self.go(Page::ALL[(self.page.index() + 1) % Page::ALL.len()]),
             KeyCode::BackTab => self.go(Page::ALL[(self.page.index() + Page::ALL.len() - 1) % Page::ALL.len()]),
             _ => match self.focus {
@@ -1028,6 +1028,7 @@ mod tests {
             created_at: format!("2026-10-17T12:0{}:00Z", id.len()),
             timeout_seconds: 0,
             warnings: None,
+            migration_project: None,
             tasks: vec![task],
         }
     }
@@ -1267,7 +1268,7 @@ mod tests {
         let mut done = nvoke_core::task_state::JobTask::new("t1", None, "PC", 0);
         done.watching = false;
         let running = nvoke_core::task_state::JobTask::new("t2", None, "PC", 0);
-        let job = |id: &str, task| nvoke_core::jobs::Job { id: id.into(), name: id.into(), script_id: None, script: None, script_name: id.into(), org_id: None, org_name: None, target_label: "PC".into(), created_at: "2026-10-17T12:00:00.000Z".into(), timeout_seconds: 0, warnings: None, tasks: vec![task] };
+        let job = |id: &str, task| nvoke_core::jobs::Job { id: id.into(), name: id.into(), script_id: None, script: None, script_name: id.into(), org_id: None, org_name: None, target_label: "PC".into(), created_at: "2026-10-17T12:00:00.000Z".into(), timeout_seconds: 0, warnings: None, migration_project: None, tasks: vec![task] };
         app.jobs.seed(vec![job("finished", done), job("running", running)]);
         app.sync_jobs();
         app.go(Page::Settings);

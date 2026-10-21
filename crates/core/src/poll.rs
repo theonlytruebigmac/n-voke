@@ -12,8 +12,10 @@ use crate::{
 
 pub const POLL_INTERVAL_MS: u64 = 5000;
 pub const MAX_POLL_FAILURES: u32 = 5;
-/// Tasks fetched per request (aliased into one GraphQL query).
-pub const POLL_BATCH_SIZE: usize = 20;
+/// Tasks fetched per request (aliased into one GraphQL query). The API allows at
+/// most 5 aliases and 130 fields per operation; a task selects about 30 fields,
+/// so 5 already exceeds the field limit (`MAX_HEIGHT_LIMIT`).
+pub const POLL_BATCH_SIZE: usize = 4;
 
 /// Stops watching tasks whose watch window has passed. Returns whether anything changed.
 pub fn expire(jobs: &mut [Job], now_ms: i64) -> bool {
@@ -102,6 +104,7 @@ mod tests {
             created_at: "2026-10-17T12:00:00Z".into(),
             timeout_seconds: timeout,
             warnings: None,
+            migration_project: None,
             tasks,
         }
     }
@@ -140,9 +143,9 @@ mod tests {
     fn only_watched_tasks_are_asked_about_and_requests_are_batched() {
         let mut stopped = task("stopped", 0);
         stopped.watching = false;
-        let many: Vec<JobTask> = (0..45).map(|i| task(&format!("t{i}"), 0)).collect();
+        let many: Vec<JobTask> = (0..9).map(|i| task(&format!("t{i}"), 0)).collect();
         let batches = watched_batches(&[job("j1", 0, vec![stopped]), job("j2", 0, many)]);
-        assert_eq!(batches.iter().map(Vec::len).collect::<Vec<_>>(), [20, 20, 5]);
+        assert_eq!(batches.iter().map(Vec::len).collect::<Vec<_>>(), [4, 4, 1]);
         assert!(batches.iter().flatten().all(|id| id != "stopped"));
         assert_eq!(batches[0][0], "t0");
     }

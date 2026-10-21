@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
 
 env:
@@ -43,6 +43,9 @@ jobs:
       - name: Version files in sync
         run: npm run version:check
 
+      - name: TypeScript bindings match the Rust types
+        run: npm run bindings:check
+
       - name: Type-check and build frontend
         run: npm run build
 
@@ -57,3 +60,36 @@ jobs:
 
       - name: Terminal app tests
         run: cargo test --manifest-path crates/tui/Cargo.toml
+
+  # The scripts that run on devices as SYSTEM. Windows PowerShell 5.1 is what they run under in
+  # production, so the Windows leg is the one that counts; the Linux leg runs the same tests in pwsh.
+  endpoint-scripts:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            shell: powershell
+          - os: ubuntu-latest
+            shell: pwsh
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install Pester and PSScriptAnalyzer
+        run: |
+          Install-Module Pester -MinimumVersion 5.0.0 -Force -SkipPublisherCheck -Scope CurrentUser
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+
+      - name: Analyze and test the endpoint scripts
+        working-directory: scripts/migration/endpoint
+        run: ./run-tests.ps1

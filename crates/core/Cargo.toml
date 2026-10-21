@@ -1,6 +1,6 @@
 [package]
 name = "nvoke-core"
-version = "0.1.2"
+version = "0.2.0"
 license = "MIT"
 description = "Shared core of N-voke: API client, settings, keychain, encrypted local storage and audit log"
 authors = ["theonlytruebigmac"]
@@ -18,3 +18,14 @@ base64 = "0.23.1"
 dirs = "6"
 regex = "1"
 uuid = { version = "1", features = ["v4"] }
+flate2 = "1"
+sha2 = "0.10"
+ts-rs = { version = "12.0.1", optional = true }
+
+# Generates the desktop app's TypeScript types from the Rust types: `npm run bindings` (src/lib/migrate/bindings).
+[features]
+ts = ["dep:ts-rs"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+

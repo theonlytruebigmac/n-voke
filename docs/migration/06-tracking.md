@@ -1,0 +1,159 @@
+# 6. Tracking and progress
+
+Every device in a migration moves through fixed stages. The tracker works out each device's stage from the APIs, so the same view works on both delivery paths and after the app restarts.
+
+## Device stages
+
+```mermaid
+stateDiagram-v2
+    [*] --> Planned
+    Planned --> Launched: launch accepted (task ID)
+    Planned --> Unreachable: no path available
+    Unreachable --> Planned: device seen online again
+    Launched --> NotPickedUp: no execution after threshold
+    NotPickedUp --> Launched: picked up late
+    NotPickedUp --> Planned: cancel and retry (same or other path)
+    Launched --> Staged: launcher succeeded (TaskCreated)
+    Launched --> LaunchFailed: task failed / rejected / expired
+    LaunchFailed --> Planned: retry (same or other path)
+    Staged --> AgentRemoved: source agent stops checking in
+    Staged --> StuckStaged: still online after threshold
+    StuckStaged --> AgentRemoved
+    StuckStaged --> Planned: relaunch after probe
+    AgentRemoved --> Registered: device appears on destination
+    AgentRemoved --> Lost: nothing on destination after threshold
+    Lost --> Registered: appears later
+    Registered --> Healthy: checking in on destination
+    Registered --> WrongPlace: under an unexpected customer
+    Healthy --> CleanedUp: cleanup returned Cleaned=true
+    CleanedUp --> Retired: source record tagged or deleted
+    Retired --> [*]
+```
+
+| Stage | Meaning |
+|---|---|
+| **Planned** | Selected, mapped and assigned a path; ready to launch |
+| **Unreachable** | No path can reach it now (see [Delivery paths](04-delivery-paths.md#when-neither-path-works)) |
+| **Launched** | The API accepted the launch; we have a task ID |
+| **Staged** | The launcher ran and registered the scheduled task |
+| **Agent removed** | The old agent went quiet: the cleanup and install are running |
+| **Registered** | A matching device exists on the destination |
+| **Healthy** | That device is checking in to the destination and, when the destination is linked to Ecoverse, its new asset there is `CONNECTED` |
+| **Cleaned up** | The device's records are gone: `Cleanup` ran (and returned `status.json`), or the review period ended and the device removed them itself |
+| **Retired** | The old source record is tagged as migrated, or deleted (optional; only after the review period, and with approval) |
+
+## Failure and attention states
+
+| State | Trigger (defaults, all configurable) | Likely cause | What N-voke offers |
+|---|---|---|---|
+| **Launch failed** | Launch rejected, task failed, or expired before pickup | Permission, device offline, script missing | Retry; retry on the other path |
+| **Not picked up** | Launched on Ecoverse, the device reports `CONNECTED`, but the task has **no execution** 30 minutes later. Tasks launched with `shouldRunWhenOnline` for a device that was offline aren't flagged while the device stays offline: a queued task looks identical (`IN_PROGRESS`, no execution) and outlives its `timeoutSeconds`. Ecoverse doesn't expire such a task on its own (seen in the lab: still `IN_PROGRESS` with no execution after 28 minutes, far beyond `timeoutSeconds`) | Delivery delay in Ecoverse, or the device's UFA script component starved or stuck | Keep waiting; cancel (`scriptTasksCancel`) and relaunch; or relaunch on the REST path |
+| **Stuck staged** | Staged, but the source agent still checks in 90 minutes later | Task not firing, destination unreachable from the device, installer failing before the uninstall, or a slow download | Run the status probe; show `status.json` and the task's last result |
+| **Lost** | Agent removed, nothing on the destination after 4 hours | Install failed after the uninstall, or a very slow machine. The task keeps retrying | Keep watching; flag for out-of-band follow-up; export the list |
+| **Waiting on Windows** | The installer reports `waiting-on-windows` (Windows Installer busy, e.g. Windows Update) | Another installation in progress | Keep waiting; it retries every run and doesn't count toward Lost |
+| **Ecoverse not moved** | Only for projects whose destination is linked to Ecoverse: healthy in N-central on the destination, but no `CONNECTED` asset in the destination tenant 75 minutes later (or the asset is still in the source tenant). The 75 minutes allow for the UFA core self-upgrade, which retries only hourly: a failed first download delayed provisioning in the lab. With an unlinked destination, leaving Ecoverse is expected and shown as information, not attention | `CleanMode=none` with an in-place upgrade (the UFA keeps its source enrolment), or the new UFA not provisioning | Probe through whichever tenant still sees it; restart `MspAgent` (the installer does this once); relaunch with full cleanup |
+| **Ecoverse data stalled** | The asset has been `CONNECTED` with no inventory for 45 minutes (the destination's, or a source device's), and the device's `status.json` shows no restart of the Ecoverse agent since | The Ecoverse agent's configuration fetch timed out and waits for its hourly retry (timeouts in its core log); a `MspAgent` restart fetches it at once | **Restart Ecoverse agent** (over REST, because Ecoverse can't deliver scripts to an asset with no data); then watch for inventory for another 15 minutes; otherwise show what the log says and leave it to the operator |
+| **Ecoverse login rejected** | The device's `status.json` says `ufa.sync = rejected` (or Ecoverse data is still missing after 90 minutes with the asset `CONNECTED`) | The cloud's front end rejects the agent's client certificate (`400 The SSL certificate error`), or its auth service is unreachable. Not fixed by a restart in the lab | The installer repairs it once (fixed both lab VMs). If it's still refused after the repair, show the evidence from `status.json`, check the device's network path to the cloud (TLS inspection, proxy, firewall) and report to N-able. The move itself is unaffected (N-central health doesn't depend on Ecoverse) |
+| **Wrong place** | Registered under a customer other than the mapped one | Mapping error, wrong customer ID input | Show the expected and actual customer; leave it for the operator |
+| **Ambiguous match** | More than one destination device could be this one | Duplicate host names, imaged machines | Ask the operator to choose |
+| **Duplicate launch** | A second launch would overlap a live one | Operator action, path switch | Blocked unless the first launch has ended |
+
+## Known delays
+
+A device is built up in steps, each with its own wait. Seen in the lab ([findings](10-phase0-findings.md#known-delays-2026-10-20)); the minutes are from deliberately slow 2 GB VMs, so real devices should be faster, but the **order and the dependencies** hold on any machine.
+
+```mermaid
+flowchart LR
+    A[Windows Agent installed] -->|minutes| B[Device on the server<br/>first check-in]
+    A -->|~2-3 min, then the agent deploys the UFA| C[UFA starts]
+    C -->|core self-upgrade first;<br/>a failed download retries hourly| D[UFA provisioned<br/>asset appears]
+    D -->|minutes| E[Asset CONNECTED]
+    E -->|initial data sync: minutes to tens of minutes| F[Inventory present<br/>scripts run]
+```
+
+| Delay | Typical (lab) | Worst seen | What it breaks if ignored | What N-voke does |
+|---|---|---|---|---|
+| Windows Agent installed → first check-in on the server | 5–6 min | — | A device looks lost | Registered is detected from the destination listing before the first check-in |
+| Windows Agent → UFA deployed (the agent installs it as a component some minutes later) | ~2–3 min | — | A freshly installed device has no Ecoverse asset yet | Never read "no asset" as "no UFA" on a device installed recently |
+| UFA core self-upgrade before provisioning | none to ~9 min | up to ~1 h when the first download fails and waits for the hourly retry | Provisioning waits; the asset appears late | *Ecoverse not moved* only after 75 min |
+| Asset created → `CONNECTED` | ~5 min | — | — | — |
+| **`CONNECTED` → initial data sync**: the asset shows `CONNECTED` but inventory (host name, serial, MAC, hardware) is empty, and **script tasks are held** until it finishes | minutes | first task ran ~38 min after `CONNECTED` | Matching by serial or MAC finds nothing; a script launch looks stuck; a survey shows blank inventory | See below |
+
+| **Stalled sync**: the Ecoverse agent's configuration fetch timed out (its login-token request to the cloud timed out) and it retries only hourly, so the asset stays `CONNECTED` with no inventory | Seen on a larger lab VM: the cloud was unreachable for ~30 min, then the data arrived at the next hourly check ~35 min after it was reachable again | up to ~1 hour after the cloud answers again | Looks exactly like the ordinary data-sync delay | The installer's [watchdog](05-endpoint-scripts.md#ufa-sync-watchdog) restarts `MspAgent` once the cloud answers again (max 2, 120 min limit); the tracker escalates *Ecoverse data pending* to *Ecoverse data stalled* with a **Restart Ecoverse agent** action |
+
+| **Components denied**: the login works but the component CDN answers the agent's downloads with `403`, so no inventory arrives | One larger lab VM, 28+ minutes; a plain `curl` to the CDN from it worked; a restart didn't help, the repair did | Not seen to clear | The asset is `CONNECTED` with no data, like an ordinary sync delay | The watchdog reports it (`ufa.sync = denied`) and repairs once after 30 minutes; the tracker shows *Ecoverse data stalled* with the log evidence |
+| **Login rejected**: the agent's token request gets `400 The SSL certificate error` (or keeps timing out) from the first attempt after provisioning and is never accepted | Two of three larger lab VMs, for 90+ minutes; a restart didn't help | Not seen to clear | The asset is `CONNECTED` (its message connection works) but gets no components and no data | The watchdog reports it (`ufa.sync = rejected`), doesn't restart (it doesn't help), and after 30 minutes does the **repair** once (uninstall the UFA core, restart the Windows Agent services; fixed both lab VMs). The tracker shows *Ecoverse login rejected* with the log evidence |
+
+What this means for the tool:
+
+- **Survey and Plan:** a source device whose asset is `CONNECTED` but has no inventory yet is marked **Ecoverse data pending**, not unreachable and not failed. It can still be planned by N-central record (REST). Matching uses N-central data first and falls back to Ecoverse inventory only when it's present.
+- **Launch:** don't treat a queued Ecoverse launch on a newly synced asset as *Not picked up* inside the sync window. The 30-minute threshold counts from the first time the asset reports inventory, or 60 minutes after `CONNECTED` if it never does; then offer cancel and relaunch, or the REST path.
+- **After the move:** the destination's Ecoverse asset is a late, optional signal. Health comes from destination check-ins over REST; the Ecoverse asset only upgrades the device from **Healthy** to **Healthy, Ecoverse linked**.
+- **Operator messages:** say what is being waited for and roughly how long, not just *waiting*. For example: *"Windows Agent is healthy. The Ecoverse agent is still setting up (installed 12 min ago); this commonly takes 20–60 minutes and doesn't block the move."* An engineer should never have to guess whether a device is stuck or just slow.
+- **Fresh installs:** for a project whose devices were installed in the last hour (labs, new customers), the survey warns up front that Ecoverse data may be incomplete. **Not built:** neither the N-central device list nor the Ecoverse asset gives an install time, so the survey cannot tell. What the app does instead is show, for each healthy device, whether Ecoverse is receiving its asset data (*Waiting for Ecoverse*).
+
+## How each stage is detected
+
+| Transition | Ecoverse path | REST path |
+|---|---|---|
+| Launched → Staged | Run `SUCCEEDED` and output `TaskCreated = true` (Ecoverse returns `exitCode` as null; a script-reported failure is `FAILED` with `exit status <code>` in `errorMessage` and the outputs intact) | `/status/details` `status: Success`, then `TaskCreated` from the `NVOKE-RESULT {json}` line and `Exit Code`, both read from the output zip at `outputFileName` (`output` is only a ~500-character preview). Never `/status`, which reports failed runs as `Completed` |
+| Launched → Launch failed | Execution failed or non-zero exit; task cancelled or expired (existing N-voke rules) | `/status/details` failed or expired |
+| Staged → Agent removed | Source asset `DISCONNECTED` (with full cleanup this happens about 3 minutes into the first install run, when the UFA is removed) **or** the device already appearing on the destination. The source's `lastApplianceCheckinTime` alone is not reliable: it drifts by fractions of a second while a device is off, a slow device keeps checking in for minutes while it shuts down, and it jumped by an hour around a move | Destination appearance, or `lastApplianceCheckinTime` older than the threshold |
+| → Registered | First signal: a device with the same host name appears in the mapped destination org unit (`GET /api/org-units/{id}/devices`), about a minute after the install starts and before its first check-in. Confirmed by identity (serial, MAC from `/api/devices/{id}/assets`). Later, the Ecoverse asset whose `ncentralDevice.server.origin` is the destination: a **new asset ID** in the destination's tenant (unless the N-central record was kept, as on a same-server reinstall), which appears only once the UFA provisions there and has empty inventory at first | `GET /api/org-units/{id}/devices` on the mapped destination customer, matched by identity |
+| Registered → Healthy | Destination `lastApplianceCheckinTime` (from `/api/devices/{id}`, which is zoned; the org-unit listing's value has no time zone) within 2 × the check-in interval (first check-in came 5–6 minutes after the install in the lab), **plus**, only when the destination is linked to Ecoverse, the new destination asset `CONNECTED` (2–5 minutes after the first check-in). The installer's own `stage = healthy` (via `Status`, where it can run) confirms it | Destination check-in via REST; `Status` through the destination server's REST path |
+| Healthy → Cleaned up | `Cleanup` output `Cleaned = true` (`StatusJson` stored), or `healthyAt + ReviewDays` has passed (the device removes its own records; nothing to poll) | `Cleaned` and `StatusJson` from the `NVOKE-RESULT {json}` line (the script must be uploaded to the destination server too) |
+| Cleaned up → Retired | Optional (approval needed): `DELETE /api/devices/{id}?removeAgents=false` on the source (confirmed: record removed, and its stale Ecoverse asset disappears within seconds). Without it, the source asset is tagged `nvoke:migrated` and the record is left for the operator | The same |
+
+## Matching the new device to the old one
+
+The new agent always gets a new N-central device ID. Matching uses, in order:
+
+1. **Serial number plus a MAC address**: a strong match.
+2. **Host name plus a MAC address**: a strong match.
+3. **Host name alone**, within the mapped destination customer, created after the launch: a weak match, accepted automatically only if it's the only candidate.
+4. Otherwise **Ambiguous match**, and the operator chooses.
+
+Old and new IDs are both kept on the device record, and the report shows both. Confirmed in the lab: the Ecoverse asset ID **changes** whenever the N-central device record changes (a move to another server, or a reinstall after the record was deleted) and **stays** when the record is kept (same-server reinstall). Matching never relies on it. A new asset's `systemInfo` (serial, host name) is empty for the first minutes, so early matching uses the destination N-central record's assets (`computersystem.serialnumber`, `netbiosname`, `networkadapter.list[].macaddress`).
+
+## Polling
+
+| What | How often | Calls |
+|---|---|---|
+| Launched devices (task status) | Every 5 s for the first 2 min, then every 30 s (Ecoverse batches at most **4 tasks per request**: the API allows 5 aliases and 130 fields per operation) | Ecoverse `task`; REST `/status/details`, then the output zip once finished |
+| Staged and Agent-removed devices (source check-in) | Every 2 min | One `assetSearch` page per org; `GET /api/org-units/{id}/devices` per customer |
+| Agent-removed and Lost devices (destination appearance) | Every 2 min, then every 10 min once Lost | One query per mapped destination customer, not per device |
+| Healthy, Cleaned-up and Retired devices | Not polled | |
+
+Polling is driven by customer, not by device, so a wave of 500 devices across 10 customers costs about 10–20 calls per cycle. All REST calls go through the per-endpoint semaphores and back off on 429.
+
+## The device's own record
+
+The gap is the time after the old agent is removed and before the new one checks in: nothing can report then. The device keeps its own history in `status.json` ([Endpoint scripts](05-endpoint-scripts.md#statusjson)):
+
+- **Before the uninstall**, the status probe reads it through the old agent; this is how Stuck staged is diagnosed. After the full cleanup starts, the old agents are gone and nothing can reach the device until its new UFA provisions on the destination (10–15 minutes in the lab).
+- **After the device arrives**, the cleanup script returns it through the new agent. N-voke stores it on the device's timeline, so every device's report shows attempts, timings, download errors and the installer's exit code.
+- Devices still **Lost** report nothing until they come back. When they do, cleanup collects the record and the timeline fills in.
+
+## Visible outside N-voke
+
+So that technicians who don't use N-voke can see progress:
+
+- **Ecoverse tags** (static): `nvoke:wave-<n>`, `nvoke:staged`, `nvoke:migrated`, `nvoke:attention`. Moved as devices change stage (assigning and unassigning are audited like any change). Tags belong to an asset in one tenant: after a move the device is a **new asset** (often in another tenant), so tags are re-applied there and the old asset disappears when its source record is retired.
+- **N-central custom property** on REST-path devices (optional): a device property such as `Migration Status`, written on stage changes. The property must already exist on the server; N-voke checks this and says so if it doesn't.
+
+## What the operator sees
+
+- **Project dashboard:** a count per stage, progress bars per wave and per customer, time elapsed, an estimate to finish (from the observed rate), and attention items sorted by time stuck.
+- **Device list:** filter by stage, wave, customer or path; columns for old and new names and IDs, path, attempts, time in stage and last error.
+- **Device timeline:** every stage change with its time and evidence (task output, check-in times, the collected `status.json`), and the actions that apply (probe, retry, switch path, choose match, mark resolved).
+- **Wave summary:** results grouped by outcome, the same way Activity groups script results today ("41 × Healthy, 3 × Lost, 1 × Wrong place").
+
+## Reports
+
+- **CSV** per project, wave or customer: one row per device with old and new IDs, path, stage, timestamps, attempts and last error.
+- **HTML** summary: totals, timeline chart, the attention list and per-customer tables. Suitable to send to a customer.
+- Both are written to the downloads folder, readable only by the current user, like exported output today.
+
+## Notifications (later)
+
+Optional webhook (Teams, Slack, generic JSON) when a wave finishes, when devices enter Lost or Wrong place, or daily while a project is active. The payload carries counts and device names only, never tokens.

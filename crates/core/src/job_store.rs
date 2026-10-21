@@ -269,6 +269,7 @@ mod tests {
             created_at: "2026-10-17T12:00:00Z".into(),
             timeout_seconds: 0,
             warnings: None,
+            migration_project: None,
             tasks: vec![task],
         }
     }

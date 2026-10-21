@@ -202,6 +202,7 @@ fn build_request(req: &RunRequest, name: &str) -> Result<RunScriptInput, String>
         name: name.to_string(),
         timeout_seconds: effective_timeout(&req.timeout, &req.script),
         inputs: build_run_inputs(decls, &req.values)?,
+        run_when_online: false,
     })
 }
 
@@ -221,6 +222,7 @@ pub fn job_from_result(req: &RunRequest, name: &str, result: RunResult, now: Dat
         created_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
         timeout_seconds: effective_timeout(&req.timeout, &req.script),
         warnings: Some(result.warnings),
+        migration_project: None,
         tasks: result
             .tasks
             .into_iter()

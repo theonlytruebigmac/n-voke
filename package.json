@@ -2,7 +2,7 @@
   "name": "n-voke",
   "private": true,
   "license": "MIT",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,7 +11,9 @@
     "tauri": "tauri",
     "test": "vitest run",
     "version:bump": "node scripts/version.mjs",
-    "version:check": "node scripts/version.mjs --check"
+    "version:check": "node scripts/version.mjs --check",
+    "bindings": "node scripts/bindings.mjs",
+    "bindings:check": "node scripts/bindings.mjs --check"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.3.0",

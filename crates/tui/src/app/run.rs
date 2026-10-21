@@ -1229,6 +1229,7 @@ pub(crate) mod tests {
             created_at: "2026-10-17T12:00:00.000Z".into(),
             timeout_seconds: 120,
             warnings: None,
+            migration_project: None,
             tasks: vec![task],
         }
     }
