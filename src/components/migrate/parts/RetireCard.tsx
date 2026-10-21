@@ -9,10 +9,14 @@ const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 export function RetireCard({ projectId, onOptions }: { projectId: string; onOptions: () => void }) {
   const retire = useRetire(projectId);
   const run = useRetireActions(projectId);
-  const [confirming, setConfirming] = useState(false);
+  const [confirming, setConfirming] = useState<null | "ready" | "early">(null);
   const [dryRun, setDryRun] = useState(false);
+  const [acknowledged, setAcknowledged] = useState(false);
   const [result, setResult] = useState<RetireReport | null>(null);
   const v = retire.data;
+  const early = confirming === "early";
+  const count = v ? v.ready.length + (early ? v.waiting.length : 0) : 0;
+  const open = (mode: "ready" | "early") => (run.reset(), setDryRun(false), setAcknowledged(false), setConfirming(mode));
 
   const aside = !v ? null : v.turnedOn ? <span className="text-xs text-faint">{plural(v.ready.length, "record")} ready</span> : <Status tone="muted" label="Off" />;
 
@@ -46,33 +50,45 @@ export function RetireCard({ projectId, onOptions }: { projectId: string; onOpti
             {v.inReview > 0 && ` · ${v.inReview} still in the review period${v.nextReviewEnds ? ` (the first ends ${new Date(v.nextReviewEnds).toLocaleDateString()})` : ""}`}
             {v.notCleanedUp > 0 && ` · ${v.notCleanedUp} healthy but not cleaned up`}
           </p>
-          <Button size="sm" disabled={v.ready.length === 0} onClick={() => (run.reset(), setDryRun(false), setConfirming(true))}>
-            Retire old records…
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" disabled={v.ready.length === 0} onClick={() => open("ready")}>
+              Retire old records…
+            </Button>
+            {v.waiting.length > 0 && (
+              <Button size="sm" variant="ghost" onClick={() => open("early")}>
+                Retire before the review period ends…
+              </Button>
+            )}
+          </div>
+          {v.waiting.length > 0 && <p className="text-xs text-faint">The review period is there so you can check each moved device first. You can skip it, with a warning, for example to test retiring.</p>}
         </>
       )}
 
       {confirming && v && (
         <Modal
-          title={run.isPending ? "Retiring…" : `Delete ${plural(v.ready.length, "old record")} from ${v.sourceHost}?`}
+          title={run.isPending ? "Retiring…" : early ? `Delete ${plural(count, "old record")} from ${v.sourceHost} before the review period ends?` : `Delete ${plural(count, "old record")} from ${v.sourceHost}?`}
           description="The device records are deleted from the source server. Nothing is sent to the devices, and this can't be undone."
           dismissible={!run.isPending}
-          onClose={() => setConfirming(false)}
+          onClose={() => setConfirming(null)}
           footer={
             <>
-              <Button disabled={run.isPending} onClick={() => setConfirming(false)}>
+              <Button disabled={run.isPending} onClick={() => setConfirming(null)}>
                 Cancel
               </Button>
               <Button
                 variant="destructive"
                 busy={run.isPending}
+                disabled={early && !dryRun && !acknowledged}
                 onClick={() =>
-                  run.mutate(dryRun, {
-                    onSuccess: (r) => {
-                      setConfirming(false);
-                      setResult(r);
+                  run.mutate(
+                    { dryRun, beforeReviewEnds: early },
+                    {
+                      onSuccess: (r) => {
+                        setConfirming(null);
+                        setResult(r);
+                      },
                     },
-                  })
+                  )
                 }
               >
                 {dryRun ? "Show what would go" : "Delete the records"}
@@ -81,11 +97,30 @@ export function RetireCard({ projectId, onOptions }: { projectId: string; onOpti
           }
         >
           <div className="space-y-3 text-sm">
+            {early && (
+              <p className="rounded-md bg-warn-soft px-3 py-2 text-warn">
+                This skips the review period. The {v.reviewDays}-day review period is the time you have to check that each moved device works before its old record goes.{" "}
+                {plural(v.waiting.length, "device")} {v.waiting.length === 1 ? "is" : "are"} still inside it{v.nextReviewEnds ? ` (the first ends ${new Date(v.nextReviewEnds).toLocaleDateString()})` : ""}. Once the records are deleted they can't be brought back.
+              </p>
+            )}
             <ul className="max-h-48 list-disc space-y-0.5 overflow-y-auto pl-5">
               {v.ready.map((n) => (
                 <li key={n}>{n}</li>
               ))}
+              {early &&
+                v.waiting.map((w) => (
+                  <li key={w.name} className="text-warn">
+                    {w.name}
+                    {w.reviewEnds ? ` (review ends ${new Date(w.reviewEnds).toLocaleDateString()})` : ""}
+                  </li>
+                ))}
             </ul>
+            {early && (
+              <label className="flex cursor-pointer items-start gap-2.5">
+                <input type="checkbox" className="mt-1" checked={acknowledged} onChange={(e) => setAcknowledged(e.target.checked)} />
+                <span>I understand this skips the review period for {plural(v.waiting.length, "device")}.</span>
+              </label>
+            )}
             <label className="flex cursor-pointer items-start gap-2.5">
               <input type="checkbox" className="mt-1" checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} />
               <span>

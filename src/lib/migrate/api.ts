@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { LinkChoice, StructurePreview, StructureReport, RetireReport, RetireView, CandidatePage, CandidateQuery, DeviceChoice, MigrationSettings, PlanQuery, TrackQuery, CleanupReport, ConnectReport, DeviceCommand, DeviceDetail, FinishView, LaunchPreview, LaunchResult, LaunchView, PlanAdded, PlanView, PollDigest, ReportFormat, TrackView, Delivery, DestEcoverse, EcoCredential, MapDetails, MapView, Override, PrepareView, ProjectOptions, ScriptSide, ProjectSummary, ScriptOrg, ServerInfo, ServerView, TokenReport } from "./bindings";
+import type { LinkChoice, StructurePreview, StructureReport, RetireReport, RetireView, CandidatePage, CandidateQuery, DeviceChoice, MigrationSettings, PlanQuery, ProbeReport, TrackQuery, CleanupReport, ConnectReport, DeviceCommand, DeviceDetail, FinishView, LaunchPreview, LaunchResult, LaunchView, PlanAdded, PlanView, PollDigest, ReportFormat, TrackView, Delivery, DestEcoverse, EcoCredential, MapDetails, MapView, Override, PrepareView, ProjectOptions, ScriptSide, ProjectSummary, ScriptOrg, ServerInfo, ServerView, TokenReport } from "./bindings";
 
 // Thin typed wrappers over the Tauri commands. No logic lives here: the rules are in nvoke-core, and the types
 // come from the Rust types (`npm run bindings`), so this file only names the commands.
@@ -74,6 +74,7 @@ export const launchWave = (id: string, wave: number, dryRun: boolean) => invoke<
 export const getTrack = (id: string, query: TrackQuery) => invoke<TrackView>("project_track", { id, query });
 export const getDevice = (id: string, index: number) => invoke<DeviceDetail>("project_device", { id, index });
 export const deviceCommand = (id: string, index: number, command: DeviceCommand) => invoke<string>("project_device_command", { id, index, command });
+export const probeWaiting = (id: string) => invoke<ProbeReport>("project_probe_waiting", { id });
 export const pollNow = (id: string) => invoke<PollDigest>("project_poll", { id });
 export const startTracker = (id: string) => invoke<void>("tracker_start", { id });
 export const stopTracker = (id: string) => invoke<void>("tracker_stop", { id });
@@ -84,7 +85,7 @@ export const cleanupHealthy = (id: string, only: string[] | null) => invoke<Clea
 export const getStructurePreview = (id: string) => invoke<StructurePreview>("project_structure_preview", { id, only: null });
 export const createStructure = (id: string, serviceOrgId: string, dryRun: boolean) => invoke<StructureReport>("project_structure_create", { id, serviceOrgId, only: null, dryRun });
 export const getRetire = (id: string) => invoke<RetireView>("project_retire_view", { id });
-export const retireSources = (id: string, dryRun: boolean) => invoke<RetireReport>("project_retire", { id, dryRun });
+export const retireSources = (id: string, dryRun: boolean, beforeReviewEnds: boolean) => invoke<RetireReport>("project_retire", { id, dryRun, beforeReviewEnds });
 export const cancelCleanup = (id: string) => invoke<void>("project_cleanup_cancel", { id });
 
 export const getMigrationSettings = () => invoke<MigrationSettings>("migration_settings_get");

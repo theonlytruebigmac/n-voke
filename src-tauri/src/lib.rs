@@ -19,7 +19,7 @@ use nvoke_core::{
         project::{Delivery, DestEcoverse, ProjectOptions, ScriptOrg},
         store::ProjectSummary,
         settings::MigrationSettings,
-        trackview::{DeviceCommand, DeviceDetail, PollDigest, TrackQuery, TrackView},
+        trackview::{DeviceCommand, DeviceDetail, PollDigest, ProbeReport, TrackQuery, TrackView},
         workflow::TokenReport,
     },
     ncentral::{EcoCredential, ServerView, model::ServerInfo},
@@ -328,6 +328,15 @@ async fn project_device_command(core: State<'_, Core>, locks: State<'_, ProjectL
     core.migration_device_command(&id, &instance(), index, command).await
 }
 
+/// Probes the healthy devices that are waiting for Ecoverse's data, one after another (longest-waiting first, a limited
+/// number per request), and says what their Ecoverse agents reported.
+#[tauri::command]
+async fn project_probe_waiting(core: State<'_, Core>, locks: State<'_, ProjectLocks>, id: String) -> Result<ProbeReport, String> {
+    let lock = locks.get(&id);
+    let _held = lock.lock().await;
+    core.migration_probe_waiting(&id, &instance()).await
+}
+
 #[tauri::command]
 async fn project_finish(core: State<'_, Core>, id: String) -> Result<FinishView, String> {
     core.migration_finish_view(&id).await
@@ -381,12 +390,13 @@ async fn project_retire_view(core: State<'_, Core>, id: String) -> Result<Retire
     core.migration_retire_view(&id).await
 }
 
-/// Deletes the old source records of the cleaned-up devices whose review period is over. With `dry_run` nothing is sent.
+/// Deletes the old source records of the cleaned-up devices whose review period is over. With `dry_run` nothing is
+/// sent. With `before_review_ends` the cleaned-up devices still inside their review period go too (the page warns first).
 #[tauri::command]
-async fn project_retire(core: State<'_, Core>, locks: State<'_, ProjectLocks>, id: String, dry_run: bool) -> Result<RetireReport, String> {
+async fn project_retire(core: State<'_, Core>, locks: State<'_, ProjectLocks>, id: String, dry_run: bool, before_review_ends: bool) -> Result<RetireReport, String> {
     let lock = locks.get(&id);
     let _held = lock.lock().await;
-    core.migration_retire_sources(&id, &instance(), dry_run).await
+    core.migration_retire_sources(&id, &instance(), dry_run, before_review_ends).await
 }
 
 /// Asks a running bulk cleanup to stop after the device it is on.
@@ -581,6 +591,7 @@ pub fn run() {
             project_track,
             project_device,
             project_device_command,
+            project_probe_waiting,
             project_finish,
             project_report,
             project_cleanup,

@@ -12,10 +12,12 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use super::{
+    deviceufa::{DeviceUfa, UfaState, device_ufa},
+    finish::CleanupFailure,
     packager::Package,
     planner::DeliveryPath,
     poller::PollReport,
-    project::{EcoState, Event, MatchCandidate, Project, ProjectDevice, Stage},
+    project::{DestEcoverse, EcoState, Event, MatchCandidate, Project, ProjectDevice, Stage},
     workflow::{DeviceOp, retryable},
 };
 use crate::{Core, ncentral::model::OrgUnit};
@@ -24,6 +26,8 @@ use crate::{Core, ncentral::model::OrgUnit};
 const NAMES_FOR: Duration = Duration::from_secs(600);
 /// How long Probe and Cleanup wait for the device to answer.
 const ACTION_WAIT: Duration = Duration::from_secs(120);
+/// Devices probed per request, longest-waiting first: each one is a script run on a device, one after another.
+pub(crate) const PROBE_BATCH: usize = 20;
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "TrackRow.ts"))]
@@ -233,6 +237,9 @@ pub struct DeviceDetail {
     /// Why Ecoverse doesn't show it, when it doesn't: where it was looked and what was found there.
     pub ecoverse_note: Option<String>,
     pub waiting_for_ecoverse: bool,
+    /// What the device's own record says about its Ecoverse agent, from the last Probe. Only for a project whose
+    /// destination is linked to Ecoverse; none when the device hasn't been probed.
+    pub device_ufa: Option<DeviceUfa>,
     pub candidates: Vec<DeviceCandidate>,
     pub actions: Vec<DeviceAction>,
     /// Oldest first.
@@ -281,6 +288,30 @@ pub fn digest(report: &PollReport, at: &str) -> PollDigest {
         errors: report.errors.clone(),
         at: at.into(),
     }
+}
+
+/// What a bulk Probe of the devices waiting for Ecoverse's data found.
+#[derive(Serialize, Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "ProbeReport.ts"))]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeReport {
+    /// Devices that answered.
+    pub probed: usize,
+    /// Of those, how many reported each state of their Ecoverse agent, most common first.
+    pub states: Vec<UfaCount>,
+    /// Answered, but with no record of the Ecoverse agent in it.
+    pub no_record: usize,
+    pub failed: Vec<CleanupFailure>,
+    /// Still waiting for Ecoverse's data and not probed this time: only so many are probed at once.
+    pub not_reached: usize,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "UfaCount.ts"))]
+#[serde(rename_all = "camelCase")]
+pub struct UfaCount {
+    pub state: UfaState,
+    pub count: usize,
 }
 
 /// What the operator can do for a device in this stage. The core refuses an action that doesn't fit when it is asked
@@ -401,6 +432,7 @@ pub fn device_detail(project: &Project, index: usize, source_names: &HashMap<Str
         ecoverse: d.ecoverse,
         ecoverse_note: d.ecoverse_note.clone(),
         waiting_for_ecoverse: project.waiting_for_ecoverse(d),
+        device_ufa: if project.dest_ecoverse == DestEcoverse::NotLinked { None } else { device_ufa(&d.events) },
         candidates: d.match_candidates.iter().map(|MatchCandidate { device_id, name }| DeviceCandidate { device_id: device_id.clone(), name: name.clone() }).collect(),
         actions: actions_for(d),
         events: d.events.iter().map(|Event { at, kind, detail }| DeviceEvent { at: at.clone(), kind: kind.clone(), detail: detail.clone() }).collect(),
@@ -499,6 +531,44 @@ impl Core {
         }
     }
 
+    /// Probes the healthy devices that are waiting for Ecoverse's data, one after another, saving after each so a stop
+    /// part-way loses nothing, and says what their Ecoverse agents reported. Longest-waiting first, at most
+    /// `PROBE_BATCH` at a time; the rest are counted in `not_reached`. A device that can't be reached is reported and
+    /// the rest go on.
+    pub async fn migration_probe_waiting(&self, id: &str, instance: &str) -> Result<ProbeReport, String> {
+        use crate::migration::packager::Operation;
+        let package = Package::embedded()?;
+        let mut project = self.migration_open_for_write(id, instance).await?;
+        let mut targets: Vec<usize> = project.devices.iter().enumerate().filter(|(_, d)| d.stage == Stage::Healthy && project.waiting_for_ecoverse(d)).map(|(i, _)| i).collect();
+        targets.sort_by(|a, b| project.devices[*a].entered_stage_at.cmp(&project.devices[*b].entered_stage_at));
+        let mut report = ProbeReport { not_reached: targets.len().saturating_sub(PROBE_BATCH), ..Default::default() };
+        targets.truncate(PROBE_BATCH);
+        let mut counts: Vec<UfaCount> = vec![];
+        for index in targets {
+            let name = project.devices[index].name.clone();
+            let outcome = self.migration_run_action(&mut project, index, Operation::Status, &package, ACTION_WAIT).await;
+            self.migration_save(&mut project).await?;
+            match outcome {
+                Ok(_) => {
+                    report.probed += 1;
+                    // Only the answer just recorded counts: an older Probe's state would be stale.
+                    let just_now = project.devices[index].events.last().map(std::slice::from_ref).and_then(device_ufa);
+                    match just_now {
+                        Some(ufa) => match counts.iter_mut().find(|c| c.state == ufa.state) {
+                            Some(c) => c.count += 1,
+                            None => counts.push(UfaCount { state: ufa.state, count: 1 }),
+                        },
+                        None => report.no_record += 1,
+                    }
+                }
+                Err(why) => report.failed.push(CleanupFailure { name, why }),
+            }
+        }
+        counts.sort_by(|a, b| b.count.cmp(&a.count));
+        report.states = counts;
+        Ok(report)
+    }
+
     /// One tracker pass on the saved project.
     pub async fn migration_poll_digest(&self, id: &str, instance: &str) -> Result<PollDigest, String> {
         let (_, report) = self.migration_poll_saved(id, instance, &self.migration_settings().thresholds()).await?;
@@ -589,6 +659,23 @@ mod tests {
         assert_eq!(detail.events.last().map(|e| e.kind.as_str()), Some("launch"));
         assert_eq!(detail.events.first().map(|e| e.kind.as_str()), Some("stage"));
         assert!(device_detail(&p, 9, &HashMap::new(), &HashMap::new()).is_err());
+    }
+
+    #[test]
+    fn the_detail_carries_the_agents_state_from_the_last_probe_only_when_the_destination_is_linked_to_ecoverse() {
+        let now = chrono::Utc::now();
+        let status = r#"{"ufa":{"present":true,"running":true,"provisioned":true,"sync":"blocked"},"ufaSyncRestarts":1}"#;
+        for (link, expected) in [(DestEcoverse::SameTenant, true), (DestEcoverse::NotLinked, false)] {
+            let mut p = Project::new("p".into(), "x", "a", "b", link, now);
+            p.add_planned(&[planned("1", "10", "110")], now);
+            assert!(device_detail(&p, 0, &HashMap::new(), &HashMap::new()).unwrap().device_ufa.is_none(), "not probed yet");
+            p.devices[0].record(now, "status", &format!("Status via N-central: Last log: awaiting-ufa\nstatus.json: {status}"));
+            let ufa = device_detail(&p, 0, &HashMap::new(), &HashMap::new()).unwrap().device_ufa;
+            assert_eq!(ufa.is_some(), expected);
+            if let Some(ufa) = ufa {
+                assert_eq!((ufa.state, ufa.restarts), (crate::migration::deviceufa::UfaState::Blocked, 1));
+            }
+        }
     }
 
     #[test]

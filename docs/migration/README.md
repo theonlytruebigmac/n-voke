@@ -30,6 +30,7 @@ Redeploying an N-central agent means running `WindowsAgentSetup.exe` against the
 | 9 | [Roadmap and open questions](09-roadmap.md) | Phases, acceptance criteria, the proof-of-concept test plan and open risks |
 | 10 | [Phase 0 findings](10-phase0-findings.md) | What the lab tests showed, and how it changes the plan |
 | 11 | [Desktop app design](11-gui-design.md) | The Migrate page: screens, wording, commands, live updates and build order (draft for review) |
+| 12 | [Troubleshooting](12-troubleshooting.md) | The Ecoverse agent after a move: network prerequisites, reading the device sheet, checking the network path, and the repair by hand |
 
 ## Goals
 

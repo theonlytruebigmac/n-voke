@@ -1,4 +1,4 @@
-import type { EcoState, Stage } from "./bindings";
+import type { DeviceUfa, EcoState, Stage, UfaState } from "./bindings";
 
 /** How the existing `Status` and `Dot` components colour a state. */
 export type Tone = "ok" | "warn" | "err" | "accent" | "muted";
@@ -97,6 +97,63 @@ export const ECO_WORDS: Record<EcoState | "unread", EcoWords> = {
 };
 
 export const ecoWords = (state: EcoState | null): EcoWords => ECO_WORDS[state ?? "unread"];
+
+/**
+ * What the Ecoverse agent itself is doing on the device, from the installer's watcher (see
+ * docs/migration/05-endpoint-scripts.md, "UFA sync watchdog"). It is the device's own account, as of the last Probe,
+ * so it can say why Ecoverse has no data yet and what the installer is doing about it. Keyed by the generated
+ * `UfaState`, so a state added in Rust fails the build until it has words.
+ */
+export const UFA_WORDS: Record<UfaState, EcoWords> = {
+  notInstalled: { short: "Not installed yet", tone: "muted", long: "The Windows Agent installs the Ecoverse agent a few minutes after itself." },
+  notProvisioned: { short: "Setting up", tone: "accent", long: "The Ecoverse agent is installed and registering with the destination." },
+  waiting: { short: "Waiting for data", tone: "accent", long: "The Ecoverse agent is running and no problem was seen. Its data usually arrives within an hour of the install." },
+  synced: { short: "Sending data", tone: "ok", long: "The Ecoverse agent received its components and is sending the device's data." },
+  stalled: {
+    short: "Needs a restart",
+    tone: "warn",
+    long: "The agent's first fetch of its setup timed out and it retries only hourly. The installer restarts the agent for it, at most twice, 15 minutes apart.",
+  },
+  blocked: {
+    short: "Can't reach the Ecoverse login service",
+    tone: "warn",
+    long: "The Ecoverse login service isn't answering the agent. This often clears by itself, so the installer watches it first. If it lasts, the installer restarts the agent after 30 minutes and does a one-time repair after 60 minutes if that didn't help. If it keeps happening, check that the device can reach the Ecoverse login service (an auth host under system-monitor.com) on port 443, with no TLS inspection in the way.",
+  },
+  rejected: {
+    short: "Login rejected",
+    tone: "err",
+    long: "The cloud rejects the agent's login (400 SSL certificate error). A restart doesn't help. The installer does a one-time repair after 30 minutes. If it is still refused after that, check TLS inspection, proxy and firewall on the device's network path, and report it to N-able.",
+  },
+  denied: {
+    short: "Downloads refused",
+    tone: "err",
+    long: "The agent can log in, but the cloud refuses its component downloads (403). A restart doesn't help. The installer does a one-time repair after 30 minutes.",
+  },
+  unknown: { short: "No agent log", tone: "muted", long: "The device has no log from the Ecoverse agent to read yet." },
+};
+
+/** The words for the agent's state; after the one-time repair, a missing agent is being put back, not just late. */
+export function ufaWords(ufa: Pick<DeviceUfa, "state" | "repairedAt" | "redeployFiles">): EcoWords {
+  if (ufa.repairedAt && (ufa.state === "notInstalled" || ufa.state === "notProvisioned")) {
+    const files = ufa.redeployFiles ?? null;
+    const progress = files === null ? "" : files > 0 ? ` ${files} file${files === 1 ? "" : "s"} written to its folder since the last restart: it is being put back.` : " Nothing new in its folder since the last restart yet.";
+    return {
+      short: "Being redeployed",
+      tone: "accent",
+      long: `The installer removed the Ecoverse agent to repair it and restarted the Windows Agent services. The Windows Agent should now put it back, which usually takes 5 to 15 minutes.${progress}`,
+    };
+  }
+  return UFA_WORDS[ufa.state];
+}
+
+const UFA_STEP_WORDS: Record<string, string> = {
+  "ufa-sync-restart": "Restarted the Ecoverse agent",
+  "ufa-repair": "Repaired the Ecoverse agent (removed it, then restarted the Windows Agent services)",
+  "ufa-repair-restart": "Restarted the Windows Agent services again",
+};
+
+/** A step the installer took, as a title; an unknown one reads as its own name. */
+export const ufaStepTitle = (event: string): string => UFA_STEP_WORDS[event] ?? event;
 
 export interface StageView {
   short: string;

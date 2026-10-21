@@ -69,6 +69,7 @@ The dashboard from [Tracking](06-tracking.md#what-the-operator-sees): stage coun
 
 - Nothing is cleaned up straight away: each healthy device keeps its record for the review period, then removes it itself. **Run cleanup now** is available where a path to the device exists. The project closes when every device is Retired, Excluded or Marked resolved.
 - Optional, after the review period and behind its own confirmation: delete the old source records (`removeAgents=false`; the device itself is untouched). This also removes their stale Ecoverse assets within seconds, so nothing needs cleaning up by hand in the source N-central or Ecoverse.
+- To test retiring, or to finish early, the same card has a second button, **Retire before the review period ends**. It lists every cleaned-up device still inside its review period with the date it ends, warns that the review period is the time to check each moved device and that deleted records can't be brought back, and needs a tick (*I understand this skips the review period*) before the delete button works. A dry run needs no tick and changes nothing. Devices that haven't been cleaned up are never offered.
 - Export the CSV and HTML reports.
 
 ## Terminal app
@@ -89,4 +90,5 @@ Messages follow N-voke's style: say what happened, why, and what to do. Examples
 - "DESKTOP-42 has been staged for 52 minutes and is still checking in to the old server. Probe it to see why the install hasn't started."
 - "Registration token for Contoso (destination) expires in 2 days. Launches after that date will fail; generate a new one in N-central." Generating again through REST doesn't renew a valid token (confirmed), so an expiring token has to be regenerated in N-central or left to expire first.
 - "Windows Agent is healthy on the destination. The Ecoverse agent is still setting up (installed 12 minutes ago); this commonly takes 20 to 60 minutes and does not block the move. N-voke will keep checking."
+- "DESKTOP-42 has been waiting for Ecoverse data for 2 hours. Probe it: the device sheet says whether its Ecoverse agent can reach the Ecoverse login service, what the installer already did about it (restarts, the one-time repair) and what to check next. The installer keeps watching for up to 6 hours after the install."
 - "DESKTOP-42: the Ecoverse asset is CONNECTED but has not sent its inventory yet, so it cannot be matched by serial or MAC and scripts are held. Planned by its N-central record instead; try the Ecoverse path again in about 30 minutes."

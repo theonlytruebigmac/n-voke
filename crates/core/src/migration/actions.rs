@@ -271,7 +271,8 @@ mod tests {
         migration::{
             endpoint_result::tests::zip_of,
             planner::PlannedDevice,
-            project::{RestScript, stamp},
+            project::{EcoState, RestScript, stamp},
+            trackview::PROBE_BATCH,
         },
         ncentral::rest::{
             Method, RestRequest, RestResponse,
@@ -621,5 +622,83 @@ mod tests {
         let seen = seen.lock().unwrap().clone();
         assert_eq!(seen, ["orgs", "publish", "run \"dest-script\""], "published in the destination's service organization, then run with that copy");
         assert!(p.devices[0].events.iter().any(|e| e.kind == "note" && e.detail.contains("Published the endpoint script in the destination's Ecoverse (Dest SO)")));
+    }
+
+    const BLOCKED_STATUS_LINE: &str = r#"NVOKE-RESULT {"action":"Status","result":"ok","errorCode":0,"message":"Last log: awaiting-ufa","taskState":"Ready","statusJson":"{\"ufa\":{\"present\":true,\"provisioned\":true,\"sync\":\"blocked\"},\"ufaSyncRestarts\":1}"}"#;
+
+    /// A reinstall project (so every device is reached through its one N-central) linked to Ecoverse, with healthy devices
+    /// named PC-1... : the first `waiting` still have no data in Ecoverse, the rest are reporting.
+    async fn waiting_project(waiting: usize, reporting: usize) -> (Arc<Core>, Project) {
+        let (core, mut p) = setup(Stage::Healthy, DeliveryPath::Rest, true).await;
+        p.dest_ecoverse = DestEcoverse::SameTenant;
+        let template = p.devices.remove(0);
+        for i in 0..waiting + reporting {
+            let mut d = template.clone();
+            d.name = format!("PC-{}", i + 1);
+            d.source_device_id = format!("{}", 9100 + i);
+            d.dest_device_id = Some(format!("{}", 5100 + i));
+            // Later numbers have been healthy for less time.
+            d.entered_stage_at = stamp(now() + chrono::Duration::minutes(i as i64));
+            d.ecoverse = Some(if i < waiting { EcoState::WaitingForData } else { EcoState::Reporting });
+            p.devices.push(d);
+        }
+        core.migration_save(&mut p).await.unwrap();
+        (core, p)
+    }
+
+    #[tokio::test]
+    async fn a_bulk_probe_reaches_only_the_devices_waiting_for_ecoverse_and_tallies_what_their_agents_say() {
+        use crate::migration::deviceufa::UfaState;
+        let seen = Arc::new(Mutex::new(vec![]));
+        let (core, p) = waiting_project(2, 1).await;
+        core.set_rest_transport(rest_world(BLOCKED_STATUS_LINE, true, seen.clone()));
+
+        let report = core.migration_probe_waiting(&p.id, "me").await.unwrap();
+        assert_eq!((report.probed, report.no_record, report.not_reached, report.failed.len()), (2, 0, 0, 0));
+        assert_eq!(report.states.iter().map(|s| (s.state, s.count)).collect::<Vec<_>>(), [(UfaState::Blocked, 2)]);
+        assert_eq!(seen.lock().unwrap().len(), 2, "the device that is reporting was not probed");
+
+        let saved = core.migration_load(&p.id).await.unwrap().unwrap();
+        let probed: Vec<&str> = saved.devices.iter().filter(|d| d.events.last().is_some_and(|e| e.kind == "status")).map(|d| d.name.as_str()).collect();
+        assert_eq!(probed, ["PC-1", "PC-2"]);
+        assert!(saved.devices.iter().all(|d| d.stage == Stage::Healthy), "a probe changes nothing about the stage");
+    }
+
+    #[tokio::test]
+    async fn a_bulk_probe_counts_an_answer_with_no_agent_record_and_goes_on_after_a_device_that_cannot_be_reached() {
+        let line: &'static str = r#"NVOKE-RESULT {"action":"Status","result":"ok","errorCode":0,"message":"no record","taskState":"Ready","statusJson":"-"}"#;
+        let (core, p) = waiting_project(2, 0).await;
+        core.set_rest_transport(rest_world(line, true, Arc::new(Mutex::new(vec![]))));
+        let report = core.migration_probe_waiting(&p.id, "me").await.unwrap();
+        assert_eq!((report.probed, report.no_record, report.states.len()), (2, 2, 0));
+
+        // A project with no script uploaded can't reach any device: each is reported, nothing stops.
+        let (core, mut p) = waiting_project(2, 0).await;
+        p.rest_scripts.clear();
+        core.migration_save(&mut p).await.unwrap();
+        let report = core.migration_probe_waiting(&p.id, "me").await.unwrap();
+        assert_eq!((report.probed, report.failed.len()), (0, 2));
+        assert!(report.failed[0].why.contains("hasn't been uploaded"), "{}", report.failed[0].why);
+    }
+
+    #[tokio::test]
+    async fn a_bulk_probe_takes_the_longest_waiting_first_and_leaves_the_rest_for_another_run() {
+        let (core, p) = waiting_project(PROBE_BATCH + 2, 0).await;
+        core.set_rest_transport(rest_world(BLOCKED_STATUS_LINE, true, Arc::new(Mutex::new(vec![]))));
+        let report = core.migration_probe_waiting(&p.id, "me").await.unwrap();
+        assert_eq!((report.probed, report.not_reached), (PROBE_BATCH, 2));
+        let saved = core.migration_load(&p.id).await.unwrap().unwrap();
+        let left: Vec<&str> = saved.devices.iter().filter(|d| !d.events.last().is_some_and(|e| e.kind == "status")).map(|d| d.name.as_str()).collect();
+        assert_eq!(left, [format!("PC-{}", PROBE_BATCH + 1), format!("PC-{}", PROBE_BATCH + 2)], "the ones that became healthy last wait");
+    }
+
+    #[tokio::test]
+    async fn a_bulk_probe_has_nothing_to_do_when_the_destination_is_not_linked_to_ecoverse() {
+        let (core, mut p) = waiting_project(2, 0).await;
+        p.dest_ecoverse = DestEcoverse::NotLinked;
+        core.migration_save(&mut p).await.unwrap();
+        core.set_rest_transport(rest_world(BLOCKED_STATUS_LINE, true, Arc::new(Mutex::new(vec![]))));
+        let report = core.migration_probe_waiting(&p.id, "me").await.unwrap();
+        assert_eq!((report.probed, report.not_reached, report.failed.len()), (0, 0, 0));
     }
 }
