@@ -38,6 +38,8 @@ export interface Job {
   timeoutSeconds: number;
   /** Per-device problems reported when the run was created. */
   warnings?: string[];
+  /** The migration project that started it: deleting the project removes this entry too. */
+  migrationProject?: string;
   tasks: JobTask[];
 }
 
@@ -213,6 +215,12 @@ export const jobStore = {
 
   remove(jobId: string) {
     jobs = jobs.filter((j) => j.id !== jobId);
+    emit();
+  },
+
+  /** Removes every entry a migration project started (output from its devices stays nowhere once it is deleted). */
+  removeForProject(projectId: string) {
+    jobs = jobs.filter((j) => j.migrationProject !== projectId);
     emit();
   },
 };

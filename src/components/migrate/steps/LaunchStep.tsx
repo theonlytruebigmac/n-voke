@@ -2,6 +2,8 @@ import { Plus } from "lucide-react";
 import { useState } from "react";
 import type { WaveRow } from "../../../lib/migrate/bindings";
 import { useLaunch, useLaunchActions, useCandidates } from "../../../lib/migrate/queries";
+import { useNow } from "../../../lib/format";
+import { ago } from "../../../lib/migrate/track";
 import { useDebounced } from "../../../lib/useDebounced";
 import { Button, ErrorNote, Field, Modal, Segmented, Status, inputClass } from "../../ui";
 import { LaunchDialog } from "../parts/LaunchDialog";
@@ -157,17 +159,33 @@ function NewWaveDialog({ projectId, unassigned, defaultSize, onClose }: { projec
 
 function WaveCard({ wave, onLaunch, onTrack }: { wave: WaveRow; onLaunch: () => void; onTrack: () => void }) {
   const launched = wave.launchedAt !== null;
+  const now = useNow(60_000);
+  const parts = [
+    wave.working > 0 && { text: `${wave.working} working`, tone: "text-ok" },
+    wave.moving > 0 && { text: `${wave.moving} moving`, tone: "text-muted" },
+    wave.needsYou > 0 && { text: `${wave.needsYou} need you`, tone: "text-warn" },
+    wave.waiting > 0 && launched && { text: `${wave.waiting} still waiting`, tone: "text-muted" },
+  ].filter(Boolean) as { text: string; tone: string }[];
   return (
     <li className="flex items-center justify-between gap-3 rounded-lg border border-border px-4 py-3">
       <div className="min-w-0">
         <div className="text-sm font-medium">{wave.label}</div>
         <div className="text-xs text-muted">
           {plural(wave.devices, "device")}
-          {wave.waiting > 0 && wave.waiting < wave.devices && ` · ${wave.waiting} still waiting`}
+          {launched && wave.launchedAt && ` · launched ${ago(wave.launchedAt, now)} ago`}
         </div>
+        {launched && parts.length > 0 && (
+          <div className="mt-0.5 flex flex-wrap gap-x-3 text-xs">
+            {parts.map((p) => (
+              <span key={p.text} className={p.tone}>
+                {p.text}
+              </span>
+            ))}
+          </div>
+        )}
       </div>
       <div className="flex shrink-0 items-center gap-3">
-        <Status tone={launched ? "ok" : "muted"} label={launched ? "Launched" : "Waiting"} />
+        <Status tone={launched ? (wave.waiting > 0 ? "accent" : "ok") : "muted"} label={launched ? (wave.waiting > 0 ? "Partly launched" : "Launched") : "Waiting"} />
         {wave.waiting > 0 && (
           <Button size="sm" variant="primary" onClick={onLaunch}>
             Launch…

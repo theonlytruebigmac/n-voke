@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { DeviceAction, DeviceCommand, DeviceDetail } from "../../../lib/migrate/bindings";
 import { ACTION_WORDS, ago } from "../../../lib/migrate/track";
 import { useDevice, useDeviceActions } from "../../../lib/migrate/queries";
-import { describeStage, ecoWords, stageView } from "../../../lib/migrate/words";
+import { describeStage, ecoWords, eventWords, stageView } from "../../../lib/migrate/words";
 import { Button, ErrorNote, Modal, Sheet, Status } from "../../ui";
 import { useNow } from "../../../lib/format";
 
@@ -15,8 +15,8 @@ function Timeline({ events }: { events: DeviceDetail["events"] }) {
         <li key={`${e.at}-${i}`} className="grid grid-cols-[7.5rem_1fr] gap-3 text-xs">
           <span className="text-faint tabular-nums">{new Date(e.at).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
           <span className="min-w-0">
-            <span className="font-medium">{e.kind}</span>
-            {e.detail && <pre className="mt-0.5 max-h-32 overflow-auto font-sans break-words whitespace-pre-wrap text-muted">{e.detail}</pre>}
+            <span className="font-medium">{eventWords(e.kind, e.detail).title}</span>
+            {eventWords(e.kind, e.detail).body && <pre className="mt-0.5 max-h-32 overflow-auto font-sans break-words whitespace-pre-wrap text-muted">{eventWords(e.kind, e.detail).body}</pre>}
           </span>
         </li>
       ))}

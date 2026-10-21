@@ -4,4 +4,16 @@ export type WaveRow = { number: number, label: string, launchedAt: string | null
 /**
  * Still `Planned`: these are what launching would send.
  */
-waiting: number, };
+waiting: number, 
+/**
+ * Moved and fully working (Ecoverse is receiving the asset data too, where it is expected).
+ */
+working: number, 
+/**
+ * On their way: launched, staged, moving, on the new server, or waiting for Ecoverse's data.
+ */
+moving: number, 
+/**
+ * Stuck, lost, failed, or waiting for a choice.
+ */
+needsYou: number, };

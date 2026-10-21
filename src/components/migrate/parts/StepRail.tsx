@@ -22,7 +22,7 @@ export function StepRail({
   onSelect: (step: StepId) => void;
 }) {
   return (
-    <ol className="w-44 shrink-0 space-y-0.5 border-r border-border px-2 py-3" aria-label="Steps">
+    <ol className="w-36 shrink-0 min-[1100px]:w-44 space-y-0.5 border-r border-border px-2 py-3" aria-label="Steps">
       {STEPS.map((s, i) => {
         const mark = marks[s.id];
         const isCurrent = s.id === current;

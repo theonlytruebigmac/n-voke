@@ -2,6 +2,7 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tansta
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
 import type { CandidateQuery, CleanupProgress, DeviceChoice, DeviceCommand, MigrationSettings, PlanQuery, TrackQuery, LaunchResult, MapView, Override, PollDigest, ReportFormat, ScriptOrg, ScriptSide } from "./bindings";
+import { jobStore } from "../jobs";
 import { applyChoice } from "./map";
 import {
   addPlanned,
@@ -82,7 +83,15 @@ export function useProjectActions() {
   const refresh = () => qc.invalidateQueries({ queryKey: ["migrate", "projects"] });
   return {
     create: useMutation({ mutationFn: createProject, onSuccess: refresh }),
-    remove: useMutation({ mutationFn: deleteProject, onSuccess: refresh }),
+    // Deleting a project also drops what this window holds of it: its cached screens and its entries in Activity.
+    remove: useMutation({
+      mutationFn: deleteProject,
+      onSuccess: (_done, id: string) => {
+        jobStore.removeForProject(id);
+        qc.removeQueries({ predicate: (q) => q.queryKey[0] === "migrate" && q.queryKey.includes(id) });
+        return refresh();
+      },
+    }),
   };
 }
 
@@ -181,7 +190,7 @@ export function usePlanActions(id: string) {
 
 // ---- Launch -----------------------------------------------------------------------------------------------------
 
-export const useLaunch = (id: string) => useQuery({ queryKey: ["migrate", "launch", id], queryFn: () => getLaunch(id), staleTime: 0, retry: false });
+export const useLaunch = (id: string) => useQuery({ queryKey: ["migrate", "launch", id], queryFn: () => getLaunch(id), staleTime: 0, retry: false, refetchOnWindowFocus: false });
 export const useCandidates = (id: string, query: CandidateQuery, enabled: boolean) =>
   useQuery({ queryKey: ["migrate", "candidates", id, query], queryFn: () => getCandidates(id, query), enabled, staleTime: 0, gcTime: 0, retry: false, placeholderData: keepPreviousData });
 export const useWavePreview = (id: string, wave: number | null) =>
@@ -199,7 +208,7 @@ export function useLaunchActions(id: string) {
 // ---- Track ------------------------------------------------------------------------------------------------------
 
 export const useTrack = (id: string, query: TrackQuery) =>
-  useQuery({ queryKey: ["migrate", "track", id, query], queryFn: () => getTrack(id, query), staleTime: 0, retry: false, placeholderData: keepPreviousData });
+  useQuery({ queryKey: ["migrate", "track", id, query], queryFn: () => getTrack(id, query), staleTime: 0, retry: false, refetchOnWindowFocus: false, placeholderData: keepPreviousData });
 export const useDevice = (id: string, index: number | null) =>
   useQuery({ queryKey: ["migrate", "device", id, index], queryFn: () => getDevice(id, index as number), enabled: index !== null, staleTime: 0, retry: false });
 
@@ -266,13 +275,13 @@ export function useDeviceActions(id: string) {
 
 // ---- Finish -----------------------------------------------------------------------------------------------------
 
-export const useFinish = (id: string) => useQuery({ queryKey: ["migrate", "finish", id], queryFn: () => getFinish(id), staleTime: 0, retry: false });
+export const useFinish = (id: string) => useQuery({ queryKey: ["migrate", "finish", id], queryFn: () => getFinish(id), staleTime: 0, retry: false, refetchOnWindowFocus: false });
 
 export function useFinishActions(id: string) {
   const refresh = useRefreshProject(id);
   return {
     report: useMutation({ mutationFn: (format: ReportFormat) => writeReport(id, format) }),
-    cleanup: useMutation({ mutationFn: () => cleanupHealthy(id), onSettled: refresh }),
+    cleanup: useMutation({ mutationFn: (only: string[] | null) => cleanupHealthy(id, only), onSettled: refresh }),
   };
 }
 
@@ -288,7 +297,7 @@ export function useCreateStructure(id: string) {
   });
 }
 
-export const useRetire = (id: string) => useQuery({ queryKey: ["migrate", "retire", id], queryFn: () => getRetire(id), staleTime: 0, retry: false });
+export const useRetire = (id: string) => useQuery({ queryKey: ["migrate", "retire", id], queryFn: () => getRetire(id), staleTime: 0, retry: false, refetchOnWindowFocus: false });
 
 export function useRetireActions(id: string) {
   const qc = useQueryClient();

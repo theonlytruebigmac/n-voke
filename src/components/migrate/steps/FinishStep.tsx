@@ -1,6 +1,7 @@
 import { Download } from "lucide-react";
 import { useState } from "react";
 import type { CleanupReport } from "../../../lib/migrate/bindings";
+import { cleanupScope, waveGroups } from "../../../lib/migrate/cleanup";
 import { stopCleanup, useCleanupProgress, useFinish, useFinishActions } from "../../../lib/migrate/queries";
 import { Button, CopyButton, Dot, ErrorNote, Modal, Status } from "../../ui";
 import { RetireCard } from "../parts/RetireCard";
@@ -29,6 +30,16 @@ export function FinishStep({ projectId, onOptions }: { projectId: string; onOpti
   const v = finish.data;
   const steps = useCleanupProgress(projectId, cleanup.isPending);
   const [stopping, setStopping] = useState(false);
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const ready = v?.cleanupDevices ?? [];
+  const chosen = ready.filter((d) => picked.has(d.deviceId));
+  const waves = waveGroups(ready);
+  const toggle = (id: string) =>
+    setPicked((cur) => {
+      const next = new Set(cur);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
 
   return (
     <div className="mx-auto max-w-2xl space-y-4 px-6 py-5">
@@ -97,7 +108,7 @@ export function FinishStep({ projectId, onOptions }: { projectId: string; onOpti
             {report.isError && <ErrorNote>{String(report.error)}</ErrorNote>}
           </Card>
 
-          <Card title="Clean up" aside={<span className="text-xs text-faint">{plural(v.cleanupCandidates.length, "device")} ready</span>}>
+          <Card title="Clean up" aside={<span className="text-xs text-faint">{plural(ready.length, "device")} ready</span>}>
             <p className="text-sm text-muted">
               Each healthy device removes what the migration left on it (its scheduled tasks and the N-voke folder, with the status file and logs) by itself after its review period of {v.reviewDays} days. To do it sooner, run the cleanup now. It never changes either N-central server or Ecoverse.
             </p>
@@ -108,7 +119,7 @@ export function FinishStep({ projectId, onOptions }: { projectId: string; onOpti
                 {v.waitingForEcoverse.length > 6 ? ` and ${v.waitingForEcoverse.length - 6} more` : ""}.
               </p>
             )}
-            <Button size="sm" disabled={v.cleanupCandidates.length === 0} onClick={() => (cleanup.reset(), setConfirming(true))}>
+            <Button size="sm" disabled={ready.length === 0} onClick={() => (cleanup.reset(), setPicked(new Set(ready.map((d) => d.deviceId))), setConfirming(true))}>
               Run cleanup now…
             </Button>
           </Card>
@@ -119,7 +130,7 @@ export function FinishStep({ projectId, onOptions }: { projectId: string; onOpti
 
       {confirming && v && (
         <Modal
-          title={cleanup.isPending ? "Cleaning up…" : `Run cleanup on ${plural(v.cleanupCandidates.length, "device")}?`}
+          title={cleanup.isPending ? "Cleaning up…" : `Run cleanup on ${plural(chosen.length, "device")}?`}
           description={
             cleanup.isPending
               ? "Each device is asked in turn and its answer is waited for, up to two minutes. You can stop after the device it is on."
@@ -143,9 +154,10 @@ export function FinishStep({ projectId, onOptions }: { projectId: string; onOpti
                 <Button onClick={() => setConfirming(false)}>Cancel</Button>
                 <Button
                   variant="primary"
+                  disabled={chosen.length === 0}
                   onClick={() => {
                     setStopping(false);
-                    cleanup.mutate(undefined, { onSuccess: (r) => (setConfirming(false), setCleaned(r)) });
+                    cleanup.mutate(cleanupScope(ready, picked), { onSuccess: (r) => (setConfirming(false), setCleaned(r)) });
                   }}
                 >
                   Run cleanup
@@ -154,15 +166,31 @@ export function FinishStep({ projectId, onOptions }: { projectId: string; onOpti
             )
           }
         >
+          {!cleanup.isPending && waves.length > 1 && (
+            <div className="mb-2 flex flex-wrap items-center gap-1.5 text-xs">
+              <span className="text-muted">Only a wave:</span>
+              {waves.map((g) => (
+                <Button key={g.wave ?? "none"} size="sm" onClick={() => setPicked(new Set(g.ids))}>
+                  {g.label} ({g.ids.length})
+                </Button>
+              ))}
+              <Button size="sm" onClick={() => setPicked(new Set(ready.map((d) => d.deviceId)))}>
+                All
+              </Button>
+            </div>
+          )}
           <ul className="max-h-56 space-y-1.5 overflow-y-auto text-sm">
-            {v.cleanupCandidates.map((n) => {
+            {(cleanup.isPending ? chosen : ready).map((d) => {
+              const n = d.name;
               const step = steps[n];
               const tone = !cleanup.isPending || !step ? "muted" : step.state === "cleaned" ? "ok" : step.state === "failed" ? "err" : "accent";
               return (
-                <li key={n}>
+                <li key={d.deviceId}>
                   <div className="flex items-center gap-2">
+                    {!cleanup.isPending && <input type="checkbox" checked={picked.has(d.deviceId)} onChange={() => toggle(d.deviceId)} aria-label={`Clean up ${n}`} />}
                     <Dot tone={tone} pulse={step?.state === "running"} />
                     <span>{n}</span>
+                    {!cleanup.isPending && d.waveLabel && <span className="text-xs text-faint">{d.waveLabel}</span>}
                     {cleanup.isPending && step && <span className="text-xs text-muted">{step.state === "running" ? "cleaning…" : step.state === "cleaned" ? "cleaned up" : "didn't clean up"}</span>}
                   </div>
                   {step?.why && <p className="pl-4 text-xs break-words text-muted">{step.why}</p>}

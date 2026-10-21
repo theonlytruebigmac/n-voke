@@ -3,7 +3,11 @@
 /**
  * One Ecoverse run as the Activity page shows it.
  */
-export type ActivityRun = { name: string, scriptId: string, scriptName: string, targetLabel: string, timeoutSeconds: number, 
+export type ActivityRun = { 
+/**
+ * The project that launched it.
+ */
+projectId: string, name: string, scriptId: string, scriptName: string, targetLabel: string, timeoutSeconds: number, 
 /**
  * (task ID, asset ID, device name)
  */

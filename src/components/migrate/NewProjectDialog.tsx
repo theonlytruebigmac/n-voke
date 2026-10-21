@@ -44,6 +44,7 @@ export function NewProjectDialog({
   const [delivery, setDelivery] = useState<Delivery>("ecoverseFirst");
   const [orgs, setOrgs] = useState<Organization[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [showEco, setShowEco] = useState(false);
 
   const same = sourceId !== "" && sourceId === destId;
   const dest = list.find((s) => s.id === destId);
@@ -127,6 +128,18 @@ export function NewProjectDialog({
           </>
         )}
 
+        <div className="rounded-lg border border-border">
+          <button type="button" className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left" aria-expanded={showEco} onClick={() => setShowEco((v) => !v)}>
+            <span className="text-sm">
+              <span className="font-medium">Ecoverse</span>
+              <span className="block text-xs text-muted">
+                {DELIVERY.find((o) => o.value === delivery)?.title} · destination linked to Ecoverse: {LINKED.find((o) => o.value === linked)?.title.toLowerCase()}
+              </span>
+              {delivery === "ecoverseFirst" && sourceNoEco && <span className="block text-xs text-warn">{source?.label} is set to not use Ecoverse, so its devices will go through N-central.</span>}
+            </span>
+            <span className="text-xs text-accent">{showEco ? "Hide" : "Change"}</span>
+          </button>
+          {showEco && <div className="space-y-4 border-t border-border px-3 py-3">
         <fieldset className="space-y-2">
           <legend className="text-xs font-medium text-muted">How should devices be reached to start the move?</legend>
           {DELIVERY.map((o) => (
@@ -196,6 +209,8 @@ export function NewProjectDialog({
             </div>
           </Field>
         )}
+          </div>}
+        </div>
 
         {error && <ErrorNote>{error}</ErrorNote>}
       </div>

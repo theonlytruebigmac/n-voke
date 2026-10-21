@@ -5,8 +5,9 @@ import type { EcoverseCard as EcoverseCardData, PrepareView, RestCard as RestCar
 import { parseOptions, sameOptions, toForm, type OptionsForm } from "../../../lib/migrate/options";
 import { usePrepare, usePrepareActions } from "../../../lib/migrate/queries";
 import { Combobox } from "../../Combobox";
+import { prepareChecklist } from "../../../lib/migrate/checklist";
 import { OptionsFields } from "../parts/OptionsFields";
-import { Button, CopyButton, ErrorNote, Field, Status, inputClass } from "../../ui";
+import { Button, CopyButton, Dot, ErrorNote, Field, Status, inputClass } from "../../ui";
 
 const STATE: Record<ScriptState, { tone: "ok" | "warn" | "muted"; label: string }> = {
   current: { tone: "ok", label: "Up to date" },
@@ -14,9 +15,9 @@ const STATE: Record<ScriptState, { tone: "ok" | "warn" | "muted"; label: string 
   notThere: { tone: "muted", label: "Not there yet" },
 };
 
-function Card({ title, aside, children }: { title: string; aside?: React.ReactNode; children: React.ReactNode }) {
+function Card({ id, title, aside, children }: { id?: string; title: string; aside?: React.ReactNode; children: React.ReactNode }) {
   return (
-    <section className="space-y-3 rounded-lg border border-border p-4">
+    <section id={id} className="scroll-mt-4 space-y-3 rounded-lg border border-border p-4">
       <div className="flex items-center justify-between gap-3">
         <h3 className="text-sm font-semibold">{title}</h3>
         {aside}
@@ -47,13 +48,13 @@ function EcoverseCard({ projectId, view, side, card }: { projectId: string; view
 
   if (card.notUsed) {
     return (
-      <Card title={title}>
+      <Card id={`prepare-${side}-ecoverse`} title={title}>
         <p className="text-sm text-muted">{card.notUsed}</p>
       </Card>
     );
   }
   return (
-    <Card title={title} aside={<Status tone={STATE[card.state].tone} label={STATE[card.state].label} />}>
+    <Card id={`prepare-${side}-ecoverse`} title={title} aside={<Status tone={STATE[card.state].tone} label={STATE[card.state].label} />}>
       <p className="text-sm text-muted">
         {destination
           ? "The destination is in its own Ecoverse tenant, so a device that has moved is reached with a copy of the script published there. Probe and Cleanup use it. You don't have to do anything: it is published in the tenant's service organization the first time one of them needs it. Publish it now if you'd rather see it done."
@@ -108,7 +109,7 @@ function RestCard({ projectId, view, side, card }: { projectId: string; view: Pr
       : "The fallback, for devices Ecoverse can't reach and ones that fail through it. Optional, but without it those devices can't be launched.";
 
   return (
-    <Card title={destination ? "N-central repository on the destination" : "N-central repository (REST path)"} aside={<Status tone={STATE[card.state].tone} label={STATE[card.state].label} />}>
+    <Card id={`prepare-${side}-rest`} title={destination ? "N-central repository on the destination" : "N-central repository (REST path)"} aside={<Status tone={STATE[card.state].tone} label={STATE[card.state].label} />}>
       <p className="text-sm text-muted">{intro}</p>
       <ol className="space-y-3 text-sm">
         <li className="space-y-1.5">
@@ -179,6 +180,36 @@ function OptionsCard({ projectId, view }: { projectId: string; view: PrepareView
   );
 }
 
+/** What Prepare still asks for, at a glance, each line taking you to its card. */
+function Checklist({ view }: { view: PrepareView }) {
+  const { items, ready } = prepareChecklist(view);
+  const tone = { ready: "ok", needed: "warn", optional: "muted" } as const;
+  return (
+    <section className="rounded-lg border border-border">
+      <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-2.5">
+        <h3 className="text-sm font-semibold">Ready to plan?</h3>
+        <Status tone={ready ? "ok" : "warn"} label={ready ? "Yes" : "Not yet"} />
+      </div>
+      <ul className="divide-y divide-border">
+        {items.map((i) => (
+          <li key={i.anchor} className="flex items-start gap-2.5 px-4 py-2 text-sm">
+            <span className="mt-1.5">
+              <Dot tone={tone[i.status]} />
+            </span>
+            <button className="min-w-0 flex-1 text-left" onClick={() => document.getElementById(i.anchor)?.scrollIntoView({ behavior: "smooth", block: "start" })}>
+              <span className="block">{i.label}</span>
+              <span className="block text-xs text-muted">
+                {i.status === "optional" ? "Optional · " : ""}
+                {i.text}
+              </span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 /** What goes to the devices, and how the project behaves (step 3 in docs/migration/11-gui-design.md). */
 export function PrepareStep({ projectId, onBack, onContinue }: { projectId: string; onBack: () => void; onContinue: () => void }) {
   const prepare = usePrepare(projectId);
@@ -195,6 +226,7 @@ export function PrepareStep({ projectId, onBack, onContinue }: { projectId: stri
         <p className="text-sm text-muted">Loading…</p>
       ) : (
         <>
+          <Checklist view={view} />
           <EcoverseCard projectId={projectId} view={view} side="source" card={view.ecoverse} />
           <RestCard projectId={projectId} view={view} side="source" card={view.rest} />
           {view.destination?.ecoverse && <EcoverseCard projectId={projectId} view={view} side="destination" card={view.destination.ecoverse} />}

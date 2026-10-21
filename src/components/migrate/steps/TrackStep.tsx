@@ -1,6 +1,6 @@
 import { RefreshCw } from "lucide-react";
 import { useMemo, useState } from "react";
-import type { GroupCount, TrackGroup, TrackRow } from "../../../lib/migrate/bindings";
+import type { GroupCount, NeedKind, TrackGroup } from "../../../lib/migrate/bindings";
 import { useNow } from "../../../lib/format";
 import { useDeviceActions, useProject, useTrack, useTracker } from "../../../lib/migrate/queries";
 import { readyToFinish } from "../../../lib/migrate/progress";
@@ -42,34 +42,42 @@ function Strip({ counts, active, onPick }: { counts: GroupCount[]; active: Track
   );
 }
 
-function NeedsYou({ rows, total, now, onOpen, onShowAll }: { rows: TrackRow[]; total: number; now: number; onOpen: (index: number) => void; onShowAll: () => void }) {
-  if (rows.length === 0) return null;
+function NeedsYou({ kinds, total, now, onOpen, onShowAll }: { kinds: NeedKind[]; total: number; now: number; onOpen: (index: number) => void; onShowAll: () => void }) {
+  if (kinds.length === 0) return null;
   return (
     <section className="space-y-2">
-      <h3 className="text-sm font-semibold">Needs you ({total})</h3>
+      <div className="flex items-baseline justify-between gap-3">
+        <h3 className="text-sm font-semibold">Needs you ({total})</h3>
+        <button className="text-xs text-muted underline hover:text-text" onClick={onShowAll}>
+          Show all in the table
+        </button>
+      </div>
       <ul className="divide-y divide-border rounded-lg border border-border">
-        {rows.map((r) => (
-          <li key={r.index} className="flex items-start justify-between gap-3 px-3 py-2.5">
-            <div className="min-w-0 text-sm">
-              <span className="font-medium">{r.name}</span> <span className="text-warn">{r.needsMatch ? "Several fit" : STAGE_WORDS[r.stage].short}</span>
-              <p className="text-xs text-muted">
-                {r.needsMatch ? "More than one device on the new server fits. Choose which one it is." : describeStage(r.stage, { since: ago(r.since, now), destination: r.destination, reason: r.lastError })}
-              </p>
-            </div>
-            <Button size="sm" onClick={() => onOpen(r.index)}>
-              Open
-            </Button>
-          </li>
-        ))}
+        {kinds.map((k) => {
+          const first = k.examples[0];
+          const label = k.needsMatch ? "Several fit" : STAGE_WORDS[k.stage].short;
+          return (
+            <li key={`${k.stage}-${k.needsMatch}`} className="space-y-2 px-3 py-2.5">
+              <div className="min-w-0 text-sm">
+                <span className="font-medium text-warn">{label}</span> <span className="text-muted tabular-nums">· {k.count === 1 ? "1 device" : `${k.count} devices`}</span>
+                <p className="text-xs text-muted">
+                  {k.needsMatch
+                    ? "More than one device on the new server fits. Choose which one each is."
+                    : describeStage(k.stage, { since: ago(first.since, now), destination: first.destination, reason: first.lastError })}
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5">
+                {k.examples.map((r) => (
+                  <Button key={r.index} size="sm" onClick={() => onOpen(r.index)}>
+                    {r.name}
+                  </Button>
+                ))}
+                {k.count > k.examples.length && <span className="text-xs text-faint">and {k.count - k.examples.length} more</span>}
+              </div>
+            </li>
+          );
+        })}
       </ul>
-      {total > rows.length && (
-        <p className="text-xs text-faint">
-          {total - rows.length} more.{" "}
-          <button className="underline hover:text-text" onClick={onShowAll}>
-            Show them all
-          </button>
-        </p>
-      )}
     </section>
   );
 }
@@ -143,7 +151,7 @@ export function TrackStep({ projectId, onContinue }: { projectId: string; onCont
           </Button>
         </div>
       )}
-      {view && <NeedsYou rows={view.needsYou} total={view.needsYouTotal} now={now} onOpen={setOpen} onShowAll={() => narrow(() => setGroup("needsYou"))} />}
+      {view && <NeedsYou kinds={view.needsYou} total={view.needsYouTotal} now={now} onOpen={setOpen} onShowAll={() => narrow(() => setGroup("needsYou"))} />}
 
       {track.isError ? (
         <ErrorNote>{String(track.error)}</ErrorNote>
@@ -193,7 +201,7 @@ export function TrackStep({ projectId, onContinue }: { projectId: string; onCont
               >
                 {rows.map((r) => (
                   <tr key={r.index} className="cursor-pointer hover:bg-surface-2/60" onClick={() => setOpen(r.index)}>
-                    <td className="font-medium">{r.name}</td>
+                    <td className="font-medium whitespace-nowrap">{r.name}</td>
                     <td className="text-muted">{r.customer}</td>
                     <td className="text-muted tabular-nums">{r.wave ?? "–"}</td>
                     <td>
@@ -202,7 +210,7 @@ export function TrackStep({ projectId, onContinue }: { projectId: string; onCont
                       {r.stage === "healthy" && r.ecoverse === "reporting" && <div className="text-xs text-faint">{ecoWords(r.ecoverse).short}</div>}
                     </td>
                     <td className="text-faint">{ago(r.since, now)}</td>
-                    <td className="text-muted">{r.path ? PATH_WORDS[r.path] : "–"}</td>
+                    <td className="text-muted whitespace-nowrap">{r.path ? PATH_WORDS[r.path] : "–"}</td>
                   </tr>
                 ))}
               </Table>

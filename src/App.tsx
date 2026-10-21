@@ -10,6 +10,7 @@ import { initJobs, isJobActive, setHistoryDays, useJobs } from "./lib/jobs";
 import type { RunDraft } from "./lib/targets";
 import { ActivityPage } from "./components/ActivityPage";
 import { AuditPage } from "./components/AuditPage";
+import { PageBoundary } from "./components/PageBoundary";
 import { MigratePage } from "./components/migrate/MigratePage";
 import { RunPage } from "./components/RunPage";
 import { SettingsDialog } from "./components/SettingsDialog";
@@ -115,7 +116,11 @@ export default function App() {
               <RunPage ready={ready} draft={draft} onStarted={showJob} onOpenSettings={() => setShowSettings(true)} />
             </div>
             {page === "activity" && <ActivityPage jobs={jobs} selectedId={selectedJobId} onSelect={setSelectedJobId} onDraft={openDraft} ready={ready} />}
-            {page === "migrate" && <MigratePage ecoverseReady={ready} />}
+            {page === "migrate" && (
+              <PageBoundary name="Migrate">
+                <MigratePage ecoverseReady={ready} />
+              </PageBoundary>
+            )}
             {page === "tags" && <TagsPage ready={ready} onDraft={openDraft} />}
             {page === "audit" && <AuditPage />}
           </main>

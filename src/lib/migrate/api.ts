@@ -58,6 +58,7 @@ export const exportScript = () => invoke<string>("project_export_script");
 export const setRestScript = (id: string, side: ScriptSide, itemId: string, version: string) => invoke<void>("project_rest_script", { id, side, itemId, version });
 export const setOptions = (id: string, options: ProjectOptions) => invoke<void>("project_options", { id, options });
 
+export const forgetReads = (id: string) => invoke<void>("project_forget_reads", { id });
 export const getPlan = (id: string, refresh: boolean, query: PlanQuery) => invoke<PlanView>("project_plan", { id, refresh, query });
 export const chooseForDevice = (id: string, deviceId: string, choice: DeviceChoice) => invoke<string>("project_device_choice", { id, deviceId, choice });
 export const addPlanned = (id: string) => invoke<PlanAdded>("project_plan_add", { id });
@@ -78,7 +79,7 @@ export const stopTracker = (id: string) => invoke<void>("tracker_stop", { id });
 
 export const getFinish = (id: string) => invoke<FinishView>("project_finish", { id });
 export const writeReport = (id: string, format: ReportFormat) => invoke<string>("project_report", { id, format });
-export const cleanupHealthy = (id: string) => invoke<CleanupReport>("project_cleanup", { id });
+export const cleanupHealthy = (id: string, only: string[] | null) => invoke<CleanupReport>("project_cleanup", { id, only });
 export const getStructurePreview = (id: string) => invoke<StructurePreview>("project_structure_preview", { id, only: null });
 export const createStructure = (id: string, serviceOrgId: string, dryRun: boolean) => invoke<StructureReport>("project_structure_create", { id, serviceOrgId, only: null, dryRun });
 export const getRetire = (id: string) => invoke<RetireView>("project_retire_view", { id });

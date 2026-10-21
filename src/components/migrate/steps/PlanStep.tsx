@@ -66,10 +66,27 @@ export function PlanStep({ projectId, onGo }: { projectId: string; onGo: (step: 
         <p className="text-sm text-muted">Reading both servers{" "}and Ecoverse. This takes a moment on a large server…</p>
       ) : (
         <>
-          <p className="text-sm text-muted">
-            {plural(view.total, "device")} · <span className="text-ok">{view.readyNew} ready</span> ({view.readyEcoverse} through Ecoverse, {view.readyRest} through N-central) ·{" "}
-            <span className={view.blocked ? "text-warn" : ""}>{view.blocked} blocked</span> · {view.leftOut} left out · {view.inProject} already in the project
-          </p>
+          <dl className="flex flex-wrap gap-x-6 gap-y-2 text-sm">
+            {(
+              [
+                [view.total, "devices", ""],
+                [view.readyNew, "ready", "text-ok"],
+                [view.blocked, "blocked", view.blocked ? "text-warn" : ""],
+                [view.leftOut, "left out", ""],
+                [view.inProject, "in the project", ""],
+              ] as [number, string, string][]
+            ).map(([n, label, tone]) => (
+              <div key={label}>
+                <dd className={`text-base font-semibold tabular-nums ${tone}`}>{n}</dd>
+                <dt className="text-xs text-muted">{label}</dt>
+              </div>
+            ))}
+          </dl>
+          {view.readyNew > 0 && (
+            <p className="text-xs text-muted">
+              Ready: {view.readyEcoverse} through Ecoverse, {view.readyRest} through N-central.
+            </p>
+          )}
 
           {view.warnings.map((w) => (
             <p key={w} className="text-xs text-warn">
@@ -210,7 +227,7 @@ function PlanRowView({ row, busy, onChoose }: { row: PlanRow; busy: boolean; onC
   const note = rowNote(row);
   return (
     <tr>
-      <td className="font-medium">
+      <td className="font-medium whitespace-nowrap">
         {row.name}
         {row.stage && <span className="ml-2 text-xs font-normal text-faint">in the project</span>}
       </td>
@@ -218,7 +235,7 @@ function PlanRowView({ row, busy, onChoose }: { row: PlanRow; busy: boolean; onC
         {row.customer}
         {row.site ? ` · ${row.site}` : ""} → {row.destination ?? "–"}
       </td>
-      <td>
+      <td className="whitespace-nowrap">
         {row.path ? PATH_WORDS[row.path] : <span className="text-faint">–</span>}
         {row.pathChosen && <span className="ml-1.5 text-xs text-faint">your choice</span>}
       </td>

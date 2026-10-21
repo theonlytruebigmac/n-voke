@@ -107,7 +107,7 @@ export function MigratePage({ ecoverseReady }: { ecoverseReady: boolean }) {
       {deleting && (
         <Modal
           title={`Delete ${deleting.name}?`}
-          description="This removes the project's local history. The audit log keeps its entries. Nothing on the servers or devices changes."
+          description="This permanently destroys the project's saved data on this computer: its encryption key is deleted and its file is overwritten and removed, so it can't be recovered, even from a backup. Its entries in Activity go too. Not changed: the servers and devices, the audit log (which records that the project was deleted), and any report or script you saved to your Downloads folder."
           onClose={() => setDeleting(null)}
           footer={
             <>

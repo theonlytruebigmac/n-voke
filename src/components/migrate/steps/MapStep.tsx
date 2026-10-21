@@ -1,3 +1,4 @@
+import { forgetReads } from "../../../lib/migrate/api";
 import { ChevronRight, KeyRound, PlusSquare, RefreshCw } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { MapRow, MapView, TokenReport, TokenRow, UnitRef } from "../../../lib/migrate/bindings";
@@ -52,8 +53,12 @@ export function MapStep({ projectId, onContinue }: { projectId: string; onContin
   const counts = useMemo(() => mapCounts(rows), [rows]);
   const shown = useMemo(() => visibleRows(rows, text, onlyNeeds === "needs"), [rows, text, onlyNeeds]);
   const missing: TokenRow[] = missingTokens(details.data);
+  // Re-running matching is the way to ask the servers again, so what the core remembered of them is dropped first.
   const refetchAll = () => {
-    map.refetch().then(() => details.refetch());
+    forgetReads(projectId)
+      .catch(() => undefined)
+      .then(() => map.refetch())
+      .then(() => details.refetch());
   };
 
   const fail = (e: unknown) => setRowError(String(e));

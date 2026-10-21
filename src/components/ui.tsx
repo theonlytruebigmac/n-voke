@@ -344,7 +344,7 @@ export function SectionTitle({ children, actions }: { children: ReactNode; actio
 /** Data table shell; rows are plain <tr>/<td> with the shared cell styles. */
 export function Table({ head, children }: { head: ReactNode; children: ReactNode }) {
   return (
-    <div className="overflow-hidden rounded-lg border border-border">
+    <div className="overflow-x-auto rounded-lg border border-border">
       <table className="w-full border-collapse text-sm [&_td]:px-3 [&_td]:py-2">
         <thead className="bg-surface-2/60 text-left text-xs text-muted">
           <tr className="[&>th]:h-8 [&>th]:px-3 [&>th]:font-medium">{head}</tr>

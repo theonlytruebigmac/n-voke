@@ -4,6 +4,7 @@ import { closeProject } from "../../lib/migrate/api";
 import { usePrepare, useProject, useServers } from "../../lib/migrate/queries";
 import { stepStatus } from "../../lib/migrate/steps";
 import { Button, ErrorNote, PageHeader } from "../ui";
+import { ProjectStatus } from "./parts/ProjectStatus";
 import { StepRail, type StepId } from "./parts/StepRail";
 import { ConnectStep } from "./steps/ConnectStep";
 import { MapStep } from "./steps/MapStep";
@@ -46,6 +47,7 @@ export function Workspace({ projectId, onBack }: { projectId: string; onBack: ()
           </Button>
         }
       />
+      {p && step !== "track" && <ProjectStatus project={p} onReview={() => setStep("track")} />}
       {project.isError ? (
         <div className="p-5">
           <ErrorNote>{String(project.error)}</ErrorNote>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ECO_WORDS, STAGE_WORDS, describeStage, ecoWords, stageView } from "./words";
+import { ECO_WORDS, STAGE_WORDS, describeStage, ecoWords, eventWords, stageView } from "./words";
 
 describe("STAGE_WORDS", () => {
   const entries = Object.entries(STAGE_WORDS);
@@ -54,10 +54,18 @@ describe("a healthy device and Ecoverse", () => {
   it("says it isn't fully working while waiting, and what that means", () => {
     expect(describeStage("healthy", { since: "", destination: "Acme HQ", waitingForEcoverse: true })).toContain("Ecoverse isn't receiving its data yet");
     expect(ECO_WORDS.waitingForData.long).toContain("scripts can't run");
+    for (const state of ["waitingForData", "notSeen"] as const) expect(ECO_WORDS[state].long).toContain("hourly check");
   });
 
   it("has words for every state, and for one not read yet", () => {
     for (const state of ["reporting", "waitingForData", "notSeen", "notLinked"] as const) expect(ecoWords(state).short).not.toBe("");
     expect(ecoWords(null).short).toBe("Ecoverse not read yet");
+  });
+
+  it("reads a stage change as the stage and why, and other events by their kind", () => {
+    expect(eventWords("stage", "AgentRemoved: the old agent has stopped")).toEqual({ title: STAGE_WORDS.agentRemoved.short, body: "the old agent has stopped" });
+    expect(eventWords("stage", "Planned")).toEqual({ title: STAGE_WORDS.planned.short, body: "" });
+    expect(eventWords("poll", "seen")).toEqual({ title: "Checked", body: "seen" });
+    expect(eventWords("custom", "x").title).toBe("Custom");
   });
 });

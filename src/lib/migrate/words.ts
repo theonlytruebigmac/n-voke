@@ -85,9 +85,9 @@ export const ECO_WORDS: Record<EcoState | "unread", EcoWords> = {
   waitingForData: {
     short: "Waiting for Ecoverse data",
     tone: "warn",
-    long: "Registered with Ecoverse and shown there, but no asset data has arrived yet. Until it does the device isn't fully working: its name, serial number and addresses are unknown and scripts can't run on it. This commonly takes 20 to 60 minutes.",
+    long: "Registered with Ecoverse and shown there, but no asset data has arrived yet. Until it does the device isn't fully working: its name, serial number and addresses are unknown and scripts can't run on it. This commonly takes 20 to 60 minutes. If the agent's first attempt to fetch its setup fails, it tries again at its next hourly check, so it can take up to about an hour and a half.",
   },
-  notSeen: { short: "Not in Ecoverse yet", tone: "warn", long: "The new Ecoverse agent is still setting up, and the device isn't in the destination's Ecoverse yet. This commonly takes 20 to 60 minutes and doesn't block the move." },
+  notSeen: { short: "Not in Ecoverse yet", tone: "warn", long: "The new Ecoverse agent is still setting up, and the device isn't in the destination's Ecoverse yet. This commonly takes 20 to 60 minutes and doesn't block the move. If its first attempt fails it tries again at its next hourly check, so it can take up to about an hour and a half." },
   notLinked: { short: "Not in Ecoverse", tone: "muted", long: "The destination isn't linked to Ecoverse, so the device isn't expected there." },
   unread: { short: "Ecoverse not read yet", tone: "muted", long: "Ecoverse hasn't been read for this device yet. It is read on each pass." },
 };
@@ -108,4 +108,20 @@ export function stageView(stage: Stage, waitingForEcoverse: boolean): StageView 
   if (stage === "healthy" && waitingForEcoverse) return { short: "Checking in", tone: "accent", pulse: true };
   const { short, tone, pulse } = STAGE_WORDS[stage];
   return { short, tone, pulse };
+}
+
+const EVENT_KINDS: Record<string, string> = { poll: "Checked", status: "From the device", note: "Note", match: "Match", path: "Path", output: "Output", launch: "Launch", action: "Action" };
+
+/**
+ * A timeline entry as a title and a body. A stage change reads as the stage it entered ("Lost") with why underneath;
+ * the core records it as `Stage` or `Stage: why`.
+ */
+export function eventWords(kind: string, detail: string): { title: string; body: string } {
+  if (kind === "stage") {
+    const [name, ...rest] = detail.split(": ");
+    const stage = (name.charAt(0).toLowerCase() + name.slice(1)) as Stage;
+    const known = STAGE_WORDS[stage];
+    if (known) return { title: known.short, body: rest.join(": ") };
+  }
+  return { title: EVENT_KINDS[kind] ?? kind.charAt(0).toUpperCase() + kind.slice(1), body: detail };
 }

@@ -11,6 +11,7 @@ export function jobsFromLaunch(report: LaunchReport, now = new Date(), newId: ()
     orgId: null,
     orgName: null,
     targetLabel: run.targetLabel,
+    migrationProject: run.projectId,
     createdAt: now.toISOString(),
     timeoutSeconds: run.timeoutSeconds,
     tasks: run.tasks.map(([taskId, assetId, device]) => newTask(taskId, assetId || null, device)),
