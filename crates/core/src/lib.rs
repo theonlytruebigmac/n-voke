@@ -194,20 +194,6 @@ pub(crate) async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, St
     tokio::task::spawn_blocking(f).await.map_err(|e| e.to_string())?
 }
 
-fn keyring_entry() -> Result<keyring::Entry, String> {
-    keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(|e| {
-        format!("The system keychain is unavailable ({e}). On Linux, make sure a Secret Service provider such as GNOME Keyring or KWallet is running.")
-    })
-}
-
-fn read_stored_key() -> Result<Option<String>, String> {
-    match keyring_entry()?.get_password() {
-        Ok(key) => Ok(Some(key)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(format!("Could not read the API key from the keychain: {e}")),
-    }
-}
-
 type GraphQlFake = Arc<dyn Fn(&str, &Value) -> (u16, String) + Send + Sync>;
 
 tokio::task_local! {
@@ -251,7 +237,8 @@ impl Core {
             .user_agent(format!("n-voke/{app_version}"))
             .build()
             .map_err(|e| format!("Could not build the HTTP client: {e}"))?;
-        let vault = Arc::new(Vault::new());
+        let secrets: Arc<dyn credentials::SecretStore> = Arc::new(credentials::BundleStore::new(credentials::KeyringStore));
+        let vault = Arc::new(Vault::new(secrets.clone()));
         let audit = AuditLog::new(vault.clone(), paths.data_dir.clone());
         let dry_run = std::env::var_os("NVOKE_DRY_RUN").is_some_and(|v| !v.is_empty() && v != "0");
         Ok(Self {
@@ -260,7 +247,7 @@ impl Core {
             api_key: Mutex::new(None),
             vault,
             audit,
-            secrets: Arc::new(credentials::BundleStore::new(credentials::KeyringStore)),
+            secrets,
             rest: Default::default(),
             graphql_override: Mutex::new(None),
             #[cfg(test)]
@@ -367,7 +354,8 @@ impl Core {
         if let Some(key) = self.api_key.lock().unwrap().clone() {
             return Ok(Some(key));
         }
-        let key = blocking(read_stored_key).await?;
+        let secrets = self.secrets.clone();
+        let key = blocking(move || secrets.get(KEYRING_USER)).await?;
         *self.api_key.lock().unwrap() = key.clone();
         Ok(key)
     }
@@ -419,12 +407,8 @@ impl Core {
         if let Some(key) = api_key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty()) {
             let had_key = self.current_key().await.ok().flatten().is_some();
             let to_store = key.clone();
-            let result = blocking(move || {
-                keyring_entry()?
-                    .set_password(&to_store)
-                    .map_err(|e| format!("Could not save the API key to the keychain: {e}"))
-            })
-            .await;
+            let secrets = self.secrets.clone();
+            let result = blocking(move || secrets.set(KEYRING_USER, &to_store).map_err(|e| format!("Could not save the API key to the keychain: {e}"))).await;
             let summary = if had_key { "Replaced the saved API key" } else { "Saved an API key" };
             self.audit.append(&AuditEntry::new("settings.api_key", summary, result.clone(), Value::Null));
             result?;
@@ -435,11 +419,8 @@ impl Core {
     }
 
     pub async fn clear_api_key(&self) -> Result<(), String> {
-        let result = blocking(|| match keyring_entry()?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(format!("Could not remove the API key from the keychain: {e}")),
-        })
-        .await;
+        let secrets = self.secrets.clone();
+        let result = blocking(move || secrets.delete(KEYRING_USER).map_err(|e| format!("Could not remove the API key from the keychain: {e}"))).await;
         self.audit.append(&AuditEntry::new("settings.api_key", "Removed the saved API key", result.clone(), Value::Null));
         result?;
         *self.api_key.lock().unwrap() = None;

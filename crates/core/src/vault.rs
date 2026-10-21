@@ -9,7 +9,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -20,9 +20,10 @@ use chacha20poly1305::{
     aead::{Aead, Generate, Key, KeyInit},
 };
 
-use crate::KEYRING_SERVICE;
+use crate::credentials::SecretStore;
 
-const KEYRING_DATA_KEY: &str = "data-key";
+/// Account of the data key in the shared secret store.
+const DATA_KEY_ACCOUNT: &str = "data-key";
 /// File header: format name + version, so the format can change later.
 const MAGIC: &[u8; 4] = b"SRv1";
 /// Header of a file sealed under its own key (a migration project), not the app's data key.
@@ -30,33 +31,32 @@ const MAGIC_OWN_KEY: &[u8; 4] = b"SRp1";
 const NONCE_LEN: usize = 24;
 
 pub struct Vault {
+    secrets: Option<Arc<dyn SecretStore>>,
     /// None until first use; then the key, or the reason it's unavailable.
     key: Mutex<Option<Result<XChaCha20Poly1305, String>>>,
 }
 
-impl Default for Vault {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Vault {
-    pub fn new() -> Self {
-        Self { key: Mutex::new(None) }
+    /// The data key lives in `secrets`, the same keychain item as every other secret, so the OS asks once.
+    pub fn new(secrets: Arc<dyn SecretStore>) -> Self {
+        Self { secrets: Some(secrets), key: Mutex::new(None) }
     }
 
     /// A vault with a fixed key, so tests never touch the system keychain.
     #[doc(hidden)]
     pub fn for_tests() -> Self {
         let cipher = XChaCha20Poly1305::new_from_slice(&[7u8; 32]).expect("a 32-byte key");
-        Self { key: Mutex::new(Some(Ok(cipher))) }
+        Self { secrets: None, key: Mutex::new(Some(Ok(cipher))) }
     }
 
     /// The cipher, loading (or creating) the data key on first use.
     fn cipher(&self) -> Result<XChaCha20Poly1305, String> {
         let mut slot = self.key.lock().unwrap();
         if slot.is_none() {
-            *slot = Some(load_or_create_key());
+            *slot = Some(match &self.secrets {
+                Some(secrets) => load_or_create_key(secrets.as_ref()),
+                None => Err("No keychain".into()),
+            });
         }
         slot.as_ref().unwrap().clone()
     }
@@ -107,18 +107,14 @@ impl Vault {
     }
 }
 
-fn load_or_create_key() -> Result<XChaCha20Poly1305, String> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_DATA_KEY).map_err(|e| format!("System keychain unavailable ({e})"))?;
-    let bytes = match entry.get_password() {
-        Ok(stored) => B64.decode(stored.trim()).map_err(|_| "The stored data key is corrupt".to_string())?,
-        Err(keyring::Error::NoEntry) => {
+fn load_or_create_key(secrets: &dyn SecretStore) -> Result<XChaCha20Poly1305, String> {
+    let bytes = match secrets.get(DATA_KEY_ACCOUNT).map_err(|e| format!("Couldn't read the data key from the system keychain ({e})"))? {
+        Some(stored) => B64.decode(stored.trim()).map_err(|_| "The stored data key is corrupt".to_string())?,
+        None => {
             let key = Key::<XChaCha20Poly1305>::generate();
-            entry
-                .set_password(&B64.encode(key.as_slice()))
-                .map_err(|e| format!("Couldn't save a data key to the system keychain ({e})"))?;
+            secrets.set(DATA_KEY_ACCOUNT, &B64.encode(key.as_slice())).map_err(|e| format!("Couldn't save a data key to the system keychain ({e})"))?;
             key.to_vec()
         }
-        Err(e) => return Err(format!("Couldn't read the data key from the system keychain ({e})")),
     };
     XChaCha20Poly1305::new_from_slice(&bytes).map_err(|_| "The stored data key has the wrong length".to_string())
 }
@@ -256,6 +252,14 @@ mod tests {
 
     fn cipher() -> XChaCha20Poly1305 {
         XChaCha20Poly1305::new(&Key::<XChaCha20Poly1305>::generate())
+    }
+
+    #[test]
+    fn the_data_key_is_made_once_and_kept_in_the_shared_secret_store() {
+        let secrets: Arc<dyn SecretStore> = Arc::new(crate::credentials::MemoryStore::default());
+        let sealed = Vault::new(secrets.clone()).seal(b"hello").unwrap();
+        assert!(secrets.get(DATA_KEY_ACCOUNT).unwrap().is_some(), "the key is in the shared store");
+        assert_eq!(Vault::new(secrets).open(&sealed).unwrap(), b"hello", "a later run reads the same key");
     }
 
     #[test]

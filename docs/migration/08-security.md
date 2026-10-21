@@ -6,7 +6,7 @@ Migration adds two kinds of credential to N-voke, two new APIs it writes to, and
 
 | Credential | Used for | Stored |
 |---|---|---|
-| Ecoverse API-Access token | Every Ecoverse request (unchanged) | OS keychain, account `api-key` (unchanged) |
+| Ecoverse API-Access token | Every Ecoverse request (unchanged) | OS keychain, account `api-key` (kept inside the single `secrets` keychain item) |
 | Second Ecoverse token, when the destination server is linked to another tenant | Seeing and cleaning up moved devices in the destination tenant | OS keychain, account `ecoverse:<tenant id>` |
 | N-central user API JWT, one per server | REST authentication | OS keychain, account `ncentral:<host>` |
 | REST access and refresh tokens | Short-lived REST sessions | Memory only |
