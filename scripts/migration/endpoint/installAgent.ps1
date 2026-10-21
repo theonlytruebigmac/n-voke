@@ -330,6 +330,16 @@ function Invoke-FullCleanup($Status) {
         if (Get-UninstallEntry $product) { $code = "$code (entry still present after 5 min)" }
         Add-StatusHistory $Status 'cleanup-uninstall' "$product -> $code"
     }
+    # The Windows Agent's uninstall hands the Ecoverse agent's own MSI removal on, and that can still be running after the
+    # uninstall returns: on SUP-2190 it failed (MSI error 1722) in the same second this cleanup stopped processes and deleted
+    # folders, and every later attempt failed with 1721 because msp-agent-core.exe was gone. So wait for the entry to go,
+    # for at most 5 minutes, and never remove it or touch its folders ourselves.
+    $ufaWaited = 0
+    while ($ufaWaited -lt 60 -and (Get-UninstallEntry 'MSP Core Agent')) { Start-Sleep -Seconds 5; $ufaWaited++ }
+    if ($ufaWaited -gt 0) {
+        $ufaGone = -not (Get-UninstallEntry 'MSP Core Agent')
+        Add-StatusHistory $Status 'cleanup-ufa-wait' $(if ($ufaGone) { "the Ecoverse agent's own removal finished after $($ufaWaited * 5) s" } else { "the Ecoverse agent is still registered after $($ufaWaited * 5) s; left alone" })
+    }
     # Whatever service is still registered from an N-able folder goes too.
     $leftover = Get-CimInstance Win32_Service | Where-Object { $p = [string]$_.PathName; $CleanupFolders | Where-Object { $p -like "*$_*" } }
     foreach ($svc in $leftover) {

@@ -581,6 +581,16 @@ Describe 'the installer' {
         $text | Should -Match 'cleanup-ufa-leftover'
     }
 
+    It 'waits for the Ecoverse agent''s own MSI removal to finish before it stops any process or deletes any folder, and never removes that product itself' {
+        $cleanup = Get-FunctionText (Join-Path $here 'installAgent.ps1') @('Invoke-FullCleanup')
+        $wait = $cleanup.IndexOf('cleanup-ufa-wait')
+        $wait | Should -BeGreaterThan 0
+        $wait | Should -BeLessThan $cleanup.IndexOf('Stop-Process')
+        $wait | Should -BeLessThan $cleanup.IndexOf('Remove-TreeSafely')
+        $cleanup | Should -Match "Get-UninstallEntry 'MSP Core Agent'"
+        $cleanup | Should -Not -Match 'msiexec.*MSP Core Agent|Invoke-WithTimeout[^\r\n]*MSP Core Agent'
+    }
+
     It 'is ASCII' {
         ($bytes | Where-Object { $_ -gt 126 -or ($_ -lt 32 -and $_ -notin 9, 10, 13) }).Count | Should -Be 0
     }

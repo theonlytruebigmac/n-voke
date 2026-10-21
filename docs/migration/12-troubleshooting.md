@@ -77,14 +77,25 @@ foreach ($ip in '44.228.168.113','54.244.124.62','44.224.114.74') {   # the lab'
 
 ## The Ecoverse agent never appeared
 
-Seen on SUP-2190 in the reverse move ([findings](10-phase0-findings.md#the-ecoverse-agent-that-never-came-back-after-a-reverse-move-2026-10-21)): the Windows Agent installed and checks in, but there is no `MspAgent` service and no `C:\Program Files (x86)\Msp Agent` folder, and nothing comes back. On the devices that worked, the old agent's removal had finished by itself before the cleanup ran, the folder was gone and a fresh agent was deployed. On SUP-2190 the removal had not finished, the cleanup deleted the folder, and the Windows Agent never deployed an agent. **N-voke's cleanup no longer deletes the Ecoverse agent's folders**; a device moved with an older installer (v0.2.3 and before) can still end up like this.
+Seen on SUP-2190 in the reverse move ([findings](10-phase0-findings.md#the-ecoverse-agent-that-never-came-back-after-a-reverse-move-2026-10-21)): the Windows Agent installed and checks in, but there is no `MspAgent` service and nothing comes back. The Windows Agent decides from what is **registered**: with nothing registered it installs a fresh agent; with an `MSP Core Agent` registered but no service it only tries to remove it, and never installs. That removal runs `msp-agent-core.exe --uninstall` from `C:\Program Files (x86)\Msp Agent`, so it fails (MSI error 1721) once that file is gone, five times, and then nothing happens. **Most likely cause** (inferred from timestamps): the old installer's cleanup stopped processes and deleted folders while the Ecoverse agent's own removal was still running, cutting it short (1722) and deleting the exe it needs. **The cleanup no longer does that** (it waits for the removal and touches none of the Ecoverse agent's folders or processes); a device moved with v0.2.3 or earlier can still end up like this.
 
-On the device, in this order, watching `C:\Program Files (x86)\Msp Agent` for new files for about 15 minutes after each step:
+**Confirm it, read-only, in an elevated PowerShell:**
 
-1. Restart *Windows Agent Maintenance Service*, wait 5 seconds, then restart *Windows Agent Service*. (The installer already does this once, 15 minutes after the install.)
-2. If nothing happens, look in the Windows Agent's own log folder (under `C:\Program Files (x86)\N-able Technologies\Windows Agent`) for what it did about the Ecoverse agent.
-3. If the `Msp Agent` folder was deleted, restore it with `msp-agent-core.exe` in it, copied from a working device, and repeat step 1. In the lab, with the folder restored and both services restarted, something removed the folder itself and the agent came back. This is a lab workaround, not something N-voke does.
-4. If it still doesn't come back, report it to N-able with the Windows Agent logs and the device's `status.json`.
+```powershell
+Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='MsiInstaller'; StartTime=(Get-Date).Date} | Where-Object Message -match 'MSP Core Agent' | Sort-Object TimeCreated | Select-Object TimeCreated, Id, @{n='Message';e={$_.Message.Substring(0,[Math]::Min(150,$_.Message.Length))}} | Format-Table -Wrap
+Select-String -Path C:\ProgramData\MspAgent\Tools\ufamsi.log -Pattern 'Error 1721','Error 1722' -Context 1,0 | Select-Object -First 4
+```
+
+Repeated *Removal failed* with **1721** (and an earlier **1722**) is this state. The Windows Agent's own account is in `UfaMaint.log` in its log folder: *Detected installed agent* followed by *Uninstall attempts count: [ n ]* (maximum 5) is the same state; *Did not detect installed agent* followed by *Starting to install* is the healthy path.
+
+**To recover** (this repeats what worked in the lab at 14:24: removal completed once the exe was back, and the agent was installed again at 14:48; it is not something N-voke does, and what the Windows Agent does after its five attempts is unknown):
+
+1. Restore `C:\Program Files (x86)\Msp Agent\msp-agent-core.exe` (copy the `Msp Agent` folder from a working device).
+2. Remove the registration with its own uninstall: `msiexec /x {A14A5D24-6709-4571-A0E4-1769230C3267} /qn /L*V C:\temp\ufamsi2.log` (use the product code from the `/X{...}` in `UfaMaint.log`; it is the same MSI the Windows Agent's attempts use). Wait for it to return 0.
+3. Restart *Windows Agent Maintenance Service*, wait 5 seconds, then restart *Windows Agent Service*, and watch `C:\Program Files (x86)\Msp Agent` for new files for about 15 minutes. With nothing registered, the Windows Agent should take the install path.
+4. If it still doesn't come back, report it to N-able with `UfaMaint.log`, `ufamsi.log` and the device's `status.json`.
+
+(The installer's own Windows Agent service restart, 15 minutes after the install, is described in the [watchdog](05-endpoint-scripts.md#ufa-sync-watchdog); it has no demonstrated benefit in this state and uses one of the five attempts.)
 
 ## Doing the repair by hand
 
