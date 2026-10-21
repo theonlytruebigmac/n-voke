@@ -29,6 +29,9 @@ $UfaSyncMaxRestarts = 2
 $UfaSyncRestartGapMinutes = 15
 $UfaBlockedWatchMinutes = 360
 $UfaRepairFreshMinutes = 45
+$UfaBlockedRestartAfterMinutes = 30
+$UfaBlockedRepairAfterMinutes = 60
+$UfaBlockedSettleMinutes = 20
 $UfaRepairAfterMinutes = 30
 $UfaRepairWaitMinutes = 90
 $UfaRepairRestartAfterMinutes = 10
@@ -130,8 +133,10 @@ function Test-MsiBusy {
 # data. The agent retries that fetch only hourly; restarting MspAgent retries it at once. Only lines after $Since count.
 #   synced   the inventory component (generic-asset-interrogator) was downloaded
 #   stalled  a configuration fetch failed on a timeout, the cloud answers again, and nothing was delivered since: restart
-#   blocked  a fetch failed and the cloud still doesn't answer: a restart can't help, and it often clears by itself
-#            (the lab saw it). Only watched, never acted on; if it turns into a state below, that state's rule applies
+#   blocked  a fetch failed and the cloud still doesn't answer. It often clears by itself (the lab saw it), so it is
+#            watched first. Only if it lasts, one MspAgent restart is tried, and after that gets time to prove itself
+#            the one-time repair is done (Test-UfaBlockedRestartDue, Test-UfaRepairDue). If it turns into a state
+#            below, that state's rule applies
 #   rejected the cloud answers the agent's login with "400 The SSL certificate error" and never accepts it: a restart
 #            or a reboot doesn't help (seen in the lab). What did: removing the UFA and letting the Windows Agent redeploy it,
 #            which issues a new certificate (Invoke-UfaRepair, once, after a sustained refusal)
@@ -142,12 +147,13 @@ function Test-MsiBusy {
 function Get-UfaSyncState([string]$LogPath, [datetime]$Since) {
     if (-not (Test-Path -LiteralPath $LogPath)) { return [pscustomobject]@{ State = 'unknown'; FailedAt = $null; RejectedSince = $null; FaultSince = $null; FaultLastAt = $null } }
     $stamp = [regex]'^\[(\d{4}-\d\d-\d\dT[\d:.]+[+-]\d\d:\d\d)\]'
-    $failedAt = $null; $failingSince = $null; $authOkAt = $null; $syncedAt = $null; $rejectedAt = $null; $rejectedSince = $null; $deniedCount = 0; $deniedSince = $null; $deniedAt = $null
+    $failedAt = $null; $failingSince = $null; $jwtFailedAt = $null; $authOkAt = $null; $syncedAt = $null; $rejectedAt = $null; $rejectedSince = $null; $deniedCount = 0; $deniedSince = $null; $deniedAt = $null
     foreach ($line in @(Get-Content -LiteralPath $LogPath -Tail 20000 -ErrorAction SilentlyContinue)) {
         $m = $stamp.Match($line)
         if (-not $m.Success) { continue }
         $at = [datetimeoffset]::Parse($m.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture).UtcDateTime
         if ($at -lt $Since) { continue }
+        if ($line -match 'auth::fetchJWTWithRetries error occurred when fetching jwt:') { $jwtFailedAt = $at }
         if ($line -match 'ERROR \(\d+\): configservice::FetchAllConfigurations failed to fetch configuration data:') { $failedAt = $at; if (-not $failingSince) { $failingSince = $at } }
         elseif ($line -match 'auth::fetchJWTWithRetries error occurred when fetching jwt: unexpected status code: 400 .*The SSL certificate error') { $rejectedAt = $at; if (-not $rejectedSince) { $rejectedSince = $at } }
         elseif ($line -match 'auth::requestOauthToken Oauth token response received\. Status: 200') { $authOkAt = $at; $rejectedSince = $null; $failingSince = $null }
@@ -164,21 +170,38 @@ function Get-UfaSyncState([string]$LogPath, [datetime]$Since) {
              elseif ($failedAt) { 'blocked' }
              else { 'waiting' }
     $faultSince = if ($state -eq 'rejected') { $rejectedSince } elseif ($state -eq 'denied') { $deniedSince } elseif ($state -eq 'blocked') { $failingSince } else { $null }
-    $faultLastAt = if ($state -eq 'rejected') { $rejectedAt } elseif ($state -eq 'denied') { $deniedAt } else { $null }
+    # A blocked agent logs a failed login about every 10 minutes but a failed configuration fetch only about hourly.
+    $blockedLastAt = if ($jwtFailedAt -and $jwtFailedAt -gt $failedAt) { $jwtFailedAt } else { $failedAt }
+    $faultLastAt = if ($state -eq 'rejected') { $rejectedAt } elseif ($state -eq 'denied') { $deniedAt } elseif ($state -eq 'blocked') { $blockedLastAt } else { $null }
     [pscustomobject]@{ State = $state; FailedAt = $failedAt; RejectedSince = $rejectedSince; FaultSince = $faultSince; FaultLastAt = $faultLastAt }
 }
 
-# True when the same fault (login refused, or component downloads refused) has lasted AfterMinutes with nothing
-# getting through, no repair was done yet, and the fault is still current: its last log line is at most FreshMinutes
-# old. That last check keeps a refusal seen earlier, followed by a network outage, from triggering a repair that
-# can't help. Blocked, stalled, waiting and synced never qualify.
-function Test-UfaRepairDue($Sync, [datetime]$NowUtc, [bool]$AlreadyRepaired, [int]$AfterMinutes, [int]$FreshMinutes = 45) {
-    if ($AlreadyRepaired -or $Sync.State -notin 'rejected', 'denied' -or -not $Sync.FaultSince -or -not $Sync.FaultLastAt) { return $false }
+# True when the same fault (login refused, component downloads refused, or a long blocked state) has lasted
+# AfterMinutes with nothing getting through, no repair was done yet, and the fault is still current: its last log
+# line is at most FreshMinutes old. That check keeps a refusal seen earlier, followed by an outage, from triggering a
+# repair that can't help. A blocked state qualifies only when BlockedAfterMinutes is given, and then only if the
+# MspAgent restart was tried at least SettleMinutes ago and a failure was logged after it (the restart did not fix it).
+# Stalled, waiting and synced never qualify.
+function Test-UfaRepairDue($Sync, [datetime]$NowUtc, [bool]$AlreadyRepaired, [int]$AfterMinutes, [int]$FreshMinutes = 45, [int]$BlockedAfterMinutes = 0, [int]$Restarts = 0, [datetime]$LastRestartUtc = [datetime]::MinValue, [int]$SettleMinutes = 20) {
+    if ($AlreadyRepaired -or $Sync.State -notin 'rejected', 'denied', 'blocked' -or -not $Sync.FaultSince -or -not $Sync.FaultLastAt) { return $false }
+    if (($NowUtc - $Sync.FaultLastAt).TotalMinutes -gt $FreshMinutes) { return $false }
+    if ($Sync.State -eq 'blocked') {
+        if ($BlockedAfterMinutes -le 0 -or $Restarts -lt 1) { return $false }
+        if (($NowUtc - $LastRestartUtc).TotalMinutes -lt $SettleMinutes -or $Sync.FaultLastAt -le $LastRestartUtc) { return $false }
+        return (($NowUtc - $Sync.FaultSince).TotalMinutes -ge $BlockedAfterMinutes)
+    }
+    return (($NowUtc - $Sync.FaultSince).TotalMinutes -ge $AfterMinutes)
+}
+
+# The one MspAgent restart tried for a blocked state that lasts: it makes the agent fetch its configuration now, which
+# is the only thing that can fix a blocked agent short of the repair. Only once, only while the failures are current.
+function Test-UfaBlockedRestartDue($Sync, [int]$Restarts, [datetime]$NowUtc, [int]$AfterMinutes, [int]$FreshMinutes = 45) {
+    if ($Sync.State -ne 'blocked' -or $Restarts -gt 0 -or -not $Sync.FaultSince -or -not $Sync.FaultLastAt) { return $false }
     if (($NowUtc - $Sync.FaultLastAt).TotalMinutes -gt $FreshMinutes) { return $false }
     return (($NowUtc - $Sync.FaultSince).TotalMinutes -ge $AfterMinutes)
 }
 
-# The repair N-able support gave for a UFA whose login is refused: uninstall the UFA core, then restart the Windows
+# The repair N-able support gave for a UFA whose login is refused: uninstall the UFA core, wait, then restart the Windows
 # Agent services so the agent redeploys it. The new UFA provisions a fresh certificate under the same GUID.
 function Restart-WindowsAgentService {
     foreach ($name in 'Windows Agent Maintenance Service', 'Windows Agent Service') {
@@ -187,20 +210,34 @@ function Restart-WindowsAgentService {
     }
 }
 
-# The uninstaller exits before the removal is over, and an agent restarted too early doesn't redeploy the UFA (seen
-# in the lab: the operator always needed one more restart a while later). So wait until the UFA is really gone first.
-function Invoke-UfaRepair {
+# The sequence, in this order: msp-agent-core.exe --uninstall, wait SettleSeconds (120), restart Windows Agent
+# Maintenance Service, wait 5 s, restart Windows Agent Service. The uninstaller exits before the removal is over, and an
+# agent restarted too early doesn't redeploy the UFA (seen in the lab: the operator always needed one more restart a
+# while later), hence the fixed wait. The caller then watches the Msp Agent folder for new data (Get-UfaFolderActivity).
+# Never delete that folder or msp-agent-core.exe here: --uninstall leaves them behind, and in the lab, with them removed
+# by hand the Windows Agent did not redeploy the UFA; with them restored and both services restarted, it did.
+function Invoke-UfaRepair([int]$SettleSeconds = 120) {
     $result = Invoke-UfaCoreUninstall
-    $core = [Environment]::GetFolderPath('ProgramFilesX86') + '\Msp Agent\msp-agent-core.exe'
-    for ($i = 0; $i -lt 12 -and ((Get-Service -Name 'MspAgent' -ErrorAction SilentlyContinue) -or (Get-Process -Name 'msp-agent-core' -ErrorAction SilentlyContinue) -or (Test-Path -LiteralPath $core)); $i++) { Start-Sleep -Seconds 5 }
+    Start-Sleep -Seconds $SettleSeconds
+    $script:UfaRepairRestartedAt = (Get-Date).ToUniversalTime()
     Restart-WindowsAgentService
-    return "uninstall: $result"
+    return "uninstall: $result; waited $SettleSeconds s, then restarted the Windows Agent services"
+}
+
+# What the Windows Agent has written into the Msp Agent folder since SinceUtc: the sign that it is redeploying the UFA.
+# The leftover msp-agent-core.exe is old, so it doesn't count.
+function Get-UfaFolderActivity([string]$Path, [datetime]$SinceUtc) {
+    $changed = @(Get-ChildItem -LiteralPath $Path -Recurse -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTimeUtc -gt $SinceUtc })
+    $newest = if ($changed.Count -gt 0) { ($changed | Measure-Object -Property LastWriteTimeUtc -Maximum).Maximum } else { $null }
+    [pscustomobject]@{ Files = $changed.Count; NewestAt = $newest }
 }
 
 # After a repair the UFA is only redeployed when the Windows Agent notices it is missing. If it hasn't been put back
-# some minutes after the last restart, restart the agent services again (bounded).
-function Test-UfaRedeployRestartDue([bool]$UfaPresent, [datetime]$LastActionUtc, [int]$Restarts, [datetime]$NowUtc, [int]$AfterMinutes, [int]$MaxRestarts) {
+# some minutes after the last restart, restart the agent services again (bounded). Not while the Msp Agent folder is
+# still being written (its newest file is younger than AfterMinutes): the redeploy is under way.
+function Test-UfaRedeployRestartDue([bool]$UfaPresent, [datetime]$LastActionUtc, [int]$Restarts, [datetime]$NowUtc, [int]$AfterMinutes, [int]$MaxRestarts, $FolderNewestUtc = $null) {
     if ($UfaPresent -or $Restarts -ge $MaxRestarts) { return $false }
+    if ($FolderNewestUtc -and (($NowUtc - $FolderNewestUtc).TotalMinutes -lt $AfterMinutes)) { return $false }
     return (($NowUtc - $LastActionUtc).TotalMinutes -ge $AfterMinutes)
 }
 
@@ -377,15 +414,20 @@ try {
         if ($job.expectUfa -eq 'true' -and $status.ufaRepairedAt -and -not ($ufaService -and $ufaProvisioned)) {
             $sinceRepair = ((Get-Date).ToUniversalTime() - [datetime]::Parse($status.ufaRepairedAt).ToUniversalTime()).TotalMinutes
             $lastAction = if ($status.ufaRepairRestartedAt) { [datetime]::Parse($status.ufaRepairRestartedAt).ToUniversalTime() } else { [datetime]::Parse($status.ufaRepairedAt).ToUniversalTime() }
-            if (Test-UfaRedeployRestartDue ([bool]$ufaService) $lastAction ([int]$status.ufaRepairRestarts) (Get-Date).ToUniversalTime() $UfaRepairRestartAfterMinutes $UfaRepairMaxFinalRestarts) {
+            # Watch the Msp Agent folder: new files since the last restart mean the Windows Agent is redeploying the UFA.
+            $activity = Get-UfaFolderActivity ([Environment]::GetFolderPath('ProgramFilesX86') + '\Msp Agent') $lastAction
+            $status.ufa.redeployFiles = $activity.Files
+            $status.ufa.redeployNewestAt = if ($activity.NewestAt) { $activity.NewestAt.ToUniversalTime().ToString('o') } else { $null }
+            $folderNote = if ($activity.Files -gt 0) { "{0} file(s) written to the Msp Agent folder since the last restart, newest {1:HH:mm:ss}" -f $activity.Files, $activity.NewestAt.ToLocalTime() } else { 'no new data in the Msp Agent folder since the last restart' }
+            if (Test-UfaRedeployRestartDue ([bool]$ufaService) $lastAction ([int]$status.ufaRepairRestarts) (Get-Date).ToUniversalTime() $UfaRepairRestartAfterMinutes $UfaRepairMaxFinalRestarts $activity.NewestAt) {
                 Restart-WindowsAgentService
                 $status.ufaRepairRestarts = [int]$status.ufaRepairRestarts + 1
                 $status.ufaRepairRestartedAt = (Get-Date).ToUniversalTime().ToString('o')
-                Add-StatusHistory $status 'ufa-repair-restart' ('MspAgent was not redeployed {0:N0} min after the repair; restarted the Windows Agent services again (restart {1} of {2})' -f $sinceRepair, $status.ufaRepairRestarts, $UfaRepairMaxFinalRestarts)
+                Add-StatusHistory $status 'ufa-repair-restart' ('MspAgent was not redeployed {0:N0} min after the repair ({1}); restarted the Windows Agent services again (restart {2} of {3})' -f $sinceRepair, $folderNote, $status.ufaRepairRestarts, $UfaRepairMaxFinalRestarts)
             }
             if ($sinceRepair -lt $UfaRepairWaitMinutes) {
                 $status.stage = 'awaiting-ufa'
-                Add-StatusHistory $status 'awaiting-ufa' ('{0:N0} min since the UFA repair; MspAgent not redeployed and provisioned yet' -f $sinceRepair)
+                Add-StatusHistory $status 'awaiting-ufa' ('{0:N0} min since the UFA repair; MspAgent not redeployed and provisioned yet; {1}' -f $sinceRepair, $folderNote)
                 Save-Status $status
                 exit 0
             }
@@ -440,20 +482,25 @@ try {
             $coreLog = [Environment]::GetFolderPath('ProgramFilesX86') + '\Msp Agent\logs\msp-agent-core.log'
             $sync = Get-UfaSyncState $coreLog $since
             $status.ufa.sync = $sync.State
-            if ($sync.State -eq 'stalled') {
-                $restarts = [int]$status.ufaSyncRestarts
-                $lastRestart = if ($status.ufaSyncRestartedAt) { [datetime]::Parse($status.ufaSyncRestartedAt).ToUniversalTime() } else { [datetime]::MinValue }
-                if ($restarts -lt $UfaSyncMaxRestarts -and ((Get-Date).ToUniversalTime() - $lastRestart).TotalMinutes -ge $UfaSyncRestartGapMinutes) {
-                    Restart-Service -Name 'MspAgent' -Force -ErrorAction SilentlyContinue
-                    $status.ufaSyncRestarts = $restarts + 1
-                    $status.ufaSyncRestartedAt = (Get-Date).ToUniversalTime().ToString('o')
-                    Add-StatusHistory $status 'ufa-sync-restart' ("MspAgent configuration fetch timed out at {0:o} and the cloud answers again; restarted MspAgent to fetch now instead of at its next hourly check (restart {1} of {2})" -f $sync.FailedAt, ($restarts + 1), $UfaSyncMaxRestarts)
-                }
+            $nowUtc = (Get-Date).ToUniversalTime()
+            $restarts = [int]$status.ufaSyncRestarts
+            $lastRestart = if ($status.ufaSyncRestartedAt) { [datetime]::Parse($status.ufaSyncRestartedAt).ToUniversalTime() } else { [datetime]::MinValue }
+            $stalledDue = $sync.State -eq 'stalled' -and $restarts -lt $UfaSyncMaxRestarts -and ($nowUtc - $lastRestart).TotalMinutes -ge $UfaSyncRestartGapMinutes
+            $blockedDue = Test-UfaBlockedRestartDue $sync $restarts $nowUtc $UfaBlockedRestartAfterMinutes $UfaRepairFreshMinutes
+            if ($stalledDue -or $blockedDue) {
+                Restart-Service -Name 'MspAgent' -Force -ErrorAction SilentlyContinue
+                $status.ufaSyncRestarts = $restarts + 1
+                $status.ufaSyncRestartedAt = $nowUtc.ToString('o')
+                $reason = if ($blockedDue) { "the Ecoverse auth service has not answered the agent since {0:o}" -f $sync.FaultSince } else { "MspAgent configuration fetch timed out at {0:o} and the cloud answers again" -f $sync.FailedAt }
+                $limit = if ($blockedDue) { 1 } else { $UfaSyncMaxRestarts }
+                Add-StatusHistory $status 'ufa-sync-restart' ("{0}; restarted MspAgent to fetch now instead of at its next hourly check (restart {1} of {2})" -f $reason, ($restarts + 1), $limit)
             }
-            if (Test-UfaRepairDue $sync (Get-Date).ToUniversalTime() ([bool]$status.ufaRepairedAt) $UfaRepairAfterMinutes $UfaRepairFreshMinutes) {
+            $lastRestartNow = if ($status.ufaSyncRestartedAt) { [datetime]::Parse($status.ufaSyncRestartedAt).ToUniversalTime() } else { [datetime]::MinValue }
+            if (Test-UfaRepairDue $sync $nowUtc ([bool]$status.ufaRepairedAt) $UfaRepairAfterMinutes $UfaRepairFreshMinutes $UfaBlockedRepairAfterMinutes ([int]$status.ufaSyncRestarts) $lastRestartNow $UfaBlockedSettleMinutes) {
                 $result = Invoke-UfaRepair
-                $status.ufaRepairedAt = (Get-Date).ToUniversalTime().ToString('o')
-                Add-StatusHistory $status 'ufa-repair' ("the Ecoverse agent has been in state '{0}' since {1:o} with nothing getting through; removed the UFA core and restarted the Windows Agent services so it is redeployed ({2})" -f $sync.State, $sync.FaultSince, $result)
+                # The baseline for watching the Msp Agent folder is the moment the services were restarted.
+                $status.ufaRepairedAt = $(if ($script:UfaRepairRestartedAt) { $script:UfaRepairRestartedAt } else { (Get-Date).ToUniversalTime() }).ToString('o')
+                Add-StatusHistory $status 'ufa-repair' ("the Ecoverse agent has been in state '{0}' since {1:o} with nothing getting through; removed the UFA core and restarted the Windows Agent services so it is redeployed ({2}); now watching the Msp Agent folder for new data" -f $sync.State, $sync.FaultSince, $result)
                 $status.stage = 'awaiting-ufa'
                 Save-Status $status
                 exit 0
@@ -469,7 +516,7 @@ try {
                     $why = switch ($sync.State) {
                         'rejected' { 'the cloud rejects the Ecoverse agent login (400 SSL certificate error); a restart does not fix this' }
                         'denied' { 'the component CDN refuses the Ecoverse agent downloads (403); a restart does not fix this' }
-                        'blocked' { 'the Ecoverse auth service does not answer the agent; it often clears by itself, so only watching' }
+                        'blocked' { 'the Ecoverse auth service does not answer the agent; it often clears by itself, so it is watched first' }
                         default { $sync.State }
                     }
                     Add-StatusHistory $status 'awaiting-ufa' ('MspAgent data sync: {0}; {1:N0} min since install' -f $why, $waitedSync)

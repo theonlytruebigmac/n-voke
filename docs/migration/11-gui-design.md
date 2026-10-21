@@ -311,7 +311,7 @@ The home of a running project. Top to bottom: a stage strip, the attention list,
 - **Stage strip**: the 16 stages grouped for reading (Planned, Launched, Staged, Moving, On the new server, Healthy, Done, Needs you). Clicking a segment filters the table.
 - **Needs you**: one card per attention device with the sentence for its state ([Words](#words)) and the actions that apply ([Actions](#actions)). *Known delays* are not listed here until they pass their thresholds.
 - **Device table**: one row per device; a click opens the **device sheet**.
-- The header shows the tracker state (*Tracking · last read 12 s ago*, *Paused*, *Read-only: open in another window*) and **Poll now**.
+- The header shows the tracker state (*Tracking · last read 12 s ago*, *Paused*, *Read-only: open in another window*), **Probe waiting (N)** (shown while devices are waiting for Ecoverse's data: probes them, longest-waiting first, 20 per click, and summarises the states their Ecoverse agents report) and **Poll now**.
 
 **Device sheet** (`Sheet`, wide):
 
@@ -328,15 +328,21 @@ The home of a running project. Top to bottom: a stage strip, the attention list,
 │   14:12  Registered        found on new.example.com                │
 │   14:19  Healthy           checking in; Ecoverse agent syncing     │
 │                                                                    │
+│  Ecoverse agent on the device            (after a Probe)           │
+│    ◐ Can't reach the Ecoverse login service                        │
+│    Often clears by itself; restarted 1×. As of the last Probe,     │
+│    12 min ago. Probe again to refresh.                             │
+│    14:50  Restarted the Ecoverse agent                             │
+│                                                                    │
 │  Last probe 14:19  (status.json)                                   │
 │    cleanup: Windows Agent 0 · MSP Core Agent 1605 · folders removed│
-│    Ecoverse agent: provisioned · data sync: waiting (12 min)       │
 │                                                                    │
 │  [ Probe ] [ Run cleanup now ] [ Retry ] [ Tag… ] [ Run a script… ]│
 └────────────────────────────────────────────────────────────────────┘
 ```
 
 - The timeline is the device's event list; each event is one sentence. Collected `status.json` is summarized, with the raw JSON behind *Show details* (token-free by design).
+- **Ecoverse agent on the device** (built 2026-10-21) is read from the latest Probe's `status.json`: the agent's state in words, its advice, how old the Probe is, the restarts, the installer's own warning, and the steps the watcher took (restarts and the one-time repair). It appears only for a project whose destination is linked to Ecoverse and a device that has been probed; the tracker does not probe on its own.
 - Actions are the ones valid for the device's stage; the others are hidden, not disabled.
 
 ### 7. Finish
@@ -392,7 +398,9 @@ One sentence per stage, shown in the table (short form) and the device sheet (lo
 | Destination linked, asset not yet connected | *Ecoverse agent still setting up (installed {n} min ago). This commonly takes 20 to 60 minutes and doesn't block the move.* |
 | Asset connected, no data yet | *Ecoverse is waiting for the agent's data. Scripts run once it arrives.* |
 | Healthy, and the destination's Ecoverse has **no asset data** yet | The table reads **Checking in** (not Healthy), with *Waiting for Ecoverse data* under it, and the sheet says: *Registered with Ecoverse and shown there, but no asset data has arrived yet. Until it does the device isn't fully working: its name, serial number and addresses are unknown and scripts can't run on it.* **Healthy** is shown only once Ecoverse is receiving the device's data (a host name, serial number or address). The stage in the core is still Healthy; the page tells the two apart with `waitingForEcoverse`. Waiting devices are counted under *Waiting for Ecoverse* on the strip, don't count toward progress, and are left out of the bulk cleanup |
-| Login rejected / components denied (from `status.json`) | *The Ecoverse agent can't {log in / download its components}. The installer repairs it once after 30 minutes; if it persists, check the device's network.* |
+| Login rejected / components denied (from `status.json`, after a Probe) | *Login rejected* or *Downloads refused*, in the **Ecoverse agent on the device** section of the sheet: *The cloud rejects the agent's login (400 SSL certificate error). A restart doesn't help. The installer does a one-time repair after 30 minutes. If it is still refused after that, check TLS inspection, proxy and firewall on the device's network path, and report it to N-able.* |
+| Blocked (from `status.json`, after a Probe) | *Can't reach the Ecoverse login service*: *The Ecoverse login service isn't answering the agent. This often clears by itself, so the installer watches it first. If it lasts, the installer restarts the agent after 30 minutes and does a one-time repair after 60 minutes if that didn't help.* |
+| Stalled, redeploying, sending data (from `status.json`, after a Probe) | *Needs a restart* (the installer restarts it, at most twice), *Being redeployed* (after the repair, with how many files the agent's folder has received since), *Sending data* |
 | Destination not linked | *Not in Ecoverse until the destination is linked. This is expected.* |
 
 ## Actions
@@ -400,6 +408,7 @@ One sentence per stage, shown in the table (short form) and the device sheet (lo
 | Action | Stage(s) | What it does | Confirms? |
 |---|---|---|---|
 | Poll now | project | One tracker pass immediately | no |
+| Probe waiting | project | `Status` on each healthy device waiting for Ecoverse's data, one after another, up to 20 | no (read-only on the device; the answers are saved on the devices' timelines) |
 | Probe | Stuck staged, Healthy, Registered | Runs `Status` through whichever agent reaches it and shows `status.json`, the task state and the log tail | no |
 | Cancel and relaunch | Not picked up | Cancels the Ecoverse task and returns the device to Planned (the core's `Retry`; the task cancel itself is **Core gap** to check) | yes |
 | Retry | Launch failed, Not picked up, Stuck staged, unsure launches | Back to Planned, then launch again | yes |
@@ -425,7 +434,7 @@ The web view never builds a migration object itself. It calls commands, gets typ
 | Plan | `project_plan`, `project_plan_add` | `migration_plan_view`, `migration_plan_add` |
 | Launch | `project_launch`, `project_wave_create`, `project_wave_preview`, `project_wave_launch` (with `dry_run`) | `migration_launch_view`, `migration_wave_create`, `migration_launch_preview`, `migration_launch_saved` |
 | Track | `tracker_start`, `tracker_stop`, `project_poll`, `project_track`, `project_device`, `project_device_command` | `migration_poll_digest`, `migration_track_view`, `migration_device_detail`, `migration_device_command` |
-| Finish | `project_finish`, `project_report`, `project_cleanup`, `project_retire_view`, `project_retire` | `migration_finish_view`, `migration_finish_report`, `migration_cleanup_healthy`, `migration_retire_view`, `migration_retire_sources` (built 2026-10-21: `DELETE /api/devices/{id}?removeAgents=false` for cleaned-up devices past their review period, only while the project's retire option is on) |
+| Finish | `project_finish`, `project_report`, `project_cleanup`, `project_retire_view`, `project_retire` | `migration_finish_view`, `migration_finish_report`, `migration_cleanup_healthy`, `migration_retire_view`, `migration_retire_sources` (built 2026-10-21: `DELETE /api/devices/{id}?removeAgents=false` for cleaned-up devices past their review period, only while the project's retire option is on; `project_retire` also takes `beforeReviewEnds`, which adds the cleaned-up devices still in their review period, behind a warning and a tick in the page) |
 
 Every command that writes takes `dry_run`, takes the project's lease first, and returns the refreshed summary. Errors are the core's one-sentence messages; the page shows them in place with `ErrorNote`.
 

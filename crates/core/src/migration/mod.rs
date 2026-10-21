@@ -2,6 +2,7 @@
 //! (or reinstalling on the same one). The design is in docs/migration/. Everything
 //! here is logic that doesn't touch the network, so it can be tested in place.
 
+pub mod deviceufa;
 pub mod ecoverse;
 pub mod endpoint_result;
 pub mod actions;

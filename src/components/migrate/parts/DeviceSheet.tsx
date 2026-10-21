@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { DeviceAction, DeviceCommand, DeviceDetail } from "../../../lib/migrate/bindings";
 import { ACTION_WORDS, ago } from "../../../lib/migrate/track";
 import { useDevice, useDeviceActions } from "../../../lib/migrate/queries";
-import { describeStage, ecoWords, eventWords, stageView } from "../../../lib/migrate/words";
+import { describeStage, ecoWords, eventWords, stageView, ufaStepTitle, ufaWords } from "../../../lib/migrate/words";
 import { Button, ErrorNote, Modal, Sheet, Status } from "../../ui";
 import { useNow } from "../../../lib/format";
 
@@ -85,6 +85,32 @@ export function DeviceSheet({ projectId, index, onClose }: { projectId: string; 
               <Status tone={ecoWords(d.ecoverse).tone} label={ecoWords(d.ecoverse).short} />
               <p className="text-xs text-muted">{ecoWords(d.ecoverse).long}</p>
               {d.ecoverseNote && <p className="text-xs break-words text-warn">{d.ecoverseNote}</p>}
+            </div>
+          )}
+
+          {d.deviceUfa && (
+            <div className="space-y-1 rounded-lg border border-border p-3">
+              <p className="text-xs font-semibold">Ecoverse agent on the device</p>
+              <Status tone={ufaWords(d.deviceUfa).tone} label={ufaWords(d.deviceUfa).short} />
+              <p className="text-xs text-muted">{ufaWords(d.deviceUfa).long}</p>
+              <p className="text-xs text-faint">
+                As of the last Probe, {ago(d.deviceUfa.probedAt, now)} ago. Probe again to refresh.
+                {d.deviceUfa.restarts > 0 && ` Restarted ${d.deviceUfa.restarts} time${d.deviceUfa.restarts === 1 ? "" : "s"}.`}
+              </p>
+              {d.deviceUfa.warning && <p className="text-xs break-words text-warn">{d.deviceUfa.warning}</p>}
+              {d.deviceUfa.steps.length > 0 && (
+                <ol className="mt-2 space-y-1.5 border-t border-border pt-2">
+                  {d.deviceUfa.steps.map((s, i) => (
+                    <li key={`${s.at}-${i}`} className="grid grid-cols-[7.5rem_1fr] gap-3 text-xs">
+                      <span className="text-faint tabular-nums">{new Date(s.at).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
+                      <span className="min-w-0">
+                        <span className="font-medium">{ufaStepTitle(s.event)}</span>
+                        {s.detail && <span className="mt-0.5 block break-words text-muted">{s.detail}</span>}
+                      </span>
+                    </li>
+                  ))}
+                </ol>
+              )}
             </div>
           )}
 

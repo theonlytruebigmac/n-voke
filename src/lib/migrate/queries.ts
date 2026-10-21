@@ -20,6 +20,7 @@ import {
   retireSources,
   createWave,
   deviceCommand,
+  probeWaiting,
   getDevice,
   getFinish,
   getLaunch,
@@ -276,6 +277,10 @@ export function useDeviceActions(id: string) {
       mutationFn: () => pollNow(id),
       onSettled: () => Promise.all([refresh(), qc.invalidateQueries({ queryKey: ["migrate", "device", id] })]),
     }),
+    probeWaiting: useMutation({
+      mutationFn: () => probeWaiting(id),
+      onSettled: () => Promise.all([refresh(), qc.invalidateQueries({ queryKey: ["migrate", "device", id] })]),
+    }),
   };
 }
 
@@ -309,7 +314,7 @@ export function useRetireActions(id: string) {
   const qc = useQueryClient();
   const refresh = useRefreshProject(id);
   return useMutation({
-    mutationFn: (dryRun: boolean) => retireSources(id, dryRun),
+    mutationFn: ({ dryRun, beforeReviewEnds }: { dryRun: boolean; beforeReviewEnds: boolean }) => retireSources(id, dryRun, beforeReviewEnds),
     onSettled: () => Promise.all([refresh(), qc.invalidateQueries({ queryKey: ["migrate", "retire", id] })]),
   });
 }

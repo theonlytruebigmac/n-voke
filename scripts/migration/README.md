@@ -38,6 +38,7 @@ Setup:
 | `mig.mjs publish\|launch\|action\|result\|watch` | Publish the built endpoint script to both tenants, launch a migration, run `Status`/`Cleanup`, and watch every stage |
 | `watch-name.mjs <device>` | Log a device's presence and state in both N-centrals and both Ecoverse tenants, by name |
 | `run-ps1.mjs <src\|dst> <assetId> probes/<file>.ps1` | Run a read-only diagnostic (`nc-inventory.ps1`, `ufa-diag.ps1`) and print its report |
+| `probes/ufa-log-summary.ps1` | Run **on the device** (`powershell -NoProfile -ExecutionPolicy Bypass -File ufa-log-summary.ps1`, or `-LogPath` for a copied log): summarises the Ecoverse agent's core log: provisioning, login-token results (accepted, 400 SSL error, timeouts, connection resets), the last login attempts, the hourly update checks, components and service restarts, and a `STATE:`. Read-only, prints no secrets. Its `STATE:` comes from a verbatim copy of the installer's `Get-UfaSyncState` (between `BEGIN shared` and `END shared` markers; a Pester test fails if the copies differ), so it shows the state the installer's watcher acts on, with what the installer does about it. The probe adds the counts, the last login attempts and the timeline. Use it to see what the agent's log says; the device sheet (after a Probe) shows what the installer actually did. [Troubleshooting](../../docs/migration/12-troubleshooting.md) says when to use it |
 
 Everything the harness writes (state, logs, task dumps) is git-ignored. Test scripts it publishes are named `N-voke Phase0 …` or `N-voke lab: …` and are safe to delete.
 

@@ -95,6 +95,8 @@ To start from a clean first launch, delete that directory and remove both keycha
 
 Frontend tests run under Vitest and live beside the code they cover. Rust tests are in `#[cfg(test)]` modules in the same file as the code. CI runs both on every pull request and every push to `main`, along with the type-check build and the version-sync check.
 
+Component tests (`*.test.tsx`, for example `RetireCard.test.tsx`) render the component with Testing Library under jsdom. Start the file with `// @vitest-environment jsdom` (the other tests stay in the default environment), mock `lib/migrate/queries` with `vi.mock` so nothing calls Tauri, and wrap the render in Radix's `TooltipProvider`, which the app provides at its root and the dialogs' close buttons need.
+
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs on pull requests and pushes to `main`: version sync check, `npm run build`, `npm test` and `cargo test`. A change should be green there before it is merged.

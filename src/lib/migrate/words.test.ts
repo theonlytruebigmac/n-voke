@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ECO_WORDS, STAGE_WORDS, describeStage, ecoWords, eventWords, movedBanner, stageView } from "./words";
+import { ECO_WORDS, STAGE_WORDS, UFA_WORDS, describeStage, ecoWords, eventWords, movedBanner, stageView, ufaStepTitle, ufaWords } from "./words";
 
 describe("STAGE_WORDS", () => {
   const entries = Object.entries(STAGE_WORDS);
@@ -76,5 +76,41 @@ describe("a healthy device and Ecoverse", () => {
     expect(unchecked.rest).toContain("not checked");
     expect(ECO_WORDS.notLinked.short).toBe("Ecoverse not checked");
     expect(ECO_WORDS.notLinked.long).toContain("not looked at");
+  });
+});
+
+describe("the Ecoverse agent on the device", () => {
+  const ufa = (state: Parameters<typeof ufaWords>[0]["state"], extra: { repairedAt?: string | null; redeployFiles?: number | null } = {}) => ({ state, repairedAt: null, redeployFiles: null, ...extra });
+
+  it("has words for every state the installer can report", () => {
+    for (const [state, words] of Object.entries(UFA_WORDS)) {
+      expect(words.short, state).not.toBe("");
+      expect(words.long, state).not.toBe("");
+    }
+  });
+
+  it("says a blocked agent is watched first and what the installer does, and a rejected one that a restart doesn't help", () => {
+    expect(ufaWords(ufa("blocked")).long).toContain("often clears by itself");
+    expect(ufaWords(ufa("blocked")).long).toContain("port 443");
+    expect(ufaWords(ufa("rejected")).long).toContain("restart doesn't help");
+    expect(ufaWords(ufa("denied")).tone).toBe("err");
+    expect(ufaWords(ufa("synced")).tone).toBe("ok");
+  });
+
+  it("reads a missing agent after the repair as being put back, with what its folder shows", () => {
+    expect(ufaWords(ufa("notInstalled")).short).toBe("Not installed yet");
+    const repaired = { repairedAt: "2026-10-21T16:10:00Z" };
+    expect(ufaWords(ufa("notInstalled", repaired)).short).toBe("Being redeployed");
+    expect(ufaWords(ufa("notInstalled", { ...repaired, redeployFiles: 4 })).long).toContain("4 files written");
+    expect(ufaWords(ufa("notInstalled", { ...repaired, redeployFiles: 1 })).long).toContain("1 file written");
+    expect(ufaWords(ufa("notProvisioned", { ...repaired, redeployFiles: 0 })).long).toContain("Nothing new in its folder");
+    expect(ufaWords(ufa("blocked", repaired)).short).toBe(UFA_WORDS.blocked.short);
+  });
+
+  it("names the installer's steps, and shows an unknown one as it is", () => {
+    expect(ufaStepTitle("ufa-sync-restart")).toBe("Restarted the Ecoverse agent");
+    expect(ufaStepTitle("ufa-repair")).toContain("Repaired");
+    expect(ufaStepTitle("ufa-repair-restart")).toContain("again");
+    expect(ufaStepTitle("something-new")).toBe("something-new");
   });
 });

@@ -341,7 +341,7 @@ Describe 'Hide-RegistrationToken' {
 
 Describe 'Get-UfaSyncState' {
     BeforeAll {
-        . ([scriptblock]::Create((Get-FunctionText (Join-Path $here 'installAgent.ps1') @('Get-UfaSyncState', 'Test-UfaRepairDue', 'Test-UfaRedeployRestartDue'))))
+        . ([scriptblock]::Create((Get-FunctionText (Join-Path $here 'installAgent.ps1') @('Get-UfaSyncState', 'Test-UfaRepairDue', 'Test-UfaBlockedRestartDue', 'Test-UfaRedeployRestartDue', 'Get-UfaFolderActivity'))))
         $auth = 'https://auth.example.invalid/oauth2/token'
         $timeout = "context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
         $lines = @{
@@ -424,9 +424,10 @@ Describe 'Get-UfaSyncState' {
         Test-UfaRepairDue $sync ([datetime]'2026-10-20T15:00:00Z') $false 30 45 | Should -BeFalse
         Test-UfaRepairDue $sync ([datetime]'2026-10-20T14:50:00Z') $false 30 45 | Should -BeTrue
     }
-    It 'reports when the last refusal was logged, only for a refused login or refused downloads' {
+    It 'reports when the last fault was logged, only while a fault is the state' {
         (Get-State @($lines.Ssl400, $lines.Fail400, $lines.Fail)).FaultLastAt.ToString('HH:mm:ss') | Should -Be '14:21:42'
-        (Get-State @($lines.Fail)).FaultLastAt | Should -BeNullOrEmpty
+        (Get-State @($lines.Fail, $lines.AuthOk, $lines.Synced)).FaultLastAt | Should -BeNullOrEmpty
+        (Get-State @($lines.Noise)).FaultLastAt | Should -BeNullOrEmpty
     }
     It 'reports when a blocked state began, and forgets it once a login is accepted' {
         $r = Get-State @($lines.JwtFail, $lines.Fail, $lines.Noise)
@@ -434,10 +435,46 @@ Describe 'Get-UfaSyncState' {
         $r.FaultSince.ToString('HH:mm:ss') | Should -Be '14:27:59'
         (Get-State @($lines.Fail, $lines.AuthOk, $lines.Synced)).FaultSince | Should -BeNullOrEmpty
     }
+    It 'treats a failed login, not only a failed configuration fetch, as the latest sign of a blocked state' {
+        $later = "[2026-10-20T10:57:59.400-04:00] ERROR (55): auth::fetchJWTWithRetries error occurred when fetching jwt: Post `"$auth`": $timeout"
+        $r = Get-State @($lines.Fail, $later)
+        $r.State | Should -Be 'blocked'
+        $r.FailedAt.ToString('HH:mm:ss') | Should -Be '14:27:59'
+        $r.FaultLastAt.ToString('HH:mm:ss') | Should -Be '14:57:59'
+    }
+    It 'restarts MspAgent once for a blocked state that has lasted, only while the failures are current' {
+        $sync = [pscustomobject]@{ State = 'blocked'; FaultSince = [datetime]'2026-10-20T14:00:00Z'; FaultLastAt = [datetime]'2026-10-20T14:40:00Z' }
+        Test-UfaBlockedRestartDue $sync 0 ([datetime]'2026-10-20T14:25:00Z') 30 | Should -BeFalse
+        Test-UfaBlockedRestartDue $sync 0 ([datetime]'2026-10-20T14:31:00Z') 30 | Should -BeTrue
+        Test-UfaBlockedRestartDue $sync 1 ([datetime]'2026-10-20T14:45:00Z') 30 | Should -BeFalse
+        Test-UfaBlockedRestartDue $sync 0 ([datetime]'2026-10-20T15:30:00Z') 30 | Should -BeFalse
+        Test-UfaBlockedRestartDue ([pscustomobject]@{ State = 'stalled'; FaultSince = $sync.FaultSince; FaultLastAt = $sync.FaultLastAt }) 0 ([datetime]'2026-10-20T14:45:00Z') 30 | Should -BeFalse
+    }
+    It 'repairs a long blocked state only after the restart had time to work and a failure was logged after it' {
+        $sync = [pscustomobject]@{ State = 'blocked'; FaultSince = [datetime]'2026-10-20T14:00:00Z'; FaultLastAt = [datetime]'2026-10-20T15:05:00Z' }
+        $restart = [datetime]'2026-10-20T14:30:00Z'
+        # 60 minutes blocked, one restart 35 minutes ago, a failure since: repair
+        Test-UfaRepairDue $sync ([datetime]'2026-10-20T15:05:00Z') $false 30 45 60 1 $restart 20 | Should -BeTrue
+        # blocked for less than 60 minutes
+        Test-UfaRepairDue $sync ([datetime]'2026-10-20T14:55:00Z') $false 30 45 60 1 $restart 20 | Should -BeFalse
+        # no restart tried
+        Test-UfaRepairDue $sync ([datetime]'2026-10-20T15:05:00Z') $false 30 45 60 0 ([datetime]::MinValue) 20 | Should -BeFalse
+        # the restart is too recent to judge
+        Test-UfaRepairDue $sync ([datetime]'2026-10-20T15:05:00Z') $false 30 45 60 1 ([datetime]'2026-10-20T14:55:00Z') 20 | Should -BeFalse
+        # no failure logged after the restart
+        $before = [pscustomobject]@{ State = 'blocked'; FaultSince = [datetime]'2026-10-20T14:00:00Z'; FaultLastAt = [datetime]'2026-10-20T14:25:00Z' }
+        Test-UfaRepairDue $before ([datetime]'2026-10-20T15:00:00Z') $false 30 45 60 1 $restart 20 | Should -BeFalse
+        # failures are old
+        Test-UfaRepairDue $sync ([datetime]'2026-10-20T16:00:00Z') $false 30 45 60 1 $restart 20 | Should -BeFalse
+        # already repaired
+        Test-UfaRepairDue $sync ([datetime]'2026-10-20T15:05:00Z') $true 30 45 60 1 $restart 20 | Should -BeFalse
+        # without the blocked settings (the default) a blocked state is never repaired
+        Test-UfaRepairDue $sync ([datetime]'2026-10-20T15:05:00Z') $false 30 | Should -BeFalse
+    }
     It 'never asks for the repair for any other state' {
-        foreach ($state in 'stalled', 'blocked', 'waiting', 'synced', 'unknown') {
+        foreach ($state in 'stalled', 'waiting', 'synced', 'unknown') {
             $sync = [pscustomobject]@{ State = $state; RejectedSince = [datetime]'2026-10-20T10:00:00Z'; FaultSince = [datetime]'2026-10-20T10:00:00Z'; FaultLastAt = [datetime]'2026-10-20T15:59:00Z' }
-            Test-UfaRepairDue $sync ([datetime]'2026-10-20T16:00:00Z') $false 30 | Should -BeFalse
+            Test-UfaRepairDue $sync ([datetime]'2026-10-20T16:00:00Z') $false 30 45 60 1 ([datetime]'2026-10-20T14:00:00Z') 20 | Should -BeFalse
         }
     }
     It 'restarts the agent services again when the UFA is still missing some minutes after the last restart, a limited number of times' {
@@ -446,6 +483,31 @@ Describe 'Get-UfaSyncState' {
         Test-UfaRedeployRestartDue $false ([datetime]'2026-10-20T20:28:00Z') 0 $now 10 2 | Should -BeTrue
         Test-UfaRedeployRestartDue $false ([datetime]'2026-10-20T20:00:00Z') 2 $now 10 2 | Should -BeFalse
         Test-UfaRedeployRestartDue $true ([datetime]'2026-10-20T20:00:00Z') 0 $now 10 2 | Should -BeFalse
+    }
+    It 'does not restart again while the Msp Agent folder is still getting new data, but does once it has gone quiet' {
+        $now = [datetime]'2026-10-20T20:40:00Z'
+        $last = [datetime]'2026-10-20T20:20:00Z'
+        Test-UfaRedeployRestartDue $false $last 0 $now 10 2 ([datetime]'2026-10-20T20:35:00Z') | Should -BeFalse
+        Test-UfaRedeployRestartDue $false $last 0 $now 10 2 ([datetime]'2026-10-20T20:25:00Z') | Should -BeTrue
+        Test-UfaRedeployRestartDue $false $last 0 $now 10 2 $null | Should -BeTrue
+    }
+    It 'reports what was written to the Msp Agent folder since a time, ignoring the old leftover executable' {
+        $dir = Join-Path ([IO.Path]::GetTempPath()) ('nvoke-msp-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path (Join-Path $dir 'downloads') -Force | Out-Null
+        $utc = { param([string]$s) [datetime]::Parse($s, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal) }
+        try {
+            $exe = Join-Path $dir 'msp-agent-core.exe'; $new1 = Join-Path $dir 'config.json'; $new2 = Join-Path $dir 'downloads\component.exe'
+            foreach ($f in $exe, $new1, $new2) { [IO.File]::WriteAllText($f, 'x') }
+            (Get-Item $exe).LastWriteTimeUtc = & $utc '2026-10-21T14:46:00Z'
+            (Get-Item $new1).LastWriteTimeUtc = & $utc '2026-10-21T18:10:00Z'
+            (Get-Item $new2).LastWriteTimeUtc = & $utc '2026-10-21T18:12:00Z'
+            $a = Get-UfaFolderActivity $dir (& $utc '2026-10-21T18:00:00Z')
+            $a.Files | Should -Be 2
+            $a.NewestAt.ToString('HH:mm') | Should -Be '18:12'
+            (Get-UfaFolderActivity $dir (& $utc '2026-10-21T19:00:00Z')).Files | Should -Be 0
+            (Get-UfaFolderActivity $dir (& $utc '2026-10-21T19:00:00Z')).NewestAt | Should -BeNullOrEmpty
+        } finally { Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue }
+        (Get-UfaFolderActivity (Join-Path ([IO.Path]::GetTempPath()) 'nvoke-no-such-folder') ([datetime]::MinValue)).Files | Should -Be 0
     }
     It 'says unknown when there is no log' {
         (Get-UfaSyncState (Join-Path ([IO.Path]::GetTempPath()) 'nvoke-no-such-core.log') ([datetime]::MinValue)).State | Should -Be 'unknown'
@@ -475,8 +537,72 @@ Describe 'the installer' {
         $core | Should -Match 'Invoke-WithTimeout \$core ''--uninstall'''
     }
 
+    It 'runs the repair in order: uninstall, wait 120 seconds, restart Windows Agent Maintenance Service, 5 seconds, then Windows Agent Service' {
+        $text = Get-Content -Raw (Join-Path $here 'installAgent.ps1')
+        $repair = [regex]::Match($text, '(?s)function Invoke-UfaRepair\(.*?\r?\n\}').Value
+        $repair | Should -Match '\[int\]\$SettleSeconds = 120'
+        $repair | Should -Match '(?s)Invoke-UfaCoreUninstall.*Start-Sleep -Seconds \$SettleSeconds.*Restart-WindowsAgentService'
+        $restart = [regex]::Match($text, '(?s)function Restart-WindowsAgentService \{.*?\r?\n\}').Value
+        $restart | Should -Match "(?s)'Windows Agent Maintenance Service', 'Windows Agent Service'"
+        $restart | Should -Match 'Start-Sleep -Seconds 5'
+        . ([scriptblock]::Create((Get-FunctionText (Join-Path $here 'installAgent.ps1') @('Invoke-UfaRepair'))))
+        $script:calls = @()
+        function Invoke-UfaCoreUninstall { $script:calls += 'uninstall'; 'exit code 0' }
+        function Restart-WindowsAgentService { $script:calls += 'restart services' }
+        $script:UfaRepairRestartedAt = $null
+        (Invoke-UfaRepair -SettleSeconds 0) | Should -Match 'uninstall: exit code 0'
+        $script:calls | Should -Be 'uninstall', 'restart services'
+        $script:UfaRepairRestartedAt | Should -Not -BeNullOrEmpty
+    }
+
+    It 'never deletes the leftover Msp Agent folder or msp-agent-core.exe in the repair, because the Windows Agent needs them to redeploy the UFA' {
+        $text = Get-Content -Raw (Join-Path $here 'installAgent.ps1')
+        $repair = [regex]::Match($text, '(?s)function Invoke-UfaRepair\(.*?\r?\n\}').Value
+        $repair | Should -Not -Match 'Remove-Item|Remove-TreeSafely|Invoke-FullCleanup|Test-Path'
+    }
+
     It 'is ASCII' {
         $bytes = [IO.File]::ReadAllBytes((Join-Path $here 'installAgent.ps1'))
         ($bytes | Where-Object { $_ -gt 126 -or ($_ -lt 32 -and $_ -notin 9, 10, 13) }).Count | Should -Be 0
+    }
+}
+
+Describe 'the lab log summary probe (ufa-log-summary.ps1)' {
+    BeforeAll {
+        $probe = [IO.Path]::GetFullPath((Join-Path $here '../lab/probes/ufa-log-summary.ps1'))
+        $timeout = 'context deadline exceeded (Client.Timeout exceeded while awaiting headers)'
+        $blockedLog = @(
+            '[2026-10-21T10:50:35.000-04:00] ERROR (19): configservice::FetchAllConfigurations failed to fetch configuration data: Post "https://auth.example.invalid/oauth2/token": ' + $timeout
+            '[2026-10-21T11:00:10.000-04:00] ERROR (184): auth::requestOauthToken unable to get jwt: Post "https://auth.example.invalid/oauth2/token": ' + $timeout
+            '[2026-10-21T11:00:10.001-04:00] ERROR (184): auth::fetchJWTWithRetries error occurred when fetching jwt: Post "https://auth.example.invalid/oauth2/token": ' + $timeout
+        )
+        function Invoke-Probe([string[]]$Lines) {
+            $log = Join-Path ([IO.Path]::GetTempPath()) ('nvoke-probe-' + [guid]::NewGuid().ToString('N') + '.log')
+            try {
+                Set-Content -Path $log -Value $Lines -Encoding UTF8
+                (& $hostPath -NoProfile -ExecutionPolicy Bypass -File $probe -LogPath $log 2>&1 | Out-String)
+            } finally { Remove-Item $log -Force -ErrorAction SilentlyContinue }
+        }
+    }
+
+    It 'uses the installer''s own Get-UfaSyncState, character for character, so the two cannot disagree about a state' {
+        $installer = Get-FunctionText (Join-Path $here 'installAgent.ps1') @('Get-UfaSyncState')
+        $copy = Get-FunctionText $probe @('Get-UfaSyncState')
+        ($copy -replace "`r`n", "`n") | Should -Be ($installer -replace "`r`n", "`n")
+    }
+
+    It 'parses, and says blocked for a log the installer calls blocked, with when it began' {
+        $errors = $null
+        [System.Management.Automation.Language.Parser]::ParseFile($probe, [ref]$null, [ref]$errors) | Out-Null
+        @($errors).Count | Should -Be 0
+        $text = Invoke-Probe $blockedLog
+        $text | Should -Match 'STATE: blocked \('
+        $text | Should -Match 'failing since \d\d:\d\d:\d\d, last failure \d\d:\d\d:\d\d'
+        $text | Should -Match 'timeouts: 1'
+    }
+
+    It 'says synced once the inventory component arrived after the failure' {
+        $synced = "[2026-10-21T12:00:00.000-04:00] INFO (21): components::Download Successfully downloaded 'cdn.example.invalid/components/generic-asset-interrogator/windows/v0.18.2/x.exe' to 'C:\x'"
+        (Invoke-Probe ($blockedLog + $synced)) | Should -Match 'STATE: synced \('
     }
 }

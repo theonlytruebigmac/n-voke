@@ -1,13 +1,13 @@
-import { RefreshCw } from "lucide-react";
+import { RefreshCw, Stethoscope } from "lucide-react";
 import { useMemo, useState } from "react";
-import type { GroupCount, NeedKind, TrackGroup } from "../../../lib/migrate/bindings";
+import type { GroupCount, NeedKind, ProbeReport, TrackGroup } from "../../../lib/migrate/bindings";
 import { useNow } from "../../../lib/format";
 import { useDeviceActions, useProject, useTrack, useTracker } from "../../../lib/migrate/queries";
 import { readyToFinish } from "../../../lib/migrate/progress";
 import { GROUP_LABELS, ago } from "../../../lib/migrate/track";
 import { useDebounced } from "../../../lib/useDebounced";
-import { describeStage, ecoWords, movedBanner, STAGE_WORDS, stageView } from "../../../lib/migrate/words";
-import { Button, ErrorNote, Status, Table, inputClass, selectClass } from "../../ui";
+import { describeStage, ecoWords, movedBanner, STAGE_WORDS, stageView, UFA_WORDS } from "../../../lib/migrate/words";
+import { Button, ErrorNote, Modal, Status, Table, inputClass, selectClass } from "../../ui";
 import { DeviceSheet } from "../parts/DeviceSheet";
 
 const PAGE = 100;
@@ -86,7 +86,8 @@ function NeedsYou({ kinds, total, now, onOpen, onShowAll }: { kinds: NeedKind[];
 export function TrackStep({ projectId, onContinue, onPrepare }: { projectId: string; onContinue: () => void; onPrepare: () => void }) {
   const project = useProject(projectId);
   const tracker = useTracker(projectId, true);
-  const { poll } = useDeviceActions(projectId);
+  const { poll, probeWaiting } = useDeviceActions(projectId);
+  const [probed, setProbed] = useState<ProbeReport | null>(null);
   const now = useNow();
   const [group, setGroup] = useState<TrackGroup | null>(null);
   const [wave, setWave] = useState<number | null>(null);
@@ -104,6 +105,7 @@ export function TrackStep({ projectId, onContinue, onPrepare }: { projectId: str
 
   const view = track.data;
   const rows = view?.rows ?? [];
+  const waitingCount = view?.counts.find((c) => c.group === "waiting")?.count ?? 0;
 
   const readOnly = tracker.error?.includes("Another N-voke window") ?? false;
   const status = readOnly ? (
@@ -122,12 +124,54 @@ export function TrackStep({ projectId, onContinue, onPrepare }: { projectId: str
         <h2 className="text-sm font-semibold">Track</h2>
         <div className="flex items-center gap-3">
           {status}
-          <Button size="sm" busy={poll.isPending} disabled={readOnly} onClick={() => poll.mutate()}>
+          {waitingCount > 0 && (
+            <Button size="sm" busy={probeWaiting.isPending} disabled={readOnly || poll.isPending} onClick={() => probeWaiting.mutate(undefined, { onSuccess: setProbed })}>
+              <Stethoscope />
+              Probe waiting ({waitingCount})
+            </Button>
+          )}
+          <Button size="sm" busy={poll.isPending} disabled={readOnly || probeWaiting.isPending} onClick={() => poll.mutate()}>
             <RefreshCw />
             Poll now
           </Button>
         </div>
       </div>
+
+      {probeWaiting.isError && <ErrorNote>{String(probeWaiting.error)}</ErrorNote>}
+      {probed && (
+        <Modal title="Probe finished" onClose={() => setProbed(null)} footer={<Button onClick={() => setProbed(null)}>Done</Button>}>
+          <div className="space-y-3 text-sm">
+            <p>
+              {probed.probed} {probed.probed === 1 ? "device answered" : "devices answered"}.
+            </p>
+            {probed.states.length > 0 && (
+              <ul className="space-y-1">
+                {probed.states.map((s) => (
+                  <li key={s.state} className="flex items-center justify-between gap-3">
+                    <Status tone={UFA_WORDS[s.state].tone} label={UFA_WORDS[s.state].short} />
+                    <span className="tabular-nums text-muted">{s.count}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {probed.noRecord > 0 && <p className="text-muted">{probed.noRecord} answered with no record of the Ecoverse agent.</p>}
+            {probed.failed.length > 0 && (
+              <>
+                <p className="text-err">{probed.failed.length} couldn't be reached</p>
+                <ul className="max-h-40 space-y-1 overflow-y-auto pl-4 text-muted">
+                  {probed.failed.map((f) => (
+                    <li key={f.name} className="list-disc break-words">
+                      {f.name}: {f.why}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+            {probed.notReached > 0 && <p className="text-warn">{probed.notReached} more are still waiting and weren't probed this time (the longest-waiting go first). Probe again for the rest.</p>}
+            <p className="text-xs text-faint">Open a device to see what its Ecoverse agent reported and what the installer did.</p>
+          </div>
+        </Modal>
+      )}
 
       {poll.isError && <ErrorNote>{String(poll.error)}</ErrorNote>}
       {tracker.last && tracker.last.errors.length > 0 && (

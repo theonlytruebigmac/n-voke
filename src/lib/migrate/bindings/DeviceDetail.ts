@@ -3,6 +3,7 @@ import type { DeliveryPath } from "./DeliveryPath";
 import type { DeviceAction } from "./DeviceAction";
 import type { DeviceCandidate } from "./DeviceCandidate";
 import type { DeviceEvent } from "./DeviceEvent";
+import type { DeviceUfa } from "./DeviceUfa";
 import type { EcoState } from "./EcoState";
 import type { Stage } from "./Stage";
 
@@ -14,7 +15,12 @@ launchUnsure: boolean, ecoverse: EcoState | null,
 /**
  * Why Ecoverse doesn't show it, when it doesn't: where it was looked and what was found there.
  */
-ecoverseNote: string | null, waitingForEcoverse: boolean, candidates: Array<DeviceCandidate>, actions: Array<DeviceAction>, 
+ecoverseNote: string | null, waitingForEcoverse: boolean, 
+/**
+ * What the device's own record says about its Ecoverse agent, from the last Probe. Only for a project whose
+ * destination is linked to Ecoverse; none when the device hasn't been probed.
+ */
+deviceUfa: DeviceUfa | null, candidates: Array<DeviceCandidate>, actions: Array<DeviceAction>, 
 /**
  * Oldest first.
  */
