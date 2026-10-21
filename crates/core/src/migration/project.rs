@@ -160,6 +160,9 @@ pub struct ProjectDevice {
     pub customer_name: Option<String>,
     #[serde(default)]
     pub dest_name: Option<String>,
+    /// Why Ecoverse doesn't show the device, when it doesn't: which tenant was looked in and what was found there.
+    #[serde(default)]
+    pub ecoverse_note: Option<String>,
     /// When `ecoverse` was last read, so a device Ecoverse is already receiving data from isn't looked at every pass.
     #[serde(default)]
     pub ecoverse_read_at: Option<String>,
@@ -191,6 +194,7 @@ impl ProjectDevice {
             ecoverse: None,
             customer_name: None,
             dest_name: None,
+            ecoverse_note: None,
             ecoverse_read_at: None,
             entered_stage_at: at.clone(),
             events: vec![Event { at, kind: "stage".into(), detail: format!("{stage:?}") }],

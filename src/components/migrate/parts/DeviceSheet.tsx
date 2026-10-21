@@ -32,10 +32,13 @@ export function DeviceSheet({ projectId, index, onClose }: { projectId: string; 
   const [confirming, setConfirming] = useState<{ action: DeviceAction; command: DeviceCommand } | null>(null);
   const [checked, setChecked] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  // The button that started the running command, so only that one shows it working.
+  const [active, setActive] = useState<DeviceAction | null>(null);
   const d = detail.data;
 
-  const run = (cmd: DeviceCommand) => {
+  const run = (cmd: DeviceCommand, action: DeviceAction | null = confirming?.action ?? null) => {
     setMessage(null);
+    setActive(action);
     command.mutate({ index, command: cmd }, { onSuccess: setMessage, onSettled: () => setConfirming(null) });
   };
 
@@ -53,7 +56,7 @@ export function DeviceSheet({ projectId, index, onClose }: { projectId: string; 
                 ? { kind: "resolve" }
                 : null;
     if (!cmd) return;
-    if (ACTION_WORDS[action].confirm === null && !d.launchUnsure) return run(cmd);
+    if (ACTION_WORDS[action].confirm === null && !d.launchUnsure) return run(cmd, action);
     setChecked(false);
     setConfirming({ action, command: cmd });
   };
@@ -81,6 +84,7 @@ export function DeviceSheet({ projectId, index, onClose }: { projectId: string; 
             <div className={`space-y-1 rounded-lg border p-3 ${d.waitingForEcoverse ? "border-warn/40" : "border-border"}`}>
               <Status tone={ecoWords(d.ecoverse).tone} label={ecoWords(d.ecoverse).short} />
               <p className="text-xs text-muted">{ecoWords(d.ecoverse).long}</p>
+              {d.ecoverseNote && <p className="text-xs break-words text-warn">{d.ecoverseNote}</p>}
             </div>
           )}
 
@@ -105,7 +109,7 @@ export function DeviceSheet({ projectId, index, onClose }: { projectId: string; 
                   <span>
                     {c.name} <span className="text-xs text-faint">{c.deviceId}</span>
                   </span>
-                  <Button size="sm" busy={command.isPending} onClick={() => run({ kind: "chooseMatch", destDeviceId: c.deviceId })}>
+                  <Button size="sm" busy={command.isPending && active === "chooseMatch"} onClick={() => run({ kind: "chooseMatch", destDeviceId: c.deviceId }, "chooseMatch")}>
                     This one
                   </Button>
                 </div>
@@ -118,7 +122,7 @@ export function DeviceSheet({ projectId, index, onClose }: { projectId: string; 
               {d.actions
                 .filter((a) => a !== "chooseMatch")
                 .map((a) => (
-                  <Button key={a} size="sm" variant={a === "markResolved" ? "ghost" : undefined} busy={command.isPending && confirming === null} onClick={() => ask(a, d)}>
+                  <Button key={a} size="sm" variant={a === "markResolved" ? "ghost" : undefined} busy={command.isPending && confirming === null && active === a} disabled={command.isPending && active !== a} onClick={() => ask(a, d)}>
                     {ACTION_WORDS[a].label}
                   </Button>
                 ))}

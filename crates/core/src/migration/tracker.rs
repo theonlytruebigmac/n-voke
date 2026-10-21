@@ -85,6 +85,8 @@ pub struct Observation {
     pub dest_ecoverse_connected: Option<bool>,
     /// What the destination's Ecoverse shows for it, when that was read.
     pub dest_ecoverse: Option<EcoState>,
+    /// When it isn't shown there: where Ecoverse was looked and what was found, so the person can tell a wrong tenant from a slow agent.
+    pub dest_ecoverse_note: Option<String>,
     /// `Cleanup` ran and returned `Cleaned = true`.
     pub cleaned: bool,
     /// The old source record was deleted (or tagged) as the last step.

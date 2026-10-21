@@ -10,7 +10,11 @@ export type DeviceDetail = { index: number, name: string, stage: Stage, since: s
 /**
  * A launch was sent and its answer lost: it may be running.
  */
-launchUnsure: boolean, ecoverse: EcoState | null, waitingForEcoverse: boolean, candidates: Array<DeviceCandidate>, actions: Array<DeviceAction>, 
+launchUnsure: boolean, ecoverse: EcoState | null, 
+/**
+ * Why Ecoverse doesn't show it, when it doesn't: where it was looked and what was found there.
+ */
+ecoverseNote: string | null, waitingForEcoverse: boolean, candidates: Array<DeviceCandidate>, actions: Array<DeviceAction>, 
 /**
  * Oldest first.
  */

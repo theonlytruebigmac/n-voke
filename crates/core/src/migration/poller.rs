@@ -73,7 +73,8 @@ struct Found {
 #[derive(Default)]
 struct Shared {
     eco_source: Option<Result<HashMap<String, EcoDevice>, String>>,
-    eco_dest: Option<Result<HashMap<String, EcoSeen>, String>>,
+    /// The destination's assets by N-central device ID, with a sentence on where they were read from.
+    eco_dest: Option<Result<(HashMap<String, EcoSeen>, String), String>>,
     dest_units: HashMap<String, Result<Vec<Device>, String>>,
     /// Destination devices a source device has been matched to in this pass, so two can't claim the same one.
     claimed: HashSet<String>,
@@ -115,6 +116,7 @@ impl Core {
             }
             if let Some(state) = observation.dest_ecoverse {
                 device.ecoverse = Some(state);
+                device.ecoverse_note = observation.dest_ecoverse_note.clone().filter(|_| state == EcoState::NotSeen);
                 device.ecoverse_read_at = Some(super::project::stamp(now));
             }
             let from = device.stage;
@@ -242,12 +244,25 @@ impl Core {
                 let dest_id = found.dest_device_id.clone().or_else(|| device.dest_device_id.clone());
                 if project.dest_ecoverse != DestEcoverse::NotLinked {
                     if shared.eco_dest.is_none() {
-                        let fetched = self.with_ecoverse(project.dest_ecoverse_server(), self.eco_devices(&project.dest_ecoverse_org_ids)).await.map(|d| dest_asset_states(&d, &dest_host));
+                        let fetched = self.with_ecoverse(project.dest_ecoverse_server(), self.eco_devices(&project.dest_ecoverse_org_ids)).await.map(|d| {
+                            let states = dest_asset_states(&d, &dest_host);
+                            let looked = self.describe_ecoverse_read(project, d.len(), states.len(), &dest_host);
+                            (states, looked)
+                        });
                         shared.eco_dest = Some(fetched);
                     }
                     let seen = match (shared.eco_dest.as_ref(), dest_id) {
-                        (Some(Ok(map)), Some(id)) => Ok(map.get(&id).copied()),
-                        (Some(Ok(_)), None) => Ok(None),
+                        (Some(Ok((map, looked))), Some(id)) => {
+                            let found = map.get(&id).copied();
+                            if found.is_none() {
+                                obs.dest_ecoverse_note = Some(format!("{looked} This device (N-central ID {id}) is not among them."));
+                            }
+                            Ok(found)
+                        }
+                        (Some(Ok((_, looked))), None) => {
+                            obs.dest_ecoverse_note = Some(format!("{looked} The device hasn't been found on the destination N-central yet, so there is nothing to look for."));
+                            Ok(None)
+                        }
                         (Some(Err(e)), _) => {
                             report.errors.push(format!("{}: could not read the destination's Ecoverse: {e}", device.name));
                             Err(())
@@ -267,6 +282,21 @@ impl Core {
             result.push((i, obs, found));
         }
         result
+    }
+
+    /// A sentence on where the destination's Ecoverse was read and what came back, for a device that isn't shown there.
+    fn describe_ecoverse_read(&self, project: &Project, assets: usize, from_destination: usize, dest_host: &str) -> String {
+        let server = self.ncentral_server(project.dest_ecoverse_server()).ok();
+        let (label, how) = server.map_or(("a server".to_string(), ""), |s| (s.label, if s.ecoverse == crate::ncentral::EcoCredential::Own { ", its own token" } else { ", the app's key" }));
+        let mut text = format!("Looked in the Ecoverse tenant of {label}{how}: {assets} asset{}, {from_destination} of them from {dest_host}.", if assets == 1 { "" } else { "s" });
+        if from_destination == 0 {
+            text.push_str(match project.dest_ecoverse {
+                DestEcoverse::SameTenant if assets > 0 => " None belong to the destination, so it is probably in a different tenant: if so, choose \"Another tenant\" in Prepare.",
+                DestEcoverse::OtherTenant { .. } => " None belong to the destination: check that the token saved for the destination server is for the tenant its devices appear in.",
+                _ => " None belong to the destination.",
+            });
+        }
+        text
     }
 
     /// The device on the destination: the same record for a reinstall, otherwise the match among what's under its customer or site.
