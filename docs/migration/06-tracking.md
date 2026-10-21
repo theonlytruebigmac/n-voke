@@ -90,7 +90,7 @@ What this means for the tool:
 - **Launch:** don't treat a queued Ecoverse launch on a newly synced asset as *Not picked up* inside the sync window. The 30-minute threshold counts from the first time the asset reports inventory, or 60 minutes after `CONNECTED` if it never does; then offer cancel and relaunch, or the REST path.
 - **After the move:** the destination's Ecoverse asset is a late, optional signal. Health comes from destination check-ins over REST; the Ecoverse asset only upgrades the device from **Healthy** to **Healthy, Ecoverse linked**.
 - **Operator messages:** say what is being waited for and roughly how long, not just *waiting*. For example: *"Windows Agent is healthy. The Ecoverse agent is still setting up (installed 12 min ago); this commonly takes 20–60 minutes and doesn't block the move."* An engineer should never have to guess whether a device is stuck or just slow.
-- **Fresh installs:** for a project whose devices were installed in the last hour (labs, new customers), the survey warns up front that Ecoverse data may be incomplete.
+- **Fresh installs:** for a project whose devices were installed in the last hour (labs, new customers), the survey warns up front that Ecoverse data may be incomplete. **Not built:** neither the N-central device list nor the Ecoverse asset gives an install time, so the survey cannot tell. What the app does instead is show, for each healthy device, whether Ecoverse is receiving its asset data (*Waiting for Ecoverse*).
 
 ## How each stage is detected
 
