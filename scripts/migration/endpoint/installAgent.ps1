@@ -296,6 +296,9 @@ function Invoke-FullCleanup($Status) {
         $log += "folder $folder $result"
         Add-StatusHistory $Status 'cleanup-folder' "$folder $result"
     }
+    # A folder that was already gone logs nothing above, so say what the old agent's folders look like now.
+    $remaining = @($CleanupFolders | Where-Object { Test-Path $_ })
+    Add-StatusHistory $Status 'cleanup-verify' $(if ($remaining) { "still present: $($remaining -join ', ')" } else { 'none of the old agent folders are present' })
     foreach ($key in $CleanupRegistry) {
         if (Test-Path $key) {
             Remove-Item -Path $key -Recurse -Force -ErrorAction SilentlyContinue
