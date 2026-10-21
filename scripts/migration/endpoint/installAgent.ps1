@@ -27,6 +27,8 @@ $HealthGraceMinutes = 60
 $UfaSyncGraceMinutes = 120
 $UfaSyncMaxRestarts = 2
 $UfaSyncRestartGapMinutes = 15
+$UfaBlockedWatchMinutes = 360
+$UfaRepairFreshMinutes = 45
 $UfaRepairAfterMinutes = 30
 $UfaRepairWaitMinutes = 90
 $UfaRepairRestartAfterMinutes = 10
@@ -128,7 +130,8 @@ function Test-MsiBusy {
 # data. The agent retries that fetch only hourly; restarting MspAgent retries it at once. Only lines after $Since count.
 #   synced   the inventory component (generic-asset-interrogator) was downloaded
 #   stalled  a configuration fetch failed on a timeout, the cloud answers again, and nothing was delivered since: restart
-#   blocked  a fetch failed and the cloud still doesn't answer: a restart can't help
+#   blocked  a fetch failed and the cloud still doesn't answer: a restart can't help, and it often clears by itself
+#            (the lab saw it). Only watched, never acted on; if it turns into a state below, that state's rule applies
 #   rejected the cloud answers the agent's login with "400 The SSL certificate error" and never accepts it: a restart
 #            or a reboot doesn't help (seen in the lab). What did: removing the UFA and letting the Windows Agent redeploy it,
 #            which issues a new certificate (Invoke-UfaRepair, once, after a sustained refusal)
@@ -137,18 +140,18 @@ function Test-MsiBusy {
 #   waiting  no fault and no inventory component yet (normal for a while)
 #   unknown  no log to read
 function Get-UfaSyncState([string]$LogPath, [datetime]$Since) {
-    if (-not (Test-Path -LiteralPath $LogPath)) { return [pscustomobject]@{ State = 'unknown'; FailedAt = $null; RejectedSince = $null; FaultSince = $null } }
+    if (-not (Test-Path -LiteralPath $LogPath)) { return [pscustomobject]@{ State = 'unknown'; FailedAt = $null; RejectedSince = $null; FaultSince = $null; FaultLastAt = $null } }
     $stamp = [regex]'^\[(\d{4}-\d\d-\d\dT[\d:.]+[+-]\d\d:\d\d)\]'
-    $failedAt = $null; $authOkAt = $null; $syncedAt = $null; $rejectedAt = $null; $rejectedSince = $null; $deniedCount = 0; $deniedSince = $null
+    $failedAt = $null; $failingSince = $null; $authOkAt = $null; $syncedAt = $null; $rejectedAt = $null; $rejectedSince = $null; $deniedCount = 0; $deniedSince = $null; $deniedAt = $null
     foreach ($line in @(Get-Content -LiteralPath $LogPath -Tail 20000 -ErrorAction SilentlyContinue)) {
         $m = $stamp.Match($line)
         if (-not $m.Success) { continue }
         $at = [datetimeoffset]::Parse($m.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture).UtcDateTime
         if ($at -lt $Since) { continue }
-        if ($line -match 'ERROR \(\d+\): configservice::FetchAllConfigurations failed to fetch configuration data:') { $failedAt = $at }
+        if ($line -match 'ERROR \(\d+\): configservice::FetchAllConfigurations failed to fetch configuration data:') { $failedAt = $at; if (-not $failingSince) { $failingSince = $at } }
         elseif ($line -match 'auth::fetchJWTWithRetries error occurred when fetching jwt: unexpected status code: 400 .*The SSL certificate error') { $rejectedAt = $at; if (-not $rejectedSince) { $rejectedSince = $at } }
-        elseif ($line -match 'auth::requestOauthToken Oauth token response received\. Status: 200') { $authOkAt = $at; $rejectedSince = $null }
-        elseif ($line -match 'ERROR \(\d+\): components::doRequestWithRetry received invalid status: ''403''') { $deniedCount++; if (-not $deniedSince) { $deniedSince = $at } }
+        elseif ($line -match 'auth::requestOauthToken Oauth token response received\. Status: 200') { $authOkAt = $at; $rejectedSince = $null; $failingSince = $null }
+        elseif ($line -match 'ERROR \(\d+\): components::doRequestWithRetry received invalid status: ''403''') { $deniedCount++; $deniedAt = $at; if (-not $deniedSince) { $deniedSince = $at } }
         elseif ($line -match 'components::Download Successfully downloaded') {
             $deniedCount = 0; $deniedSince = $null
             if ($line -match 'generic-asset-interrogator') { $syncedAt = $at }
@@ -160,14 +163,18 @@ function Get-UfaSyncState([string]$LogPath, [datetime]$Since) {
              elseif ($deniedCount -ge 5) { 'denied' }
              elseif ($failedAt) { 'blocked' }
              else { 'waiting' }
-    $faultSince = if ($state -eq 'rejected') { $rejectedSince } elseif ($state -eq 'denied') { $deniedSince } else { $null }
-    [pscustomobject]@{ State = $state; FailedAt = $failedAt; RejectedSince = $rejectedSince; FaultSince = $faultSince }
+    $faultSince = if ($state -eq 'rejected') { $rejectedSince } elseif ($state -eq 'denied') { $deniedSince } elseif ($state -eq 'blocked') { $failingSince } else { $null }
+    $faultLastAt = if ($state -eq 'rejected') { $rejectedAt } elseif ($state -eq 'denied') { $deniedAt } else { $null }
+    [pscustomobject]@{ State = $state; FailedAt = $failedAt; RejectedSince = $rejectedSince; FaultSince = $faultSince; FaultLastAt = $faultLastAt }
 }
 
 # True when the same fault (login refused, or component downloads refused) has lasted AfterMinutes with nothing
-# getting through, and no repair was done yet.
-function Test-UfaRepairDue($Sync, [datetime]$NowUtc, [bool]$AlreadyRepaired, [int]$AfterMinutes) {
-    if ($AlreadyRepaired -or $Sync.State -notin 'rejected', 'denied' -or -not $Sync.FaultSince) { return $false }
+# getting through, no repair was done yet, and the fault is still current: its last log line is at most FreshMinutes
+# old. That last check keeps a refusal seen earlier, followed by a network outage, from triggering a repair that
+# can't help. Blocked, stalled, waiting and synced never qualify.
+function Test-UfaRepairDue($Sync, [datetime]$NowUtc, [bool]$AlreadyRepaired, [int]$AfterMinutes, [int]$FreshMinutes = 45) {
+    if ($AlreadyRepaired -or $Sync.State -notin 'rejected', 'denied' -or -not $Sync.FaultSince -or -not $Sync.FaultLastAt) { return $false }
+    if (($NowUtc - $Sync.FaultLastAt).TotalMinutes -gt $FreshMinutes) { return $false }
     return (($NowUtc - $Sync.FaultSince).TotalMinutes -ge $AfterMinutes)
 }
 
@@ -443,7 +450,7 @@ try {
                     Add-StatusHistory $status 'ufa-sync-restart' ("MspAgent configuration fetch timed out at {0:o} and the cloud answers again; restarted MspAgent to fetch now instead of at its next hourly check (restart {1} of {2})" -f $sync.FailedAt, ($restarts + 1), $UfaSyncMaxRestarts)
                 }
             }
-            if (Test-UfaRepairDue $sync (Get-Date).ToUniversalTime() ([bool]$status.ufaRepairedAt) $UfaRepairAfterMinutes) {
+            if (Test-UfaRepairDue $sync (Get-Date).ToUniversalTime() ([bool]$status.ufaRepairedAt) $UfaRepairAfterMinutes $UfaRepairFreshMinutes) {
                 $result = Invoke-UfaRepair
                 $status.ufaRepairedAt = (Get-Date).ToUniversalTime().ToString('o')
                 Add-StatusHistory $status 'ufa-repair' ("the Ecoverse agent has been in state '{0}' since {1:o} with nothing getting through; removed the UFA core and restarted the Windows Agent services so it is redeployed ({2})" -f $sync.State, $sync.FaultSince, $result)
@@ -453,11 +460,16 @@ try {
             }
             if ($sync.State -ne 'synced') {
                 $waitedSync = ((Get-Date).ToUniversalTime() - $since).TotalMinutes
-                if ($waitedSync -lt $UfaSyncGraceMinutes) {
+                # Once a fault has been seen the watcher keeps going for longer: blocked often clears by itself, and a
+                # state it turns into (stalled, rejected, denied) needs its own restart or repair clock to run out.
+                if ($sync.State -in 'blocked', 'stalled', 'rejected', 'denied' -and -not $status.ufaFaultSeenAt) { $status.ufaFaultSeenAt = (Get-Date).ToUniversalTime().ToString('o') }
+                $grace = if ($status.ufaFaultSeenAt) { $UfaBlockedWatchMinutes } else { $UfaSyncGraceMinutes }
+                if ($waitedSync -lt $grace) {
                     $status.stage = 'awaiting-ufa'
                     $why = switch ($sync.State) {
                         'rejected' { 'the cloud rejects the Ecoverse agent login (400 SSL certificate error); a restart does not fix this' }
                         'denied' { 'the component CDN refuses the Ecoverse agent downloads (403); a restart does not fix this' }
+                        'blocked' { 'the Ecoverse auth service does not answer the agent; it often clears by itself, so only watching' }
                         default { $sync.State }
                     }
                     Add-StatusHistory $status 'awaiting-ufa' ('MspAgent data sync: {0}; {1:N0} min since install' -f $why, $waitedSync)

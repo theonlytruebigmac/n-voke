@@ -409,19 +409,34 @@ Describe 'Get-UfaSyncState' {
         (Get-State @($lines.Ssl400, $lines.Fail400, $lines.AuthOk)).RejectedSince | Should -BeNullOrEmpty
     }
     It 'asks for the repair only after a sustained refusal, and only once' {
-        $sync = [pscustomobject]@{ State = 'rejected'; RejectedSince = [datetime]'2026-10-20T14:21:42Z'; FaultSince = [datetime]'2026-10-20T14:21:42Z' }
+        $sync = [pscustomobject]@{ State = 'rejected'; RejectedSince = [datetime]'2026-10-20T14:21:42Z'; FaultSince = [datetime]'2026-10-20T14:21:42Z'; FaultLastAt = [datetime]'2026-10-20T14:50:00Z' }
         Test-UfaRepairDue $sync ([datetime]'2026-10-20T14:40:00Z') $false 30 | Should -BeFalse
         Test-UfaRepairDue $sync ([datetime]'2026-10-20T14:52:00Z') $false 30 | Should -BeTrue
         Test-UfaRepairDue $sync ([datetime]'2026-10-20T14:52:00Z') $true 30 | Should -BeFalse
     }
     It 'asks for the repair for a denied state too, after the same wait' {
-        $sync = [pscustomobject]@{ State = 'denied'; FaultSince = [datetime]'2026-10-20T14:00:00Z' }
+        $sync = [pscustomobject]@{ State = 'denied'; FaultSince = [datetime]'2026-10-20T14:00:00Z'; FaultLastAt = [datetime]'2026-10-20T14:30:00Z' }
         Test-UfaRepairDue $sync ([datetime]'2026-10-20T14:20:00Z') $false 30 | Should -BeFalse
         Test-UfaRepairDue $sync ([datetime]'2026-10-20T14:31:00Z') $false 30 | Should -BeTrue
     }
+    It 'does not repair when the refusal is old, for example when a network outage followed it' {
+        $sync = [pscustomobject]@{ State = 'rejected'; FaultSince = [datetime]'2026-10-20T14:00:00Z'; FaultLastAt = [datetime]'2026-10-20T14:10:00Z' }
+        Test-UfaRepairDue $sync ([datetime]'2026-10-20T15:00:00Z') $false 30 45 | Should -BeFalse
+        Test-UfaRepairDue $sync ([datetime]'2026-10-20T14:50:00Z') $false 30 45 | Should -BeTrue
+    }
+    It 'reports when the last refusal was logged, only for a refused login or refused downloads' {
+        (Get-State @($lines.Ssl400, $lines.Fail400, $lines.Fail)).FaultLastAt.ToString('HH:mm:ss') | Should -Be '14:21:42'
+        (Get-State @($lines.Fail)).FaultLastAt | Should -BeNullOrEmpty
+    }
+    It 'reports when a blocked state began, and forgets it once a login is accepted' {
+        $r = Get-State @($lines.JwtFail, $lines.Fail, $lines.Noise)
+        $r.State | Should -Be 'blocked'
+        $r.FaultSince.ToString('HH:mm:ss') | Should -Be '14:27:59'
+        (Get-State @($lines.Fail, $lines.AuthOk, $lines.Synced)).FaultSince | Should -BeNullOrEmpty
+    }
     It 'never asks for the repair for any other state' {
         foreach ($state in 'stalled', 'blocked', 'waiting', 'synced', 'unknown') {
-            $sync = [pscustomobject]@{ State = $state; RejectedSince = [datetime]'2026-10-20T10:00:00Z'; FaultSince = [datetime]'2026-10-20T10:00:00Z' }
+            $sync = [pscustomobject]@{ State = $state; RejectedSince = [datetime]'2026-10-20T10:00:00Z'; FaultSince = [datetime]'2026-10-20T10:00:00Z'; FaultLastAt = [datetime]'2026-10-20T15:59:00Z' }
             Test-UfaRepairDue $sync ([datetime]'2026-10-20T16:00:00Z') $false 30 | Should -BeFalse
         }
     }
