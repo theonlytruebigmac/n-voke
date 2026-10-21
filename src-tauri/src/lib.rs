@@ -135,8 +135,16 @@ async fn project_create(
     Ok(ProjectSummary::of(&project))
 }
 
+/// Destroys a project's saved data. Refused while another window has the project open; this window's tracker is stopped
+/// and its work finished first, so nothing saves the project again afterwards.
 #[tauri::command]
-async fn project_delete(core: State<'_, Core>, id: String) -> Result<(), String> {
+async fn project_delete(core: State<'_, Core>, trackers: State<'_, Trackers>, locks: State<'_, ProjectLocks>, id: String) -> Result<(), String> {
+    trackers.stop(&id);
+    let lock = locks.get(&id);
+    let _held = lock.lock().await;
+    if !core.migration_lease(&id, &instance()).await? {
+        return Err("This project is open in another N-voke window. Close it there first.".into());
+    }
     core.migration_delete(&id).await
 }
 
@@ -214,6 +222,12 @@ async fn project_poll(core: State<'_, Core>, locks: State<'_, ProjectLocks>, id:
     let lock = locks.get(&id);
     let _held = lock.lock().await;
     core.migration_poll_digest(&id, &instance()).await
+}
+
+/// Drops what the app remembers of both servers (customers, devices, tokens), so the next read goes to them.
+#[tauri::command]
+async fn project_forget_reads(core: State<'_, Core>, id: String) -> Result<(), String> {
+    core.migration_forget_reads(&id).await
 }
 
 /// One page of the source's devices as the plan sees them. Reads both servers when `refresh` is set or the last read is
@@ -317,10 +331,10 @@ async fn project_report(core: State<'_, Core>, id: String, format: ReportFormat)
     core.migration_finish_report(&id, format).await
 }
 
-/// Runs Cleanup on every healthy device that is fully working, telling the page after each step with the
+/// Runs Cleanup on every healthy device that is fully working (or only on the `only` source device IDs), telling the page after each step with the
 /// `migration-cleanup` event. Take a long time on many devices, so it can be stopped with `project_cleanup_cancel`.
 #[tauri::command]
-async fn project_cleanup(app: AppHandle, core: State<'_, Core>, locks: State<'_, ProjectLocks>, stops: State<'_, CleanupStops>, id: String) -> Result<CleanupReport, String> {
+async fn project_cleanup(app: AppHandle, core: State<'_, Core>, locks: State<'_, ProjectLocks>, stops: State<'_, CleanupStops>, id: String, only: Option<Vec<String>>) -> Result<CleanupReport, String> {
     let lock = locks.get(&id);
     let _held = lock.lock().await;
     stops.0.lock().unwrap().remove(&id);
@@ -328,6 +342,7 @@ async fn project_cleanup(app: AppHandle, core: State<'_, Core>, locks: State<'_,
         .migration_cleanup_healthy_with(
             &id,
             &instance(),
+            only.as_deref(),
             &|progress| {
                 let _ = app.emit("migration-cleanup", serde_json::json!({ "id": id, "progress": progress }));
             },
@@ -544,6 +559,7 @@ pub fn run() {
             tracker_stop,
             project_poll,
             project_plan,
+            project_forget_reads,
             project_device_choice,
             project_wave_candidates,
             project_wave_create_from,
