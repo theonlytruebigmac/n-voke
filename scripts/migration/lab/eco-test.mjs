@@ -89,7 +89,7 @@ if (cmd === "create") {
   const online = process.argv.includes("online");
   const values = {
     TestString: "hello world",
-    TestPassword: "fake-s3cret-not-real",
+    TestPassword: "dummy-value",
     TestQuote: `it's "quoted" $notAVar; & | \`tick %PATH%`,
     TestInt: 42,
     TestBool: multi,

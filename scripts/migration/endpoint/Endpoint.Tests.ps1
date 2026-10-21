@@ -154,8 +154,10 @@ Describe 'a failed launch' {
         $inputs = $good.Clone()
         $inputs.DestServer = 'not a host'
         $inputs.CleanMode = '-'; $inputs.ExpectUfa = '-'; $inputs.ReviewDays = '-'; $inputs.LauncherVersion = '-'
-        $r = Invoke-Endpoint $inputs
-        $r.Result.message | Should -Match 'DestServer'
+        # Sent the way Ecoverse sends them: as variables set before the script, not as command-line arguments. Windows PowerShell 5.1
+        # doesn't take a lone - as a parameter value on the command line.
+        $r = Invoke-Endpoint $inputs -EcoverseForm
+        $r.Result.message | Should -Match 'DestServer' -Because ("stdout: " + ($r.Stdout -join ' | ') + "; stderr: " + $r.Stderr)
     }
 }
 
