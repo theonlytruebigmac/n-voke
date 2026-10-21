@@ -115,7 +115,7 @@ Observed in the lab ([findings](10-phase0-findings.md#known-delays-2026-10-20)):
 | `stalled` | `ERROR … configservice::FetchAllConfigurations failed to fetch configuration data: …` (a timeout, or a 400), then `auth::requestOauthToken Oauth token response received. Status: 200` (the cloud accepts the login again), and no component since | **Restart `MspAgent`**, record `ufa-sync-restart` in the history |
 | `rejected` | `auth::fetchJWTWithRetries … unexpected status code: 400 … The SSL certificate error` and no accepted login since | Wait, and report. **A restart and a reboot don't help** (two lab VMs, refused for 2.5 hours). After **30 minutes of refusal** the installer does the **repair, once** (below) |
 | `denied` | `ERROR … components::doRequestWithRetry received invalid status: '403'` five or more times, and no component download succeeded since | Wait, and report. **A restart doesn't help** (seen on one lab VM: 138 refusals over 28 minutes, the same after a restart). After **30 minutes** the installer does the **repair, once**, which fixed it |
-| `blocked` | the same failure and the cloud still doesn't answer | Wait: a restart can't help while the network or auth service is down |
+| `blocked` | the same failure and the cloud still doesn't answer | **Only watched, never acted on.** A restart can't help while the network or auth service is down, and it often clears by itself (a lab VM did). If it turns into `stalled`, `rejected` or `denied`, that state's rule applies |
 | `waiting` | no failure and no component yet | Wait (normal for a while) |
 | `unknown` | no log | Wait |
 
@@ -123,7 +123,12 @@ Observed in the lab ([findings](10-phase0-findings.md#known-delays-2026-10-20)):
 
 The installer also waits for `MspAgent` to exist: with `ExpectUfa=true` it doesn't call the device healthy while the service isn't installed yet (the Windows Agent deploys it a few minutes after itself), up to the same 120 minutes.
 
-Limits, so a real outage can't cause a restart loop: at most **2 restarts** per job, at least **15 minutes apart**, and the installer stops waiting **120 minutes after the install** and goes on as healthy with a `warning` (`MspAgent had not synced its data … state: …`). The wait uses the existing repeating migration task (stage `awaiting-ufa`), so there's no extra scheduled task or file. `status.json` records `ufa.sync`, `ufaSyncRestarts` and `ufaSyncRestartedAt`.
+Limits, so a real outage can't cause a restart or repair loop:
+- At most **2 restarts** per job, at least **15 minutes apart**, and only for `stalled`.
+- The repair is done at most **once** per job, only for `rejected` or `denied`, only after the fault has lasted **30 minutes**, and only while it is **current**: its last log line is at most **45 minutes** old (`$UfaRepairFreshMinutes`), so a refusal followed by an outage doesn't trigger it. It is never done for `blocked`.
+- **How long it watches:** the installer stops waiting **120 minutes after the install** and goes on as healthy with a `warning` (`MspAgent had not synced its data … state: …`). Once it has seen a fault (`blocked`, `stalled`, `rejected` or `denied`, recorded as `ufaFaultSeenAt`) it keeps watching until **360 minutes** after the install (`$UfaBlockedWatchMinutes`), so a `blocked` state that clears by itself is caught, and a state it turns into has time for its own restart or repair clock.
+
+The wait uses the existing repeating migration task (stage `awaiting-ufa`), so there's no extra scheduled task or file. `status.json` records `ufa.sync`, `ufaSyncRestarts`, `ufaSyncRestartedAt` and `ufaFaultSeenAt`.
 
 What the match leaves out on purpose: the cloud-instance metadata lookup (`169.254.169.254`, from `localdiscovery::`) times out on every machine that isn't in a public cloud and says nothing about connectivity, and the `client certificate missing` or `private key missing` errors seen before provisioning finishes are normal. Replaying the real log of the VM whose downloads were refused: `waiting` at 13:50, `denied` from 13:58 (since 13:48:24), repair due from the first check after 14:18, about 30 minutes before it was done by hand. Replaying the real logs of three other lab VMs through the function: the one that recovered went `waiting` (10:20), `blocked` (10:30 to 10:50, the auth service timing out), `stalled` from 10:53 (when the login worked again) and `synced` at 11:28, so a restart at the first check after 10:53 would have fetched the components about 35 minutes before the hourly check did. The other two went `blocked`, then `rejected` and stayed there, with no restart asked for.
 
@@ -183,7 +188,7 @@ Shape as written by the Phase 0 scripts (a real run, shortened):
 }
 ```
 
-Other fields as they occur: `lastError`, `warning` (for example the UFA not provisioning or not syncing), `ufaRestartedAt`, `ufaSyncRestarts`, `ufaSyncRestartedAt`, `ufaRepairedAt`, `ufa.sync`. Written atomically (temporary file, then rename).
+Other fields as they occur: `lastError`, `warning` (for example the UFA not provisioning or not syncing), `ufaRestartedAt`, `ufaSyncRestarts`, `ufaSyncRestartedAt`, `ufaFaultSeenAt`, `ufaRepairedAt`, `ufa.sync`. Written atomically (temporary file, then rename).
 
 It never contains the registration token. `history` is capped at the last 50 entries; `StatusJson` returns the last 30.
 
