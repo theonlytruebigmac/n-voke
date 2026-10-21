@@ -41,36 +41,8 @@ Setup:
 
 Everything the harness writes (state, logs, task dumps) is git-ignored. Test scripts it publishes are named `N-voke Phase0 …` or `N-voke lab: …` and are safe to delete.
 
-## Driving a migration from the terminal (Phase 3)
+## Driving a migration
 
-`nvoke` can run a whole project from the command line, which is how the lab run is done. The app's **Migrate** page (key 4) shows the same projects live and can poll, launch the next wave, probe a device and export a report; creating a project, planning, making waves and publishing the script can be done there too (keys `n`, `T`, `P`, `w`, `U`), and so can adding, editing, testing and removing servers (`S`, or `a` in the new-project form); the N-central script item and the CSV report stay here. Every command that changes something honours `--dry-run`: reads work, and each change is held back and listed with its exact (redacted) request.
+A migration is run from the **Migrate** page of the desktop app (Connect, Map, Prepare, Plan, Launch, Track, Finish). The terminal app has no migration features; it used to have a command line and a Migrate page for this, and both were removed (2026-10-21). Every change the desktop app makes can be tried first as a dry run: reads work, and each change is held back and listed with its exact (redacted) request.
 
-```sh
-export NVOKE_NCENTRAL_JWT=...                                   # or paste when asked; stored in the keychain
-nvoke migrate-server add --host old.example.com --label Old
-nvoke migrate-server add --host new.example.com --label New
-nvoke migrate-server list                                       # shows the ids used below
-
-nvoke migrate-project create --name "Lab move" --source <old id> --dest <new id> \
-      --source-ecoverse-org <source Ecoverse org id>           # omit it to use the REST path only
-nvoke migrate-project generate-tokens <project> --customer "Demo"   # a new destination has no registration tokens
-nvoke migrate-project plan <project> --customer "Demo"          # adds ready devices, says why others aren't
-nvoke migrate-project map <project> --source <id> --dest <id>    # only if the automatic mapping is wrong; ids are in [brackets] in plan
-nvoke migrate-project publish <project>                          # the endpoint script is built into nvoke
-nvoke migrate-project export-script                              # REST path only: upload the file by hand (Enable API on) ...
-nvoke migrate-project rest-script <project> --item <id> --version <version>   # ... then tell nvoke its item number
-nvoke migrate-project wave <project> --label Pilot --max 2
-nvoke migrate-project launch <project> --wave 1 --dry-run
-nvoke migrate-project launch <project> --wave 1
-nvoke migrate-project poll <project> --watch                    # saves after every pass; Ctrl+C is safe
-nvoke migrate-project probe <project> --device <name>                       # a stuck device's own status.json, via the agent it has now
-nvoke migrate-project retry <project> --device <name> [--other-path] [--checked]   # then launch the wave again; --checked: you looked and an earlier launch with a lost answer did not run
-nvoke migrate-project resolve <project> --device <name>              # fixed outside N-voke
-nvoke migrate-project choose-match <project> --device <name> --dest-device <number>
-nvoke migrate-project show <project>
-nvoke migrate-project report <project> --format html
-```
-
-`launch` removes the old agent from every device in the wave. It only launches devices still waiting, so running it twice does nothing the second time. The project is locked to one `nvoke` at a time. Nothing has been run against a lab yet: expect to tune the thresholds in [Tracking](../../docs/migration/06-tracking.md).
-
-The endpoint script is built into `nvoke` from the same two source files `build.mjs` uses (a test checks the bytes match). `--script <file>` on `publish`, `launch` and `probe`, or `NVOKE_MIGRATION_SCRIPT` for the Migrate page, uses a built file instead, to try a change without rebuilding `nvoke`. Any change to the scripts changes the version. A launch carries the version N-voke expects, and an uploaded copy that is a different version refuses to run and says to upload again, so a stale file fails clearly instead of running old logic.
+The endpoint script is built into the app from the same two source files `build.mjs` uses (a test checks the bytes match). `NVOKE_MIGRATION_SCRIPT` points the app at a built file instead, to try a change without rebuilding it. Any change to the scripts changes the version. A launch carries the version N-voke expects, and an uploaded copy that is a different version refuses to run and says to upload again, so a stale file fails clearly instead of running old logic. Prepare has a button that saves the script for the REST path, where it is uploaded to N-central by hand (with *Enable API* on).

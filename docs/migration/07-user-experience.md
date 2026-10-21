@@ -73,22 +73,7 @@ The dashboard from [Tracking](06-tracking.md#what-the-operator-sees): stage coun
 
 ## Terminal app
 
-The same steps as screens, using the existing navigation (`↑`/`↓` pages, `→` in, `←` out, `?` help):
-
-| Key | Where | Action |
-|---|---|---|
-| `n` | Project list | New project |
-| `Enter` | Project list | Open project |
-| `m` / `p` / `w` | Project | Map / Prepare / Plan waves |
-| `L` | Wave | Launch (with confirmation) |
-| `s` | Track | Filter by stage |
-| `P` | Device | Probe |
-| `R` / `O` | Device or group | Retry / Retry on other path |
-| `C` | Device or group | Run cleanup |
-| `x` | Report | Export CSV and HTML |
-| `d` | Anywhere in dry-run | List held-back changes |
-
-`nvoke --dry-run` covers migration too: reads work, every Ecoverse and REST write is held back and listed.
+None. Migration is run from the desktop app only. A terminal Migrate page and `nvoke migrate-*` commands were built and then removed (2026-10-21): the work is a long, wide, multi-step workflow that doesn't fit a terminal. The terminal app is unchanged for everything else.
 
 ## Settings additions
 

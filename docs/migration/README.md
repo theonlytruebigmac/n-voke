@@ -25,7 +25,7 @@ Redeploying an N-central agent means running `WindowsAgentSetup.exe` against the
 | 4 | [Delivery paths](04-delivery-paths.md) | Ecoverse first, REST fallback, and how each device's path is chosen |
 | 5 | [Endpoint scripts](05-endpoint-scripts.md) | The launcher, installer, status file and cleanup scripts that run on devices |
 | 6 | [Tracking and progress](06-tracking.md) | Device stages, failure states, detection, polling and reporting |
-| 7 | [User experience](07-user-experience.md) | The migration workflow in the desktop and terminal apps |
+| 7 | [User experience](07-user-experience.md) | The migration workflow in the desktop app |
 | 8 | [Security](08-security.md) | Credentials, what reaches endpoints, audit, destructive actions |
 | 9 | [Roadmap and open questions](09-roadmap.md) | Phases, acceptance criteria, the proof-of-concept test plan and open risks |
 | 10 | [Phase 0 findings](10-phase0-findings.md) | What the lab tests showed, and how it changes the plan |

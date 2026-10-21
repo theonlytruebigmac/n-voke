@@ -8,7 +8,7 @@ flowchart LR
     P0 --> P2[Phase 2<br/>Core: clients and model]
     P1 --> P3[Phase 3<br/>Core: launch and track]
     P2 --> P3
-    P3 --> P4[Phase 4<br/>Terminal app]
+    P3 --> P4[Phase 4<br/>Terminal app, removed]
     P3 --> P5[Phase 5<br/>Desktop app]
     P4 --> P6[Phase 6<br/>Pilot and release]
     P5 --> P6
@@ -68,7 +68,7 @@ Any change to the installer or launcher changes the built script's version, so t
 | `ncentral::rest`: sign-in and renewal, pagination, per-endpoint semaphores, 429 backoff, audit and dry-run, registration-token read and generate | `ncentral/rest.rs`, `ncentral/model.rs` | ✅ Reads: server info, org units, devices, device identity, tokens. HTTPS only, no redirects followed. Direct tasks and status polling are Phase 3 (the call layer already carries them) |
 | New Ecoverse operations: `scriptCreate`, `scriptUpdate`, `scriptsDelete`, `scriptTasksCancel`, asset identity fields | `migration/ecoverse.rs`; `shouldRunWhenOnline` on the existing run | ✅ The delete and cancel input types are written inline, because their type names weren't recorded in Phase 0 |
 | `migration::project`, `mapping`, `planner` (with path selection), and the store | `migration/` | ✅ Stage moves follow the state diagram; lease for one driving app |
-| A debug command that connects, maps and prints a plan | `nvoke migrate-server`, `nvoke migrate-plan` | ✅ Read-only; verified against fixtures, not yet a lab project |
+| A debug command that connects, maps and prints a plan | `nvoke migrate-server`, `nvoke migrate-plan` (removed with the terminal commands, 2026-10-21) | ✅ Read-only; verified against fixtures, not yet a lab project |
 | Project store on SQLite ([Q7](#open-questions)) | `migration/store.rs` | **Deferred (2026-10-21), measured.** A 10,000-device project with 30 events each is 41 MB, saves in about 130 ms and loads in about 150 ms (release build), so the JSON store is fast enough until a real project says otherwise. If it is built: per-device rows, an events table, encrypted at rest, the same `Core` API, import of existing project blobs, WAL. Design points in [Architecture](02-architecture.md#storage); the measurement is `scale_of_the_project_store` in `store.rs` (ignored by default) |
 | Create missing customers and sites on the destination ([Q11](#open-questions), [Q18](#open-questions)) | `ncentral/rest.rs`, `migration/structure.rs`, Map step | ✅ Built (2026-10-21). Preview, creation (customers first, then sites under their customer), each source unit mapped to what was created, a duplicate name reported, registration tokens created for the new units, a dry run, every creation audited. Lab-tested from a source to a destination lab server (Q18). Only the name is copied; contact and address are not |
 
@@ -88,7 +88,7 @@ Decisions made while building, to confirm or change:
 - `tracker` (stage machine, matching, polling plan, status collection, cleanup, tag and custom-property mirroring, resume after restart).
 - `report` (CSV and HTML).
 
-**Status: core pieces built** (2026-10-20), all fixture-tested. Missing: tag mirroring (optional) and the Activity entry for Ecoverse launches. The terminal commands that drive a whole project exist; none of it has run against a lab yet.
+**Status: built** (2026-10-21), fixture-tested, and exercised from a source to a destination lab server through the desktop app. Missing: tag mirroring (optional). The Activity entry for Ecoverse launches is built (when the source uses the app's own Ecoverse key).
 
 **Hardening after an independent review** (fixture-tested only): a launch is saved as "sent, outcome not recorded" before it is sent, and a lost or ambiguous answer blocks Retry until the operator confirms; every project save is refused if the project changed since it was read, and the lease is taken before the load; launches refuse a stale uploaded or published script; Cleanup refuses a device that isn't healthy; a host name alone never matches a destination device without a before-launch baseline, and two source devices can't claim one destination device; Ecoverse's device list is read once per poll; server error text is scrubbed of tokens; the REST client is HTTPS-only with no redirects launch inputs use a strict character allowlist. Not done: the lease isn't renewed during a long launch or poll (the save check makes that safe, but the work is lost).
 
@@ -100,7 +100,7 @@ Decisions made while building, to confirm or change:
 | `tracker`: polling | ✅ `migration/poller.rs`: one pass over a project reads launch tasks (Ecoverse four to a request, REST with the output zip), the source's Ecoverse connection, source check-ins where they are the signal, and the destination (matching by identity, the same record for a reinstall), then applies `advance` and records every stage change. A failed read is reported and leaves the device alone. Fixture-tested through a whole REST device life, an Ecoverse batch, a reinstall and an ambiguous match |
 | Debug command that drives a project | ✅ `nvoke migrate-project list, create, show, plan, wave, rest-script, publish, launch, poll [--watch], probe, retry, resolve, choose-match, generate-tokens, map, export-script, report, delete` (the steps are `migration/workflow.rs`, shared with the future screens). Honours `--dry-run`; one `nvoke` at a time per project (lease); `poll --watch` saves after every pass and resumes from saved state, so a restart is safe. Walkthrough in [`scripts/migration/README.md`](../../scripts/migration/README.md) |
 | `tracker`: `Status`/`Cleanup` collection | ✅ `migration/actions.rs`, `nvoke migrate-project probe <project> --device <name> [--cleanup]`: reaches the device through whichever agent it has now (the old one until the cleanup starts, the destination's Ecoverse tenant or N-central afterwards, and refuses in between, with the reason), waits for the report with a clear timeout, records the device's `status.json` on its timeline, and moves a healthy device to *Cleaned up* when the cleanup says `Cleaned = true`. Both paths fixture-tested |
-| Known-delay handling ([Known delays](06-tracking.md#known-delays)) | Not built. An **Ecoverse data pending** state for assets that are `CONNECTED` but empty; *Not picked up* counted from the first inventory (or 60 minutes after `CONNECTED`); Survey and Plan fall back to the N-central record; messages that name what is pending and roughly how long; a survey warning for devices installed in the last hour (not possible: no install time is available from N-central or Ecoverse; the *Waiting for Ecoverse* state covers the effect). Lab timings to be re-measured on the larger VMs first |
+| Known-delay handling ([Known delays](06-tracking.md#known-delays)) | **Partly built (2026-10-21).** Built: *Not picked up* waits 60 minutes (instead of 30) while the source asset is `CONNECTED` but has sent no data, and the reason says so; the waiting texts name the hourly retry. Still not built: a separate **Ecoverse data pending** stage; counting from the first inventory; Survey and Plan falling back to the N-central record when Ecoverse data is missing;  Survey and Plan fall back to the N-central record; messages that name what is pending and roughly how long; a survey warning for devices installed in the last hour (not possible: no install time is available from N-central or Ecoverse; the *Waiting for Ecoverse* state covers the effect). Lab timings to be re-measured on the larger VMs first |
 | Tag and custom-property mirroring | Not built (optional in the design). Would only reach source-side assets, which disappear after the move |
 | `launcher` | ✅ `migration/launcher.rs`: groups a wave by destination (Ecoverse) and per device (REST); launches only `Planned` devices, so a second launch does nothing; reads each destination's token at launch (missing, expired or unreadable fails only the devices that need it); queues Ecoverse launches for offline devices; falls back to REST when Ecoverse can't reach a device and records the switch; never resends a request whose answer was lost (the device is marked as possibly launched and can't be retried until the operator confirms), and saves each launch before sending it; reads each device's identity and what is already on the destination before launching (the tracker's matching needs them); dry-run holds back both paths and records nothing. Both paths are tested end to end against fakes (the GraphQL client now has a fake transport too). Not yet: the ordinary Activity job for an Ecoverse launch |
 | REST client: direct task, status details, output zip | ✅ `ncentral/rest.rs`, `migration/endpoint_result.rs`: the lab-proven direct-task body (the token is blanked in audit and dry-run, a missing script item is reported as a setup problem), per-device status, and the unauthenticated output zip fetched only from N-central's own path and read with a small zip reader. `NVOKE-RESULT` and Ecoverse outputs are parsed by one reader into a launch outcome for the tracker |
@@ -108,40 +108,13 @@ Decisions made while building, to confirm or change:
 
 **Done when:** a lab project with both VMs completes launch → healthy → cleaned up → report through a debug command, including a forced Stuck staged and a forced Lost device.
 
-### Phase 4: terminal app
+### Phase 4: terminal app (removed)
 
-The Migrate screens and keys from [User experience](07-user-experience.md#terminal-app). Dry-run covers every new write.
-
-**Status: built except the items listed under "Not yet"** (2026-10-20): the **Migrate** page (key `4`), with server management, tested against fixtures and rendered in an in-memory terminal; not yet used on a real terminal against a lab.
-
-| Step of the workflow | In the Migrate page | Elsewhere |
-|---|---|---|
-| Project list | ✅ list with devices, attention and last change; `enter` opens, `r` refreshes | |
-| Create project | ✅ `n` on the project list: a form (name, from, to, whether the destination is linked to Ecoverse and which tenant, Ecoverse organization IDs) | `nvoke migrate-project create` |
-| Plan | ✅ `P` reads both servers and adds the devices that are ready; an overlay lists everything that can't go yet with the reason (not Windows, no destination, no token, script not uploaded, ...) | `nvoke migrate-project plan [--customer]` |
-| Waves | ✅ `w` puts the next waiting devices (up to the wave size) in a wave, after asking | `nvoke migrate-project wave` |
-| Prepare: publish the script | ✅ `U` publishes to Ecoverse (asks first; only for a project that uses Ecoverse) | `nvoke migrate-project publish`; the REST path's by-hand upload: `export-script`, `rest-script` |
-| Registration tokens | ✅ `T` creates the destination's missing tokens (asks first; valid ones are left alone, expired ones are reported because how N-central treats generating over one is untested; audited, never logging the token). A new destination has none, so this comes before planning can add anything | `nvoke migrate-project generate-tokens [--customer]` |
-| Map: overrides | Command line only: `nvoke migrate-project map <project> --source <id> (--dest <id> \| --exclude)`; `plan` shows ids in square brackets and the automatic matches with their confidence. No side-by-side tree, no drag or search, no "write mapping to custom properties" | |
-| Connect: servers and their JWTs | ✅ `S` opens the servers list: `a` add, `e` edit (leave the JWT blank to keep it), `t` signs in and shows the N-central and REST API versions, `x` removes (refused while a project uses it). The JWT field is masked and goes straight to the keychain. In the new-project form, `a` on the *from* or *to* choice adds a server and comes back with it chosen; `n` with no servers opens the add form first | `nvoke migrate-server` |
-| The N-central script item | Command line only | `nvoke migrate-project rest-script` |
-| Launch | ✅ `L` launches the next wave with devices waiting, after asking ("removes their old agents"); honours dry-run (`d` lists the held-back requests); each launch is saved before it is sent, and if a save fails the launch stops with nothing more sent | |
-| Track | ✅ dashboard: servers, stage counts, waves, devices with attention first and time in stage, the selected device's timeline; polls itself every 30 seconds and saves; `p` polls now | |
-| Probe, cleanup | ✅ `s` asks the selected device for its own status through the agent it has now; `C` runs cleanup on a healthy device (asks first) | |
-| Report | ✅ `x` saves an HTML report | `nvoke migrate-project report` for CSV |
-| One window at a time | ✅ a project another window holds opens read-only and refuses changes | |
-| Retry, retry on the other path | ✅ `R` / `O` for a device whose launch failed, wasn't picked up or is stuck; asks first; a launch still waiting in Ecoverse is cancelled first (nothing changes if the cancel can't be sent, or in dry-run); the other path must be usable; the switch is on the device's timeline and in the audit log. A device whose launch may have gone through (answer lost) asks "only if Activity shows it didn't?" and is otherwise refused | `nvoke migrate-project retry <project> --device <name> [--other-path] [--checked]` |
-| Choose match | ✅ when two destination devices fit equally, the poller keeps the candidates on the device, the device is flagged and `m` opens a list to pick from | `nvoke migrate-project choose-match <project> --device <name> --dest-device <number>` |
-| Mark resolved | ✅ `v` (asks first), only for devices that need attention | `nvoke migrate-project resolve` |
-| Not yet: filter by stage, per-device launch, project settings, Map screen, entering the N-central script item | Not built | |
-
-The page uses the endpoint script built into `nvoke` (`NVOKE_MIGRATION_SCRIPT` can point at a built file instead, to try a change).
-
-**Done when:** the whole workflow runs in `nvoke`, including dry-run, with help text for each screen.
+**Status: removed (2026-10-21).** The terminal app's Migrate page and the `nvoke migrate-*` commands were built, then deleted: migration does not fit a terminal, and the desktop app is where it is run. Nothing here is planned. The core they used (`crates/core/src/migration/`) is what the desktop app runs on. What was built is in the git history.
 
 ### Phase 5: desktop app
 
-The Migrate page in React over new Tauri commands, mirroring the terminal app's capabilities.
+The Migrate page in React over new Tauri commands. **This is the lead interface for migration (2026-10-21).** The workspace has seven steps (Connect, Map, Prepare, Plan, Launch, Track, Finish); see [GUI design](11-gui-design.md) for what each does and the build status.
 
 **One Rust core for the existing features too** ([Q9](#open-questions), decided 2026-10-20). Today `src/lib/` holds about 1,500 lines of logic (plus about 350 of tests) that `crates/core/src/` already mirrors for the terminal app. The Migrate page needs the Tauri command layer anyway, so the existing features move onto it in steps, each shippable and each **without a change in behaviour**:
 
@@ -156,7 +129,7 @@ The Migrate page in React over new Tauri commands, mirroring the terminal app's 
 
 Rules for every step: the TypeScript module is deleted in the same change that switches its callers; no step changes what a user sees; each step lands with the Rust tests that replace the deleted TypeScript tests. Risks: regressions in features that work today (mitigated by the parity audit and one module at a time), command-boundary overhead for large lists (paging), and type drift (generated types).
 
-**Done when:** feature parity with the terminal app, the screenshots are updated, the README has a Migrate section, and `src/lib/` contains no domain logic.
+**Done when:** the migration workspace is complete (see [GUI design](11-gui-design.md)), the existing features run on the Rust core,
 
 ### Phase 6: pilot and release
 

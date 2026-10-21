@@ -71,15 +71,27 @@ PASSWORD-type script inputs are already redacted by N-voke; the registration tok
 | Delete source device records | Removes the old records (`removeAgents=false`), and with them their stale Ecoverse assets | Off by default; separate confirmation; only after the review period, for devices in **Cleaned up** |
 | Delete the Ecoverse script | Removes it from Ecoverse (the REST path's repository copy is removed by hand) | Only when no device in any open project still needs it |
 | Create customers and sites on the destination (planned) | Adds org units to the destination server; **N-voke can't delete them** (no delete endpoint), and the site endpoint is a preview | Preview of every entry first; explicit confirmation; customers before sites; duplicates offered as matches; audited and marked *created by N-voke* |
-| Delete a project | Removes local history | Confirmation; the audit log keeps its entries |
+| Delete a project | Destroys the project's saved data on this computer (see [Data destruction](#data-destruction)) | Confirmation that says what is and isn't removed; refused while another window has the project open; the audit log keeps its entries |
 
 N-voke's API calls never uninstall agents (`removeAgents` is always false) and never delete destination devices or org units (it can create missing customers and sites, as above). Removing the old agent from a device is done by the endpoint script on that device, as the migration itself, after the confirmation above.
 
 ## Data at rest
 
-- Project stores use the existing encryption (XChaCha20-Poly1305, data key in the keychain) and atomic, user-only file writes.
+- Project stores use XChaCha20-Poly1305 and atomic, user-only file writes. Each project is sealed under **its own random key**, kept with the other secrets in the keychain (`migration-key:<project>`), not under the app's data key, so one project can be destroyed on its own. A project saved before this (sealed under the app's data key) opens as before and moves to its own key the next time it is saved.
 - Collected `status.json` files and outputs are capped like run output (64 KB per device per event).
 - Reports exported to disk contain device names, IDs and stages, **never** tokens. They're written readable only by the current user.
+
+## Data destruction
+
+Deleting a project (or *Clear local data* in Settings) destroys what N-voke kept of it on this computer, in this order:
+
+1. **The project's data key is deleted from the keychain.** This is the guarantee: without the key the file can't be read by anything, including a copy in a backup or a snapshot, or blocks the disk didn't overwrite.
+2. The project file, its lease, and any leftover temporary file from a crashed save or set-aside copy are **overwritten with random bytes, flushed and removed.** On a solid-state or copy-on-write disk the old blocks may survive an overwrite, which is why step 1 comes first and doesn't depend on it.
+3. What the app held in memory is dropped: the parsed project, its plan, and what it had read from the two servers. Its entries in **Activity** (the launch runs) are removed. The window's tracker is stopped, and a window that still holds the project can't save it back into existence (a save of a project that was saved before but isn't there now is refused, and no new key is made).
+
+If the key can't be deleted (the keychain is unavailable), the delete fails and nothing is removed, so a retry is possible. A project saved before projects had their own key has no key to destroy: its file is overwritten and removed, and the audit entry says so.
+
+**Not removed, by design:** the **audit log** (an encrypted, append-only record that the project was deleted and of what was done; some entries name a device or server, for example a launch or a retired record, and never a secret); anything on the servers or devices; and files you saved yourself, such as reports and the exported endpoint script in your Downloads folder (N-voke doesn't track where those went). A server's credentials are removed when the server is removed. A project is refused deletion while another N-voke window has it open.
 
 ## Threats considered
 
