@@ -141,6 +141,8 @@ pub struct LaunchReport {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "ActivityRun.ts"))]
 #[serde(rename_all = "camelCase")]
 pub struct ActivityRun {
+    /// The project that launched it.
+    pub project_id: String,
     pub name: String,
     pub script_id: String,
     pub script_name: String,
@@ -270,6 +272,7 @@ impl Core {
                     let watchable = self.ncentral_server(&project.source_server_id).is_ok_and(|s| s.ecoverse == crate::ncentral::EcoCredential::AppKey);
                     if watchable && !launched.is_empty() {
                         report.activity.push(ActivityRun {
+                            project_id: project.id.clone(),
                             name: input.name.clone(),
                             script_id: input.script_id.clone(),
                             script_name: input.script_name.clone(),

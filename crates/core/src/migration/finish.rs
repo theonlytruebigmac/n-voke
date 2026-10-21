@@ -31,10 +31,21 @@ pub struct FinishView {
     pub retire_source_records: bool,
     /// Healthy devices a cleanup would run on, by name: the ones Ecoverse is receiving asset data from, or that have no
     /// Ecoverse to wait for.
-    pub cleanup_candidates: Vec<String>,
+    pub cleanup_devices: Vec<CleanupDevice>,
     /// Healthy in N-central but not sending asset data to Ecoverse yet. Cleanup leaves them alone: it removes the
     /// migration's record on the device, which is what you'd want to look at if Ecoverse never comes up.
     pub waiting_for_ecoverse: Vec<String>,
+}
+
+/// A device a cleanup could run on, with its wave so the page can offer a wave at a time.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "CleanupDevice.ts"))]
+#[serde(rename_all = "camelCase")]
+pub struct CleanupDevice {
+    pub device_id: String,
+    pub name: String,
+    pub wave: Option<u32>,
+    pub wave_label: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -104,14 +115,21 @@ pub fn finish_view(project: &Project) -> FinishView {
         closed: project.is_closed(),
         review_days: project.options.review_days,
         retire_source_records: project.options.retire_source_records,
-        cleanup_candidates: healthy_ready(project).map(|d| d.name.clone()).collect(),
+        cleanup_devices: healthy_ready(project)
+            .map(|d| CleanupDevice {
+                device_id: d.source_device_id.clone(),
+                name: d.name.clone(),
+                wave: d.wave,
+                wave_label: d.wave.and_then(|n| project.waves.iter().find(|w| w.number == n)).map(|w| w.label.clone()),
+            })
+            .collect(),
         waiting_for_ecoverse: project.devices.iter().filter(|d| project.waiting_for_ecoverse(d)).map(|d| d.name.clone()).collect(),
     }
 }
 
 impl Core {
     pub async fn migration_finish_view(&self, id: &str) -> Result<FinishView, String> {
-        let project = self.migration_load(id).await?.ok_or_else(|| format!("There is no migration project {id}."))?;
+        let project = self.migration_load_shared(id).await?.ok_or_else(|| format!("There is no migration project {id}."))?;
         Ok(finish_view(&project))
     }
 
@@ -129,15 +147,16 @@ impl Core {
     /// Runs Cleanup on every healthy device that is fully working, one after another, saving after each so a stop
     /// part-way loses nothing. A device that fails is reported and the rest go on.
     pub async fn migration_cleanup_healthy(&self, id: &str, instance: &str) -> Result<CleanupReport, String> {
-        self.migration_cleanup_healthy_with(id, instance, &|_| {}, &|| false).await
+        self.migration_cleanup_healthy_with(id, instance, None, &|_| {}, &|| false).await
     }
 
-    /// The same, telling `progress` as each device starts and finishes, and checking `cancelled` before each one.
-    pub async fn migration_cleanup_healthy_with(&self, id: &str, instance: &str, progress: &(dyn Fn(CleanupProgress) + Sync), cancelled: &(dyn Fn() -> bool + Sync)) -> Result<CleanupReport, String> {
+    /// The same, telling `progress` as each device starts and finishes, and checking `cancelled` before each one. With
+    /// `only` (source device IDs) it runs on those of the ready devices and leaves the rest alone.
+    pub async fn migration_cleanup_healthy_with(&self, id: &str, instance: &str, only: Option<&[String]>, progress: &(dyn Fn(CleanupProgress) + Sync), cancelled: &(dyn Fn() -> bool + Sync)) -> Result<CleanupReport, String> {
         let package = Package::embedded()?;
         let mut report = CleanupReport::default();
         let mut project = self.migration_open_for_write(id, instance).await?;
-        let targets: Vec<usize> = project.devices.iter().enumerate().filter(|(_, d)| d.stage == Stage::Healthy && !project.waiting_for_ecoverse(d)).map(|(i, _)| i).collect();
+        let targets: Vec<usize> = project.devices.iter().enumerate().filter(|(_, d)| d.stage == Stage::Healthy && !project.waiting_for_ecoverse(d) && only.is_none_or(|ids| ids.contains(&d.source_device_id))).map(|(i, _)| i).collect();
         let total = targets.len();
         for (n, index) in targets.into_iter().enumerate() {
             if cancelled() {
@@ -208,7 +227,7 @@ mod tests {
         let view = finish_view(&p);
         assert_eq!((view.total, view.healthy, view.cleaned_up, view.retired, view.resolved), (8, 2, 1, 1, 1));
         assert_eq!((view.moving, view.waiting, view.needs_you, view.closed), (1, 1, 1, false));
-        assert_eq!(view.cleanup_candidates, ["PC-0", "PC-1"]);
+        assert_eq!(view.cleanup_devices.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["PC-0", "PC-1"]);
     }
 
     #[test]
@@ -238,14 +257,14 @@ mod tests {
         p.devices[2].ecoverse = Some(EcoState::NotSeen);
         // The fourth has not been read yet.
         let view = finish_view(&p);
-        assert_eq!((view.healthy, view.cleanup_candidates.clone()), (4, vec!["PC-0".to_string()]));
+        assert_eq!((view.healthy, view.cleanup_devices.iter().map(|d| d.name.clone()).collect::<Vec<_>>()), (4, vec!["PC-0".to_string()]));
         assert_eq!(view.waiting_for_ecoverse, ["PC-1", "PC-2", "PC-3"]);
         assert_eq!(p.ecoverse_waiting(), 3);
 
         // With nothing in Ecoverse to wait for, every healthy device is ready.
         p.dest_ecoverse = DestEcoverse::NotLinked;
         let view = finish_view(&p);
-        assert_eq!((view.cleanup_candidates.len(), view.waiting_for_ecoverse.len(), p.ecoverse_waiting()), (4, 0, 0));
+        assert_eq!((view.cleanup_devices.len(), view.waiting_for_ecoverse.len(), p.ecoverse_waiting()), (4, 0, 0));
     }
 
     async fn two_healthy_devices_without_a_destination_record() -> (std::sync::Arc<Core>, String) {
@@ -264,7 +283,7 @@ mod tests {
     async fn a_bulk_cleanup_tells_the_page_as_each_device_starts_and_finishes_and_goes_on_after_a_failure() {
         let (core, id) = two_healthy_devices_without_a_destination_record().await;
         let seen = std::sync::Mutex::new(vec![]);
-        let report = core.migration_cleanup_healthy_with(&id, "me", &|p| seen.lock().unwrap().push((p.name.clone(), p.position, p.total, p.state)), &|| false).await.unwrap();
+        let report = core.migration_cleanup_healthy_with(&id, "me", None, &|p| seen.lock().unwrap().push((p.name.clone(), p.position, p.total, p.state)), &|| false).await.unwrap();
         assert_eq!((report.cleaned, report.failed.len(), report.stopped), (0, 2, false));
         assert_eq!(
             *seen.lock().unwrap(),
@@ -281,6 +300,7 @@ mod tests {
             .migration_cleanup_healthy_with(
                 &id,
                 "me",
+                None,
                 &|p| {
                     if p.state != CleanupState::Running {
                         stop.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -293,5 +313,18 @@ mod tests {
         assert_eq!((report.failed.len(), report.stopped, report.not_reached), (1, true, 1));
         let saved = core.migration_load(&id).await.unwrap().unwrap();
         assert!(saved.devices.iter().all(|d| d.stage == Stage::Healthy), "the one not reached is still healthy");
+    }
+
+    #[tokio::test]
+    async fn a_cleanup_can_be_limited_to_chosen_devices_and_leaves_the_others_untouched() {
+        let (core, id) = two_healthy_devices_without_a_destination_record().await;
+        let seen = std::sync::Mutex::new(vec![]);
+        let only = vec!["1".to_string()];
+        let report = core.migration_cleanup_healthy_with(&id, "me", Some(&only), &|p| seen.lock().unwrap().push((p.name.clone(), p.position, p.total)), &|| false).await.unwrap();
+        assert_eq!(report.failed.len(), 1, "only the one chosen is tried");
+        assert_eq!(seen.lock().unwrap().first().cloned(), Some(("PC-1".to_string(), 1, 1)));
+        let none: Vec<String> = vec![];
+        let report = core.migration_cleanup_healthy_with(&id, "me", Some(&none), &|_| {}, &|| false).await.unwrap();
+        assert_eq!((report.cleaned, report.failed.len()), (0, 0), "an empty choice cleans nothing");
     }
 }

@@ -103,7 +103,8 @@ pub struct TrackQuery {
 const DEFAULT_PAGE: usize = 200;
 const MAX_PAGE: usize = 1000;
 /// How many devices the "needs you" list shows.
-const NEEDS_YOU_SHOWN: usize = 8;
+/// How many devices of each reason are listed to open; "Show them all" has the rest.
+const NEEDS_YOU_EXAMPLES: usize = 3;
 
 impl TrackQuery {
     pub fn all() -> Self {
@@ -149,9 +150,22 @@ pub struct TrackView {
     pub customers: Vec<String>,
     /// Devices per group over the whole project. A device with a match to choose also counts under needs you.
     pub counts: Vec<GroupCount>,
-    /// The first devices that need the person, and how many there are in all.
-    pub needs_you: Vec<TrackRow>,
+    /// How many devices need the person in all, and what for: one entry per reason (a stage, or a match to choose),
+    /// the commonest first, each with its first few devices.
     pub needs_you_total: usize,
+    pub needs_you: Vec<NeedKind>,
+}
+
+/// One reason devices need the person, with how many there are and a few of them to open.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "NeedKind.ts"))]
+#[serde(rename_all = "camelCase")]
+pub struct NeedKind {
+    pub stage: Stage,
+    /// Several devices on the new server fit, and the person chooses which: the reason, whatever the stage.
+    pub needs_match: bool,
+    pub count: usize,
+    pub examples: Vec<TrackRow>,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -297,6 +311,27 @@ fn name_of(names: &HashMap<String, String>, id: Option<&str>) -> Option<String> 
     Some(names.get(id).cloned().unwrap_or_else(|| format!("#{id}")))
 }
 
+/// The devices that need the person grouped by why, the commonest reason first (then by stage order).
+fn need_kinds(needs: &[&TrackRow]) -> Vec<NeedKind> {
+    let mut kinds: Vec<NeedKind> = vec![];
+    for row in needs {
+        let found = kinds.iter_mut().find(|k| k.needs_match == row.needs_match && (row.needs_match || k.stage == row.stage));
+        let kind = match found {
+            Some(k) => k,
+            None => {
+                kinds.push(NeedKind { stage: row.stage, needs_match: row.needs_match, count: 0, examples: vec![] });
+                kinds.last_mut().unwrap()
+            }
+        };
+        kind.count += 1;
+        if kind.examples.len() < NEEDS_YOU_EXAMPLES {
+            kind.examples.push((*row).clone());
+        }
+    }
+    kinds.sort_by(|a, b| b.count.cmp(&a.count).then(a.stage.cmp(&b.stage)));
+    kinds
+}
+
 pub fn track_view(project: &Project, source_names: &HashMap<String, String>, dest_names: &HashMap<String, String>, query: &TrackQuery) -> TrackView {
     let customer = |d: &ProjectDevice| name_of(source_names, d.source_customer_id.as_deref()).unwrap_or_else(|| "(no customer)".into());
     let rows: Vec<TrackRow> = project
@@ -340,7 +375,7 @@ pub fn track_view(project: &Project, source_names: &HashMap<String, String>, des
         customers,
         counts,
         needs_you_total: needs.len(),
-        needs_you: needs.into_iter().take(NEEDS_YOU_SHOWN).cloned().collect(),
+        needs_you: need_kinds(&needs),
     }
 }
 
@@ -371,9 +406,22 @@ pub fn device_detail(project: &Project, index: usize, source_names: &HashMap<Str
 
 type Names = Arc<HashMap<String, String>>;
 
-fn name_cache() -> &'static Mutex<HashMap<String, (Instant, Names)>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, (Instant, Names)>>> = OnceLock::new();
+/// The names of a server, when they were read, and whether the read worked (a failed one is kept briefly so a server
+/// that is down isn't asked again on every keystroke in a filter).
+fn name_cache() -> &'static Mutex<HashMap<String, (Instant, Names, bool)>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, (Instant, Names, bool)>>> = OnceLock::new();
     CACHE.get_or_init(Default::default)
+}
+
+/// How long a failed read of the names is kept.
+const NAMES_FAILED_FOR: Duration = Duration::from_secs(30);
+
+pub(crate) fn forget_all_names() {
+    name_cache().lock().unwrap().clear();
+}
+
+pub(crate) fn forget_names(server_id: &str) {
+    name_cache().lock().unwrap().remove(server_id);
 }
 
 fn names_of(units: &[OrgUnit]) -> HashMap<String, String> {
@@ -383,35 +431,46 @@ fn names_of(units: &[OrgUnit]) -> HashMap<String, String> {
 impl Core {
     /// Customer and site names of a server, kept for a few minutes. When the server can't be read the page shows IDs.
     pub(crate) async fn unit_names(&self, server_id: &str) -> Names {
-        if let Some((at, names)) = name_cache().lock().unwrap().get(server_id)
-            && at.elapsed() < NAMES_FOR
+        if let Some((at, names, worked)) = name_cache().lock().unwrap().get(server_id)
+            && at.elapsed() < if *worked { NAMES_FOR } else { NAMES_FAILED_FOR }
         {
             return names.clone();
         }
-        match self.ncentral_org_units(server_id).await {
-            Ok(units) => {
-                let names = Arc::new(names_of(&units));
-                name_cache().lock().unwrap().insert(server_id.to_string(), (Instant::now(), names.clone()));
-                names
-            }
-            Err(_) => Arc::new(HashMap::new()),
-        }
+        let (names, worked) = match self.org_units_cached(server_id).await {
+            Ok(units) => (Arc::new(names_of(&units)), true),
+            Err(_) => (Arc::new(HashMap::new()), false),
+        };
+        name_cache().lock().unwrap().insert(server_id.to_string(), (Instant::now(), names.clone(), worked));
+        names
     }
 
-    async fn names_for(&self, project: &Project) -> (Names, Names) {
-        let source = self.unit_names(&project.source_server_id).await;
-        let dest = if project.dest_server_id == project.source_server_id { source.clone() } else { self.unit_names(&project.dest_server_id).await };
-        (source, dest)
+    /// The names the screens need: the ones kept on the devices, and only for what they lack a read of the servers (a
+    /// project from before names were kept, or a unit that was created after planning).
+    pub(crate) async fn names_for(&self, project: &Project) -> (Names, Names) {
+        let (mut source, mut dest) = project.stored_names();
+        let lacks_source = project.devices.iter().any(|d| d.source_customer_id.as_ref().is_some_and(|id| !source.contains_key(id)));
+        let lacks_dest = project.devices.iter().any(|d| d.dest_org_unit_id.as_ref().is_some_and(|id| !dest.contains_key(id)));
+        if lacks_source {
+            for (id, name) in self.unit_names(&project.source_server_id).await.iter() {
+                source.entry(id.clone()).or_insert_with(|| name.clone());
+            }
+        }
+        if lacks_dest {
+            for (id, name) in self.unit_names(&project.dest_server_id).await.iter() {
+                dest.entry(id.clone()).or_insert_with(|| name.clone());
+            }
+        }
+        (Arc::new(source), Arc::new(dest))
     }
 
     pub async fn migration_track_view(&self, id: &str, query: &TrackQuery) -> Result<TrackView, String> {
-        let project = self.migration_load(id).await?.ok_or_else(|| format!("There is no migration project {id}."))?;
+        let project = self.migration_load_shared(id).await?.ok_or_else(|| format!("There is no migration project {id}."))?;
         let (source, dest) = self.names_for(&project).await;
         Ok(track_view(&project, &source, &dest, query))
     }
 
     pub async fn migration_device_detail(&self, id: &str, index: usize) -> Result<DeviceDetail, String> {
-        let project = self.migration_load(id).await?.ok_or_else(|| format!("There is no migration project {id}."))?;
+        let project = self.migration_load_shared(id).await?.ok_or_else(|| format!("There is no migration project {id}."))?;
         let (source, dest) = self.names_for(&project).await;
         device_detail(&project, index, &source, &dest)
     }
@@ -580,7 +639,12 @@ mod tests {
         let count = |g: TrackGroup| view.counts.iter().find(|c| c.group == g).unwrap().count;
         assert_eq!((count(TrackGroup::Healthy), count(TrackGroup::Waiting), count(TrackGroup::NeedsYou), count(TrackGroup::Staged)), (1, 4, 2, 1));
         assert_eq!((view.matching, view.rows.len()), (9, 2), "the excluded device is in the table but in no group; the page is two");
-        assert_eq!((view.needs_you_total, view.needs_you.len()), (2, 2));
+        assert_eq!(view.needs_you_total, 2);
+        let mut kinds: Vec<_> = view.needs_you.iter().map(|k| (k.stage, k.count)).collect();
+        kinds.sort();
+        let mut expected = vec![(Stage::Lost, 1), (Stage::NotPickedUp, 1)];
+        expected.sort();
+        assert_eq!(kinds, expected);
 
         let lost = track_view(&p, &HashMap::new(), &HashMap::new(), &TrackQuery { group: Some(TrackGroup::NeedsYou), ..TrackQuery::all() });
         assert_eq!(lost.rows.iter().map(|r| r.stage).collect::<Vec<_>>(), [Stage::Lost, Stage::NotPickedUp]);
@@ -602,5 +666,50 @@ mod tests {
         assert_eq!(q(TrackQuery { group: Some(TrackGroup::NeedsYou), ..TrackQuery::all() }), [2]);
         let view = track_view(&p, &names, &HashMap::new(), &TrackQuery::all());
         assert_eq!(view.needs_you_total, 1);
+    }
+
+    #[test]
+    fn needs_you_is_grouped_by_reason_commonest_first_with_a_few_examples_each() {
+        let mut stages = vec![Stage::Lost; 5];
+        stages.extend([Stage::NotPickedUp, Stage::NotPickedUp, Stage::Healthy]);
+        let mut p = with_stages(&stages);
+        p.devices[7].match_candidates = vec![MatchCandidate { device_id: "9".into(), name: "PC-A".into() }];
+        let view = track_view(&p, &HashMap::new(), &HashMap::new(), &TrackQuery::all());
+        let kinds: Vec<_> = view.needs_you.iter().map(|k| (k.stage, k.needs_match, k.count, k.examples.len())).collect();
+        assert_eq!(kinds, [(Stage::Lost, false, 5, 3), (Stage::NotPickedUp, false, 2, 2), (Stage::Healthy, true, 1, 1)]);
+        assert_eq!(view.needs_you_total, 8);
+    }
+
+    #[tokio::test]
+    async fn names_kept_on_the_devices_need_no_read_of_the_servers_and_missing_ones_are_read_once() {
+        use crate::ncentral::{
+            model::OrgUnitType,
+            rest::testing::{Fake, auth_ok, ok},
+        };
+        let fake = Fake::new(|req, _| {
+            if req.url.contains("authenticate") {
+                return auth_ok(3600);
+            }
+            let units = [(10, "Acme", "CUSTOMER"), (11, "Zeta", "CUSTOMER"), (110, "Acme HQ", "SITE")];
+            let items: Vec<_> = units.iter().map(|(id, name, kind)| serde_json::json!({ "orgUnitId": id, "orgUnitName": name, "orgUnitType": kind, "parentId": null })).collect();
+            ok(serde_json::json!({ "data": items, "totalPages": 1, "totalItems": 3, "page": 1, "pageSize": 1000 }))
+        });
+        let core = Core::for_tests("names-kept");
+        let src = core.save_ncentral_server(None, "Old", "src.example.com", Some("j1".into()), None).await.unwrap();
+        let dst = core.save_ncentral_server(None, "New", "dst.example.com", Some("j2".into()), None).await.unwrap();
+        core.set_rest_transport(fake.clone());
+        let mut p = with_stages(&[Stage::Healthy, Stage::Healthy]);
+        p.source_server_id = src.id;
+        p.dest_server_id = dst.id;
+        let reads = || fake.paths().iter().filter(|p| p.starts_with("GET api/org-units")).count();
+
+        let (source, dest) = core.names_for(&p).await;
+        assert_eq!((reads(), source.get("10").cloned(), dest.get("110").cloned()), (2, Some("Acme".into()), Some("Acme HQ".into())), "a project with no names kept reads both servers");
+        let units = |id: &str, name: &str| OrgUnit { org_unit_id: id.into(), org_unit_name: name.into(), org_unit_type: OrgUnitType::Customer, parent_id: None, external_id: None };
+        p.fill_names(&[units("10", "Acme"), units("11", "Zeta")], &[units("110", "Acme HQ")]);
+        let before = reads();
+        let (source, dest) = core.names_for(&p).await;
+        assert_eq!(reads(), before, "with the names kept, nothing is read");
+        assert_eq!((source.get("11").cloned(), dest.get("110").cloned()), (Some("Zeta".into()), Some("Acme HQ".into())));
     }
 }

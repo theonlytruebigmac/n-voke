@@ -85,8 +85,8 @@ impl Core {
         let destination = summaries.pop().expect("two servers");
         let source_summary = summaries.pop().expect("two servers");
 
-        let source_units = self.ncentral_org_units(&source.id).await.map_err(|e| format!("{}: {e}", source.label))?;
-        let dest_units = if dest.id == source.id { source_units.clone() } else { self.ncentral_org_units(&dest.id).await.map_err(|e| format!("{}: {e}", dest.label))? };
+        let source_units = self.org_units_cached(&source.id).await.map_err(|e| format!("{}: {e}", source.label))?;
+        let dest_units = if dest.id == source.id { source_units.clone() } else { self.org_units_cached(&dest.id).await.map_err(|e| format!("{}: {e}", dest.label))? };
         let mut mapping = auto_map(&source_units, &dest_units);
         if let Some(project) = project {
             apply_overrides(&mut mapping, &project.mapping_overrides);
@@ -106,7 +106,7 @@ impl Core {
         }
         let mut devices: BTreeMap<String, Device> = BTreeMap::new();
         for customer in customers {
-            for device in self.ncentral_org_unit_devices(&source.id, &customer.org_unit_id).await.map_err(|e| format!("{}: {e}", source.label))? {
+            for device in self.org_unit_devices_cached(&source.id, &customer.org_unit_id).await.map_err(|e| format!("{}: {e}", source.label))? {
                 devices.entry(device.device_id.clone()).or_insert(device);
             }
         }
@@ -116,7 +116,7 @@ impl Core {
         let now = Utc::now();
         let mut tokens = HashMap::new();
         for target in token_targets(&devices, &mapping) {
-            match self.ncentral_registration_token(&dest.id, &target).await {
+            match self.registration_token_cached(&dest.id, &target).await {
                 Ok(token) => {
                     tokens.insert(target, token.status(now, TOKEN_WARNING));
                 }

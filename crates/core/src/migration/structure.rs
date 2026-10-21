@@ -108,20 +108,25 @@ pub fn plan_structure(source: &[OrgUnit], dest: &[OrgUnit], overrides: &HashMap<
 }
 
 impl Core {
-    async fn structure_units(&self, project: &Project) -> Result<(String, Vec<OrgUnit>, Vec<OrgUnit>), String> {
+    /// Both servers' customers and sites. A preview may use what was read a moment ago; creating reads fresh, so that
+    /// something created since (or by someone else) isn't created twice.
+    async fn structure_units(&self, project: &Project, fresh: bool) -> Result<(String, Vec<OrgUnit>, Vec<OrgUnit>), String> {
         if project.source_server_id == project.dest_server_id {
             return Err("This project reinstalls on the same server, so there is nothing to create.".into());
         }
         let (source, dest) = (self.ncentral_server(&project.source_server_id)?, self.ncentral_server(&project.dest_server_id)?);
-        let source_units = self.ncentral_org_units(&source.id).await.map_err(|e| format!("{}: {e}", source.label))?;
-        let dest_units = self.ncentral_org_units(&dest.id).await.map_err(|e| format!("{}: {e}", dest.label))?;
+        if fresh {
+            super::readcache::forget_server(&dest.id);
+        }
+        let source_units = self.org_units_cached(&source.id).await.map_err(|e| format!("{}: {e}", source.label))?;
+        let dest_units = self.org_units_cached(&dest.id).await.map_err(|e| format!("{}: {e}", dest.label))?;
         Ok((dest.host, source_units, dest_units))
     }
 
     /// What creating the missing structure would do. Nothing is written.
     pub async fn migration_structure_preview(&self, id: &str, only: Option<Vec<String>>) -> Result<StructurePreview, String> {
         let project = self.migration_load(id).await?.ok_or_else(|| format!("There is no migration project {id}."))?;
-        let (host, source, dest) = self.structure_units(&project).await?;
+        let (host, source, dest) = self.structure_units(&project, false).await?;
         let only: Option<HashSet<String>> = only.map(|o| o.into_iter().collect());
         let (customers, sites, skipped) = plan_structure(&source, &dest, &project.mapping_overrides, only.as_ref());
         let service_orgs = dest.iter().filter(|u| u.org_unit_type == OrgUnitType::ServiceOrg).map(|u| ServiceOrgChoice { id: u.org_unit_id.clone(), name: u.org_unit_name.clone() }).collect();
@@ -133,7 +138,7 @@ impl Core {
     /// nothing is sent.
     pub async fn migration_structure_create(&self, id: &str, instance: &str, service_org_id: &str, only: Option<Vec<String>>, dry_run: bool) -> Result<StructureReport, String> {
         let mut project = self.migration_open_for_write(id, instance).await?;
-        let (host, source, dest) = self.structure_units(&project).await?;
+        let (host, source, dest) = self.structure_units(&project, true).await?;
         if !dest.iter().any(|u| u.org_unit_type == OrgUnitType::ServiceOrg && u.org_unit_id == service_org_id) {
             return Err("Choose one of the destination's service organizations to create the customers under.".into());
         }
@@ -199,6 +204,10 @@ impl Core {
                 Ok(tokens) => report.tokens_generated = tokens.generated.len(),
                 Err(e) => report.failed.push(("Registration tokens".into(), e)),
             }
+        }
+        if created {
+            super::readcache::forget_server(&project.dest_server_id);
+            super::trackview::forget_names(&project.dest_server_id);
         }
         super::planview::forget_plan(id);
         Ok(report)
@@ -313,6 +322,19 @@ mod tests {
         assert_eq!((preview.customers.len(), preview.sites.len(), preview.dest_host.as_str()), (2, 3, "dst.example.com"));
         assert_eq!(preview.service_orgs, [ServiceOrgChoice { id: "100".into(), name: "New SO".into() }]);
         assert!(fake.paths().iter().all(|p| !p.starts_with("POST api/service-orgs") && !p.starts_with("POST api/customers")));
+    }
+
+    #[tokio::test]
+    async fn a_preview_asked_again_reads_the_servers_once_and_reading_again_reads_them_again() {
+        let fake = lab("");
+        let (core, id) = setup(&fake).await;
+        let reads = || fake.paths().iter().filter(|p| p.starts_with("GET api/org-units")).count();
+        core.migration_structure_preview(&id, None).await.unwrap();
+        core.migration_structure_preview(&id, Some(vec!["22".into()])).await.unwrap();
+        assert_eq!(reads(), 2, "one read of each server for two previews");
+        core.migration_forget_reads(&id).await.unwrap();
+        core.migration_structure_preview(&id, None).await.unwrap();
+        assert_eq!(reads(), 4);
     }
 
     #[tokio::test]

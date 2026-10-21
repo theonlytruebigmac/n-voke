@@ -23,6 +23,12 @@ pub struct WaveRow {
     pub devices: usize,
     /// Still `Planned`: these are what launching would send.
     pub waiting: usize,
+    /// Moved and fully working (Ecoverse is receiving the asset data too, where it is expected).
+    pub working: usize,
+    /// On their way: launched, staged, moving, on the new server, or waiting for Ecoverse's data.
+    pub moving: usize,
+    /// Stuck, lost, failed, or waiting for a choice.
+    pub needs_you: usize,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -140,12 +146,17 @@ pub fn launch_view(project: &Project) -> LaunchView {
         .iter()
         .map(|w| {
             let members = project.devices.iter().filter(|d| d.wave == Some(w.number));
+            let group = |d: &&super::project::ProjectDevice| super::trackview::TrackGroup::of(d.stage, project.waiting_for_ecoverse(d));
+            let needs = |d: &&super::project::ProjectDevice| d.stage.needs_attention() || !d.match_candidates.is_empty();
             WaveRow {
                 number: w.number,
                 label: w.label.clone(),
                 launched_at: w.launched_at.clone(),
                 devices: members.clone().count(),
-                waiting: members.filter(|d| d.stage == Stage::Planned).count(),
+                waiting: members.clone().filter(|d| d.stage == Stage::Planned).count(),
+                working: members.clone().filter(|d| !needs(d) && matches!(group(d), Some(super::trackview::TrackGroup::Healthy | super::trackview::TrackGroup::Done))).count(),
+                moving: members.clone().filter(|d| !needs(d) && matches!(group(d), Some(super::trackview::TrackGroup::Launched | super::trackview::TrackGroup::Staged | super::trackview::TrackGroup::Moving | super::trackview::TrackGroup::OnNew | super::trackview::TrackGroup::Waiting))).count(),
+                needs_you: members.filter(|d| needs(d)).count(),
             }
         })
         .collect();
@@ -200,7 +211,7 @@ pub fn launch_preview(project: &Project, wave: u32, package: &Package, dest_host
 
 impl Core {
     pub async fn migration_launch_view(&self, id: &str) -> Result<LaunchView, String> {
-        let project = self.migration_load(id).await?.ok_or_else(|| format!("There is no migration project {id}."))?;
+        let project = self.migration_load_shared(id).await?.ok_or_else(|| format!("There is no migration project {id}."))?;
         Ok(launch_view(&project))
     }
 
@@ -214,8 +225,8 @@ impl Core {
 
     /// The devices waiting for a wave, to choose from.
     pub async fn migration_wave_candidates(&self, id: &str, query: &CandidateQuery) -> Result<CandidatePage, String> {
-        let project = self.migration_load(id).await?.ok_or_else(|| format!("There is no migration project {id}."))?;
-        let names = self.unit_names(&project.source_server_id).await;
+        let project = self.migration_load_shared(id).await?.ok_or_else(|| format!("There is no migration project {id}."))?;
+        let (names, _) = self.names_for(&project).await;
         Ok(wave_candidates(&project, &names, query))
     }
 
@@ -231,11 +242,11 @@ impl Core {
     }
 
     pub async fn migration_launch_preview(&self, id: &str, wave: u32) -> Result<LaunchPreview, String> {
-        let project = self.migration_load(id).await?.ok_or_else(|| format!("There is no migration project {id}."))?;
+        let project = self.migration_load_shared(id).await?.ok_or_else(|| format!("There is no migration project {id}."))?;
         let dest = self.ncentral_server(&project.dest_server_id)?;
-        // Names are a nicety: when the destination can't be read the ID is shown instead.
-        let units = self.ncentral_org_units(&dest.id).await.unwrap_or_default();
-        let name = |unit: &str| units.iter().find(|u| u.org_unit_id == unit).map_or_else(|| format!("#{unit}"), |u| u.org_unit_name.clone());
+        // Names are a nicety: kept on the devices, else the destination is read, else the ID is shown.
+        let (_, units) = self.names_for(&project).await;
+        let name = |unit: &str| units.get(unit).cloned().unwrap_or_else(|| format!("#{unit}"));
         launch_preview(&project, wave, &Package::embedded()?, &dest.host, &name)
     }
 
@@ -304,7 +315,19 @@ mod tests {
         p.devices[0].stage = Stage::Launched;
         let view = launch_view(&p);
         assert_eq!((view.unassigned, view.wave_size), (2, 50));
-        assert_eq!(view.waves, [WaveRow { number: 1, label: "pilot".into(), launched_at: None, devices: 2, waiting: 1 }]);
+        assert_eq!(view.waves, [WaveRow { number: 1, label: "pilot".into(), launched_at: None, devices: 2, waiting: 1, working: 0, moving: 1, needs_you: 0 }]);
+    }
+
+    #[test]
+    fn a_launched_wave_says_how_many_are_working_moving_and_need_the_person() {
+        let mut p = project();
+        p.auto_wave("all", None, chrono::Utc::now()).unwrap();
+        p.devices[0].stage = Stage::Healthy;
+        p.devices[1].stage = Stage::CleanedUp;
+        p.devices[2].stage = Stage::Staged;
+        p.devices[3].stage = Stage::Lost;
+        let w = &launch_view(&p).waves[0];
+        assert_eq!((w.working, w.moving, w.needs_you, w.waiting), (2, 1, 1, 0));
     }
 
     #[test]

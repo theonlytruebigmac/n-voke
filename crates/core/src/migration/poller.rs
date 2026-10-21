@@ -42,6 +42,23 @@ fn pollable(stage: Stage) -> bool {
     matches!(stage, Stage::Launched | Stage::NotPickedUp | Stage::Staged | Stage::StuckStaged | Stage::AgentRemoved | Stage::Lost | Stage::Registered | Stage::Healthy)
 }
 
+/// How long a healthy device that Ecoverse is receiving data from is left alone before it is looked at again.
+const SETTLED_RECHECK: Duration = Duration::minutes(15);
+
+/// Whether the pass has to read anything for this device. A healthy device with no Ecoverse to wait for has nothing left
+/// to find out (its only change is the review period ending, which needs the clock and not a server); one that Ecoverse
+/// is receiving data from is looked at again every quarter of an hour, in case that stops.
+fn needs_reading(device: &ProjectDevice, now: DateTime<Utc>) -> bool {
+    if device.stage != Stage::Healthy {
+        return true;
+    }
+    match device.ecoverse {
+        Some(EcoState::NotLinked) => false,
+        Some(EcoState::Reporting) => device.ecoverse_read_at.as_deref().and_then(|at| DateTime::parse_from_rfc3339(at).ok()).is_none_or(|at| now - at.with_timezone(&Utc) >= SETTLED_RECHECK),
+        _ => true,
+    }
+}
+
 fn age(now: DateTime<Utc>, at: Option<DateTime<Utc>>) -> Option<Duration> {
     at.map(|t| (now - t).max(Duration::zero()))
 }
@@ -74,7 +91,9 @@ impl Core {
         if work.is_empty() {
             return report;
         }
-        let observed = self.observe(project, &work, now, &mut report).await;
+        let (read, settled): (Vec<usize>, Vec<usize>) = work.iter().partition(|&&i| needs_reading(&project.devices[i], now));
+        let mut observed = self.observe(project, &read, now, &mut report).await;
+        observed.extend(settled.into_iter().map(|i| (i, Observation::default(), Found::default())));
 
         let ctx = Context {
             now,
@@ -96,6 +115,7 @@ impl Core {
             }
             if let Some(state) = observation.dest_ecoverse {
                 device.ecoverse = Some(state);
+                device.ecoverse_read_at = Some(super::project::stamp(now));
             }
             let from = device.stage;
             for step in advance(device, &observation, &ctx) {
@@ -182,6 +202,7 @@ impl Core {
                     Some(Ok(map)) => {
                         if let Some(asset) = device.asset_id.as_ref().and_then(|a| map.get(a)) {
                             obs.source_connected = Some(asset.connected());
+                            obs.source_data_pending = asset.connected() && !asset.has_data();
                             obs.source_disconnected = matches!(device.stage, Stage::Staged | Stage::StuckStaged) && !asset.connected();
                         }
                     }
@@ -285,7 +306,7 @@ impl Core {
             if !is_new && !same_name {
                 continue;
             }
-            let mut identity = self.ncentral_device_identity(&project.dest_server_id, &listed_device.device_id).await.unwrap_or_default();
+            let mut identity = self.device_identity_cached(&project.dest_server_id, &listed_device.device_id).await.unwrap_or_default();
             identity.hostname.get_or_insert_with(|| listed_device.name().to_string());
             candidates.push(Candidate { device_id: listed_device.device_id.clone(), identity, new_since_launch: is_new });
         }
@@ -644,9 +665,13 @@ mod tests {
         core.migration_poll_at(&mut p, &t, now()).await;
         assert_eq!((p.devices[0].ecoverse, p.ecoverse_waiting()), (Some(EcoState::Reporting), 0));
 
-        // No asset for it at all.
+        // A device Ecoverse is receiving data from isn't looked at again for a while, whatever Ecoverse now says.
         serve(&core, vec![]);
-        core.migration_poll_at(&mut p, &t, now()).await;
+        core.migration_poll_at(&mut p, &t, now() + Duration::minutes(5)).await;
+        assert_eq!(p.devices[0].ecoverse, Some(EcoState::Reporting), "left alone inside the recheck time");
+
+        // No asset for it at all, once the recheck time has passed.
+        core.migration_poll_at(&mut p, &t, now() + Duration::minutes(16)).await;
         assert_eq!(p.devices[0].ecoverse, Some(EcoState::NotSeen));
 
         // A destination that isn't linked has nothing to wait for.

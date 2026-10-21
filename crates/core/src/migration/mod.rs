@@ -17,6 +17,7 @@ pub mod planview;
 pub mod prepare;
 pub mod poller;
 pub mod project;
+pub mod readcache;
 pub mod report;
 pub mod store;
 pub mod retire;
@@ -26,3 +27,15 @@ pub mod survey;
 pub mod tracker;
 pub mod trackview;
 pub mod workflow;
+
+/// Drops everything the migration code keeps in memory: parsed projects, plans, and what was read from the servers.
+pub(crate) fn forget_all_memory() {
+    store::forget_all_projects();
+    planview::forget_all_plans();
+    readcache::forget_everything();
+    trackview::forget_all_names();
+}
+
+pub(crate) fn forget_names_of(server_id: &str) {
+    trackview::forget_names(server_id);
+}

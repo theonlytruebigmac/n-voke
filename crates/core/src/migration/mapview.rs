@@ -242,8 +242,8 @@ pub fn map_details(devices: &[Device], source_units: &[OrgUnit], dest_units: &[O
 impl Core {
     async fn migration_units(&self, project: &Project) -> Result<(String, String, Vec<OrgUnit>, Vec<OrgUnit>), String> {
         let (source, dest) = (self.ncentral_server(&project.source_server_id)?, self.ncentral_server(&project.dest_server_id)?);
-        let source_units = self.ncentral_org_units(&source.id).await.map_err(|e| format!("{}: {e}", source.label))?;
-        let dest_units = if dest.id == source.id { source_units.clone() } else { self.ncentral_org_units(&dest.id).await.map_err(|e| format!("{}: {e}", dest.label))? };
+        let source_units = self.org_units_cached(&source.id).await.map_err(|e| format!("{}: {e}", source.label))?;
+        let dest_units = if dest.id == source.id { source_units.clone() } else { self.org_units_cached(&dest.id).await.map_err(|e| format!("{}: {e}", dest.label))? };
         Ok((source.label, dest.label, source_units, dest_units))
     }
 
@@ -268,7 +268,7 @@ impl Core {
 
         let mut by_id: HashMap<String, Device> = HashMap::new();
         for customer in source_units.iter().filter(|u| u.org_unit_type == OrgUnitType::Customer) {
-            for device in self.ncentral_org_unit_devices(&project.source_server_id, &customer.org_unit_id).await.map_err(|e| format!("{source_label}: {e}"))? {
+            for device in self.org_unit_devices_cached(&project.source_server_id, &customer.org_unit_id).await.map_err(|e| format!("{source_label}: {e}"))? {
                 by_id.entry(device.device_id.clone()).or_insert(device);
             }
         }
@@ -277,7 +277,7 @@ impl Core {
         let now = Utc::now();
         let (mut statuses, mut warnings) = (HashMap::new(), vec![]);
         for target in token_targets(&devices, &mapping) {
-            match self.ncentral_registration_token(&project.dest_server_id, &target).await {
+            match self.registration_token_cached(&project.dest_server_id, &target).await {
                 Ok(token) => {
                     statuses.insert(target, token.status(now, TOKEN_WARNING));
                 }

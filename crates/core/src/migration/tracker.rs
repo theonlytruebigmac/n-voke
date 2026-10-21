@@ -15,6 +15,9 @@ use crate::ncentral::model::DeviceIdentity;
 pub struct Thresholds {
     /// A launch on a connected device with no execution yet.
     pub not_picked_up: Duration,
+    /// The same, when the device's Ecoverse asset is connected but hasn't sent any data yet: scripts are held until its
+    /// first inventory, which can take much longer than a launch normally waits.
+    pub data_pending_grace: Duration,
     /// Staged, but the source agent still checks in.
     pub stuck_staged: Duration,
     /// Agent removed, nothing on the destination.
@@ -31,6 +34,7 @@ impl Default for Thresholds {
     fn default() -> Self {
         Self {
             not_picked_up: Duration::minutes(30),
+            data_pending_grace: Duration::minutes(60),
             stuck_staged: Duration::minutes(90),
             lost: Duration::hours(4),
             ecoverse_not_moved: Duration::minutes(75),
@@ -71,6 +75,8 @@ pub struct Observation {
     pub source_connected: Option<bool>,
     /// The source's Ecoverse asset has gone `DISCONNECTED` since staging. The strongest sign the cleanup has begun.
     pub source_disconnected: bool,
+    /// The source's Ecoverse asset is `CONNECTED` but has sent no asset data yet, so Ecoverse holds its scripts.
+    pub source_data_pending: bool,
     /// Age of the device's last check-in to the source server (zoned), if known.
     pub source_checkin_age: Option<Duration>,
     /// A matching device on the destination. For a reinstall this is the same record as the source.
@@ -134,6 +140,21 @@ fn agent_gone(device: &ProjectDevice, obs: &Observation, ctx: &Context) -> bool 
     obs.source_disconnected || arrived || quiet_counts
 }
 
+/// How long a launch may wait before it counts as not picked up: longer while the device's Ecoverse asset is still
+/// sending its first inventory, because Ecoverse holds scripts until then.
+fn wait_for_pickup(t: &Thresholds, obs: &Observation) -> Duration {
+    if obs.source_data_pending { t.not_picked_up.max(t.data_pending_grace) } else { t.not_picked_up }
+}
+
+fn pickup_reason(waited: Duration, obs: &Observation) -> String {
+    let minutes = waited.num_minutes();
+    if obs.source_data_pending {
+        format!("connected, but Ecoverse had still not received its asset data and no run started {minutes} minutes after the launch")
+    } else {
+        format!("connected, but no run started {minutes} minutes after the launch")
+    }
+}
+
 /// The next single stage change for this device, or None if it stays where it is.
 fn next_step(device: &ProjectDevice, obs: &Observation, ctx: &Context) -> Option<Step> {
     let t = ctx.thresholds;
@@ -146,8 +167,8 @@ fn next_step(device: &ProjectDevice, obs: &Observation, ctx: &Context) -> Option
             Some(LaunchOutcome::Failed(reason)) => step(Stage::LaunchFailed, reason.clone()),
             Some(LaunchOutcome::Running) if device.stage == Stage::NotPickedUp => step(Stage::Launched, "the launch is running"),
             // A queued launch for a device that's offline looks the same as a stalled one, so only a connected device is flagged.
-            Some(LaunchOutcome::NoExecution) | None if device.stage == Stage::Launched && obs.source_connected == Some(true) && waited >= t.not_picked_up => {
-                step(Stage::NotPickedUp, format!("connected, but no run started {} minutes after the launch", waited.num_minutes()))
+            Some(LaunchOutcome::NoExecution) | None if device.stage == Stage::Launched && obs.source_connected == Some(true) && waited >= wait_for_pickup(t, obs) => {
+                step(Stage::NotPickedUp, pickup_reason(waited, obs))
             }
             _ => None,
         },
@@ -348,6 +369,20 @@ mod tests {
         assert_eq!(stages(queued(30, Some(true))), [Stage::NotPickedUp]);
         assert!(queued(600, Some(false)).is_empty(), "a queued launch for an offline device waits, however long");
         assert!(queued(600, None).is_empty(), "unknown connectivity isn't flagged");
+    }
+
+    #[test]
+    fn a_launch_waits_an_hour_while_the_assets_data_is_still_pending_and_says_why() {
+        let t = Thresholds::default();
+        let queued = |minutes, pending| {
+            let obs = Observation { launch: Some(LaunchOutcome::NoExecution), source_connected: Some(true), source_data_pending: pending, ..Default::default() };
+            advance(&device(Stage::Launched, minutes, DeliveryPath::Ecoverse), &obs, &ctx(&t))
+        };
+        assert!(queued(45, true).is_empty(), "Ecoverse holds scripts until the first inventory, so 45 minutes isn't long yet");
+        assert_eq!(stages(queued(45, false)), [Stage::NotPickedUp], "with its data in, 45 minutes is");
+        let late = queued(60, true);
+        assert_eq!(stages(late.clone()), [Stage::NotPickedUp]);
+        assert!(late[0].why.contains("asset data"), "{}", late[0].why);
     }
 
     #[test]

@@ -586,10 +586,39 @@ impl Core {
 
     /// Deletes all stored history and cached data (not the audit log or settings).
     pub async fn clear_local_data(&self) -> Result<(), String> {
-        let result = match fs::remove_dir_all(self.paths.store_dir()) {
+        // Migration projects first: each one's data key is destroyed, then every file is overwritten and removed.
+        let dir = self.paths.store_dir();
+        let secrets = self.secrets.clone();
+        let shredded = blocking(move || {
+            let entries = match fs::read_dir(&dir) {
+                Ok(e) => e,
+                Err(_) => return Ok(()),
+            };
+            let mut first_error = None;
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if let Some(id) = name.strip_prefix("migration-").and_then(|n| n.strip_suffix(".enc")).filter(|n| !n.starts_with("lease-"))
+                    && let Err(e) = secrets.delete(&migration::store::project_key_account(id))
+                {
+                    first_error.get_or_insert(e);
+                }
+                if entry.path().is_file()
+                    && let Err(e) = vault::shred_file(&entry.path())
+                {
+                    first_error.get_or_insert(e);
+                }
+            }
+            first_error.map_or(Ok(()), Err)
+        })
+        .await;
+        migration::forget_all_memory();
+        let result = match shredded.and_then(|()| match fs::remove_dir_all(self.paths.store_dir()) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(format!("Couldn't clear local data: {e}")),
+        }) {
+            Ok(()) => Ok(()),
+            Err(e) => Err(e),
         };
         self.audit.append(&AuditEntry::new("data.clear", "Cleared run history and cached data", result.clone(), Value::Null));
         result

@@ -77,6 +77,8 @@ impl Core {
             rest_script_ready: true,
         };
         super::planview::forget_plan(&project.id);
+        // What is about to be decided is which tokens are missing, so that is read fresh, and again after creating any.
+        super::readcache::forget_server(&project.dest_server_id);
         let survey = self.migration_survey(&options, Some(project)).await?;
         let name = |id: &str| survey.dest_units.iter().find(|u| u.org_unit_id == id).map_or_else(|| id.to_string(), |u| u.org_unit_name.clone());
         let mut report = TokenReport::default();
@@ -92,6 +94,9 @@ impl Core {
                 TokenStatus::Expired { .. } => report.expired.push(name(unit)),
                 _ => report.already_fine += 1,
             }
+        }
+        if !report.generated.is_empty() {
+            super::readcache::forget_server(&project.dest_server_id);
         }
         Ok(report)
     }
@@ -177,6 +182,7 @@ impl Core {
         let ready: Vec<_> = survey.planned.iter().filter(|d| d.is_ready()).cloned().collect();
         let before = project.devices.len();
         let added = project.add_planned(&ready, chrono::Utc::now());
+        project.fill_names(&survey.source_units, &survey.dest_units);
         let mut report = PlanIntoReport { added, already_in: ready.len() - (project.devices.len() - before), warnings: survey.warnings.clone(), ..Default::default() };
         report.blocked = survey.planned.iter().filter(|d| !d.is_ready() && !d.excluded).map(|d| (d.name.clone(), d.blockers.iter().map(|b| b.message().to_string()).collect())).collect();
         Ok((report, survey))

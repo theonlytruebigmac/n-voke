@@ -64,6 +64,7 @@ impl MigrationSettings {
     pub fn thresholds(&self) -> Thresholds {
         Thresholds {
             not_picked_up: Duration::minutes(i64::from(self.not_picked_up_minutes)),
+            data_pending_grace: Thresholds::default().data_pending_grace,
             stuck_staged: Duration::minutes(i64::from(self.stuck_staged_minutes)),
             lost: Duration::minutes(i64::from(self.lost_minutes)),
             ecoverse_not_moved: Duration::minutes(i64::from(self.ecoverse_not_moved_minutes)),

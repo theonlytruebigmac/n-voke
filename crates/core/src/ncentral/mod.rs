@@ -275,6 +275,8 @@ impl Core {
         config.ncentral_servers.retain(|s| s.id != id);
         self.save_config(&config)?;
         self.rest.forget(&server.host);
+        crate::migration::readcache::forget_server(&server.id);
+        crate::migration::forget_names_of(&server.id);
         Ok(())
     }
 }

@@ -7,7 +7,11 @@
 //! read-only. The lease is advisory: it stops the common case of two windows
 //! open, not two writers racing within the same second.
 
-use std::{collections::BTreeMap, fs};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fs,
+    sync::{Arc, Mutex, OnceLock},
+};
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -72,8 +76,42 @@ pub fn lease_available(existing: Option<&Lease>, instance: &str, now: DateTime<U
     }
 }
 
+/// The modified time and size of a file, which change whenever a project is saved.
+type FileStamp = (std::time::SystemTime, u64);
+
+fn file_stamp(path: &std::path::Path) -> Option<FileStamp> {
+    let meta = fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
+}
+
+fn project_cache() -> &'static Mutex<HashMap<String, (FileStamp, Arc<Project>)>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, (FileStamp, Arc<Project>)>>> = OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// The keychain account holding one project's own data key.
+pub(crate) fn project_key_account(id: &str) -> String {
+    format!("migration-key:{id}")
+}
+
 fn project_store(id: &str) -> String {
     format!("{PROJECT_PREFIX}{id}")
+}
+
+pub(crate) fn forget_all_projects() {
+    project_cache().lock().unwrap().clear();
+}
+
+/// What the app keeps in memory for a project: the parsed copy, the plan, and what it read of the two servers.
+fn forget_project_memory(id: &str, servers: Option<(&str, &str)>) {
+    project_cache().lock().unwrap().retain(|path, _| !path.contains(&format!("{PROJECT_PREFIX}{id}.")));
+    super::planview::forget_plan(id);
+    if let Some((source, dest)) = servers {
+        for server in [source, dest] {
+            super::readcache::forget_server(server);
+            super::trackview::forget_names(server);
+        }
+    }
 }
 
 fn lease_store(id: &str) -> String {
@@ -103,29 +141,104 @@ impl Core {
 
     /// Saves the project, unless what's stored is newer than the copy being saved (another window saved in between).
     pub async fn migration_save(&self, project: &mut Project) -> Result<(), String> {
-        #[derive(serde::Deserialize)]
-        struct Stored {
-            #[serde(default)]
-            revision: u64,
-        }
         let name = project_store(&project.id);
-        if let Some(stored) = self.store_get(&name).await?.and_then(|t| serde_json::from_str::<Stored>(&t).ok())
-            && stored.revision != project.revision
+        // What is stored comes from memory when the file hasn't changed, so a save doesn't decrypt and parse it again.
+        let stored = self.migration_load_shared(&project.id).await.ok().flatten().map(|p| p.revision);
+        // A project that has been saved before but isn't there now was deleted: saving it would bring it back, with a new key.
+        if stored.is_none() && project.revision != 0 {
+            return Err(format!("{} was deleted, so it can't be saved.", project.name));
+        }
+        if let Some(stored) = stored
+            && stored != project.revision
         {
             return Err(format!("{} was changed in another N-voke window since this one loaded it, so this save was refused. Close and reopen the project to see what changed.", project.name));
         }
         project.revision += 1;
         let json = serde_json::to_string(&*project).map_err(|e| e.to_string())?;
-        self.store_set(&name, json).await.map_err(|e| {
+        self.project_file_write(&project.id, json).await.map_err(|e| {
             project.revision -= 1;
             format!("Could not save the project: {e}")
+        })?;
+        // What was just saved is what the next screen will ask for.
+        if let Ok(path) = self.paths.store_file(&name)
+            && let Some(stamp) = file_stamp(&path)
+        {
+            project_cache().lock().unwrap().insert(path.display().to_string(), (stamp, Arc::new(project.clone())));
+        }
+        Ok(())
+    }
+
+    /// The project's own data key, made on first use when `create` is set. Held with the other secrets in the system
+    /// keychain, so destroying it is what makes the project unrecoverable.
+    async fn project_key(&self, id: &str, create: bool) -> Result<Option<Vec<u8>>, String> {
+        use base64::{Engine, engine::general_purpose::STANDARD as B64};
+        let secrets = self.secrets.clone();
+        let account = project_key_account(id);
+        crate::blocking(move || {
+            if let Some(stored) = secrets.get(&account)? {
+                return B64.decode(stored.trim()).map(Some).map_err(|_| "The project's data key is corrupt.".to_string());
+            }
+            if !create {
+                return Ok(None);
+            }
+            let key = crate::vault::Vault::new_own_key();
+            secrets.set(&account, &B64.encode(&key))?;
+            Ok(Some(key))
         })
+        .await
+    }
+
+    /// The project file's text. A file sealed under the project's own key needs that key; one written before projects
+    /// had their own (sealed under the app's data key) is read as it was and moves to its own key the next time it is saved.
+    async fn project_file_read(&self, id: &str) -> Result<Option<String>, String> {
+        let path = self.paths.store_file(&project_store(id))?;
+        let bytes = match fs::read(&path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("Couldn't read {}: {e}", path.display())),
+        };
+        if crate::vault::Vault::is_own_key(&bytes) {
+            let key = self.project_key(id, false).await?.ok_or("This project's data key has been destroyed, so its data can't be read.")?;
+            let text = crate::vault::Vault::open_own(&key, &bytes)?;
+            return String::from_utf8(text).map(Some).map_err(|e| e.to_string());
+        }
+        self.store_get(&project_store(id)).await
+    }
+
+    async fn project_file_write(&self, id: &str, text: String) -> Result<(), String> {
+        let path = self.paths.store_file(&project_store(id))?;
+        let key = self.project_key(id, true).await?.ok_or("The project's data key could not be made.")?;
+        crate::blocking(move || crate::vault::write_private(&path, &crate::vault::Vault::seal_own(&key, text.as_bytes())?)).await
     }
 
     pub async fn migration_load(&self, id: &str) -> Result<Option<Project>, String> {
-        match self.store_get(&project_store(id)).await? {
-            None => Ok(None),
-            Some(text) => serde_json::from_str(&text).map(Some).map_err(|e| format!("The project {id} couldn't be read: {e}")),
+        Ok(self.migration_load_shared(id).await?.map(|p| (*p).clone()))
+    }
+
+    /// The project as last saved, shared: for the screens that only look. Decrypting and parsing a project of thousands
+    /// of devices takes a noticeable moment and every screen asks, so the parsed project is kept in memory for as long as
+    /// its file is unchanged (the file's modified time and size are checked on each ask, so another window's save shows).
+    pub async fn migration_load_shared(&self, id: &str) -> Result<Option<Arc<Project>>, String> {
+        let path = self.paths.store_file(&project_store(id))?;
+        let key = path.display().to_string();
+        let stamp = file_stamp(&path);
+        if let (Some(stamp), Some((kept, project))) = (stamp, project_cache().lock().unwrap().get(&key).cloned())
+            && kept == stamp
+        {
+            return Ok(Some(project));
+        }
+        match self.project_file_read(id).await? {
+            None => {
+                project_cache().lock().unwrap().remove(&key);
+                Ok(None)
+            }
+            Some(text) => {
+                let project: Arc<Project> = Arc::new(serde_json::from_str(&text).map_err(|e| format!("The project {id} couldn't be read: {e}"))?);
+                if let Some(stamp) = stamp {
+                    project_cache().lock().unwrap().insert(key, (stamp, project.clone()));
+                }
+                Ok(Some(project))
+            }
         }
     }
 
@@ -143,7 +256,7 @@ impl Core {
         };
         let mut summaries = Vec::new();
         for name in names {
-            if let Some(project) = self.migration_load(&name[PROJECT_PREFIX.len()..]).await.ok().flatten() {
+            if let Some(project) = self.migration_load_shared(&name[PROJECT_PREFIX.len()..]).await.ok().flatten() {
                 summaries.push(ProjectSummary::of(&project));
             }
         }
@@ -153,7 +266,7 @@ impl Core {
 
     /// One project's summary, for a header.
     pub async fn migration_summary(&self, id: &str) -> Result<ProjectSummary, String> {
-        self.migration_load(id).await?.map(|p| ProjectSummary::of(&p)).ok_or_else(|| "That project no longer exists.".to_string())
+        self.migration_load_shared(id).await?.map(|p| ProjectSummary::of(&p)).ok_or_else(|| "That project no longer exists.".to_string())
     }
 
     /// The name of a project that uses this server as its source or destination, if any. Such a server can't be
@@ -162,12 +275,53 @@ impl Core {
         Ok(self.migration_list().await?.into_iter().find(|p| p.source_server_id == server_id || p.dest_server_id == server_id).map(|p| p.name))
     }
 
-    /// Deletes a project's local history. The audit log keeps its entries.
+    /// Destroys a project's data on this computer. In this order: the project's own data key is removed from the
+    /// keychain (after which the file can't be read by anything, including a copy in a backup); the file is overwritten
+    /// and deleted along with its lease and any leftover temporary or set-aside copy; and everything the app kept in
+    /// memory for it is dropped. The audit log keeps its entries, which record that the project was deleted and name
+    /// no devices. Nothing on the servers or the devices changes.
     pub async fn migration_delete(&self, id: &str) -> Result<(), String> {
-        let name = self.migration_load(id).await?.map(|p| p.name).ok_or("That project no longer exists.")?;
-        let result = self.store_remove(&project_store(id)).await.and(self.store_remove(&lease_store(id)).await);
-        self.record(&AuditEntry::new("migration.project.delete", &format!("Deleted migration project {name}"), result.clone(), json!({ "project": id })));
+        let project = self.migration_load_shared(id).await.ok().flatten();
+        // A project that can't be read (its key is already gone) can still be removed.
+        let name = project.as_ref().map_or_else(|| id.to_string(), |p| p.name.clone());
+        let servers = project.as_ref().map(|p| (p.source_server_id.clone(), p.dest_server_id.clone()));
+        let had_own_key = self.project_key(id, false).await.ok().flatten().is_some();
+        let file_there = self.paths.store_file(&project_store(id)).is_ok_and(|p| p.exists());
+        if project.is_none() && !had_own_key && !file_there {
+            return Err("That project no longer exists.".into());
+        }
+        let result = self.destroy_project_files(id).await;
+        forget_project_memory(id, servers.as_ref().map(|(a, b)| (a.as_str(), b.as_str())));
+        let how = if had_own_key { "data key destroyed, file overwritten and removed" } else { "file overwritten and removed (a project from before projects had their own key)" };
+        self.record(&AuditEntry::new("migration.project.delete", &format!("Deleted migration project {name}: {how}"), result.clone(), json!({ "project": id })));
         result
+    }
+
+    /// The key first, so that nothing that survives the overwrite can be read, then the files.
+    async fn destroy_project_files(&self, id: &str) -> Result<(), String> {
+        let secrets = self.secrets.clone();
+        let account = project_key_account(id);
+        crate::blocking(move || secrets.delete(&account)).await?;
+        let dir = self.paths.store_dir();
+        let prefixes = [format!("{PROJECT_PREFIX}{id}."), format!("{LEASE_PREFIX}{id}.")];
+        crate::blocking(move || {
+            let entries = match fs::read_dir(&dir) {
+                Ok(e) => e,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(e) => return Err(format!("Couldn't read {}: {e}", dir.display())),
+            };
+            let mut first_error = None;
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if prefixes.iter().any(|p| name.starts_with(p.as_str()))
+                    && let Err(e) = crate::vault::shred_file(&entry.path())
+                {
+                    first_error.get_or_insert(e);
+                }
+            }
+            first_error.map_or(Ok(()), Err)
+        })
+        .await
     }
 
     /// Takes (or renews) the project's lease for this app instance. False means another
@@ -262,7 +416,7 @@ mod tests {
         assert_eq!(core.migration_list().await.unwrap().len(), 1);
         assert!(core.migration_delete(&second.id).await.is_err());
         let log = core.audit_log(None).unwrap().entries;
-        assert!(log.iter().any(|e| e.action == "migration.project.delete" && e.summary == "Deleted migration project Globex move"));
+        assert!(log.iter().any(|e| e.action == "migration.project.delete" && e.summary.starts_with("Deleted migration project Globex move")));
     }
 
     #[tokio::test]
@@ -275,6 +429,30 @@ mod tests {
         assert_eq!(core.migration_project_using_server(&other).await.unwrap(), None);
         core.migration_delete(&project.id).await.unwrap();
         assert_eq!(core.migration_project_using_server(&src).await.unwrap(), None, "free again once the project is gone");
+    }
+
+    #[tokio::test]
+    async fn a_project_is_parsed_once_until_its_file_changes_and_a_save_shows_at_once() {
+        let (core, src, dst) = core_with_servers().await;
+        let mut project = core.migration_create("Acme move", &src, &dst, DestEcoverse::NotLinked).await.unwrap();
+        let first = core.migration_load_shared(&project.id).await.unwrap().unwrap();
+        let again = core.migration_load_shared(&project.id).await.unwrap().unwrap();
+        assert!(Arc::ptr_eq(&first, &again), "the second look reuses what was parsed");
+
+        project.name = "Renamed".into();
+        core.migration_save(&mut project).await.unwrap();
+        let after_save = core.migration_load_shared(&project.id).await.unwrap().unwrap();
+        assert_eq!(after_save.name, "Renamed");
+        assert!(!Arc::ptr_eq(&first, &after_save));
+
+        // Another window saving behind this one's back is seen, because the file's time and size changed.
+        let mut other = (*after_save).clone();
+        other.name = "Changed elsewhere, longer".into();
+        core.store_set(&format!("migration-{}", project.id), serde_json::to_string(&other).unwrap()).await.unwrap();
+        assert_eq!(core.migration_load_shared(&project.id).await.unwrap().unwrap().name, "Changed elsewhere, longer");
+
+        core.migration_delete(&project.id).await.unwrap();
+        assert!(core.migration_load_shared(&project.id).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -341,7 +519,80 @@ mod tests {
             let t = std::time::Instant::now();
             let view = crate::migration::trackview::track_view(&loaded, &Default::default(), &Default::default(), &Default::default());
             let track = t.elapsed();
+            let t = std::time::Instant::now();
+            let _ = core.migration_load_shared(&p.id).await.unwrap().unwrap();
+            let shared = t.elapsed();
+            println!("{count} devices: asked again, from memory {shared:?}");
             println!("{count} devices: file {:.1} MB, save {save:?}, load {load:?}, track page {track:?} (rows {})", size as f64 / 1e6, view.rows.len());
         }
+    }
+
+    #[tokio::test]
+    async fn a_project_is_sealed_under_its_own_key_and_a_deleted_one_cannot_be_read_back_from_a_copy() {
+        let (core, src, dst) = core_with_servers().await;
+        let mut project = core.migration_create("Acme move", &src, &dst, DestEcoverse::NotLinked).await.unwrap();
+        core.migration_save(&mut project).await.unwrap();
+        let path = core.paths.store_file(&format!("migration-{}", project.id)).unwrap();
+        let sealed = std::fs::read(&path).unwrap();
+        assert!(crate::vault::Vault::is_own_key(&sealed), "a project has its own key");
+        assert!(!sealed.windows(9).any(|w| w == b"Acme move"), "and its name isn't readable in the file");
+        assert!(core.secrets.get(&project_key_account(&project.id)).unwrap().is_some());
+
+        let lease = core.paths.store_file(&format!("migration-lease-{}", project.id)).unwrap();
+        assert!(core.migration_lease(&project.id, "app-1").await.unwrap() && lease.exists());
+        // Leftovers of a crashed save and of an unreadable file sit beside it.
+        let tmp = path.with_extension("123.4.tmp");
+        let aside = path.with_extension("unreadable");
+        std::fs::write(&tmp, b"partial").unwrap();
+        std::fs::write(&aside, b"old").unwrap();
+        let other = core.migration_create("Other", &src, &dst, DestEcoverse::NotLinked).await.unwrap();
+        let other_path = core.paths.store_file(&format!("migration-{}", other.id)).unwrap();
+
+        core.migration_delete(&project.id).await.unwrap();
+        assert!(!path.exists() && !lease.exists() && !tmp.exists() && !aside.exists(), "the file, lease and leftovers are gone");
+        assert!(core.secrets.get(&project_key_account(&project.id)).unwrap().is_none(), "the key is destroyed");
+        assert!(other_path.exists() && core.migration_load(&other.id).await.unwrap().is_some(), "another project is untouched");
+        assert!(core.migration_load(&project.id).await.unwrap().is_none());
+
+        // A copy of the file, from a backup say, can no longer be opened.
+        std::fs::write(&path, &sealed).unwrap();
+        let err = core.migration_load(&project.id).await.unwrap_err();
+        assert!(err.contains("key has been destroyed"), "{err}");
+
+        // A window that still holds the project can't save it back into existence.
+        std::fs::remove_file(&path).unwrap();
+        let err = core.migration_save(&mut project).await.unwrap_err();
+        assert!(err.contains("was deleted"), "{err}");
+        assert!(core.secrets.get(&project_key_account(&project.id)).unwrap().is_none(), "and no new key is made");
+    }
+
+    #[tokio::test]
+    async fn a_project_from_before_projects_had_their_own_key_still_opens_and_moves_to_one_on_its_next_save() {
+        let (core, src, dst) = core_with_servers().await;
+        let mut project = Project::new("mig-legacy1".into(), "Old format", &src, &dst, DestEcoverse::NotLinked, Utc::now());
+        core.store_set("migration-mig-legacy1", serde_json::to_string(&project).unwrap()).await.unwrap();
+        let path = core.paths.store_file("migration-mig-legacy1").unwrap();
+        assert!(!crate::vault::Vault::is_own_key(&std::fs::read(&path).unwrap()));
+        assert_eq!(core.migration_load("mig-legacy1").await.unwrap().unwrap().name, "Old format");
+        core.migration_save(&mut project).await.unwrap();
+        assert!(crate::vault::Vault::is_own_key(&std::fs::read(&path).unwrap()));
+        core.migration_delete("mig-legacy1").await.unwrap();
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn clearing_local_data_destroys_every_projects_key_and_removes_its_file() {
+        let (core, src, dst) = core_with_servers().await;
+        let a = core.migration_create("A", &src, &dst, DestEcoverse::NotLinked).await.unwrap();
+        let b = core.migration_create("B", &src, &dst, DestEcoverse::NotLinked).await.unwrap();
+        for p in [&a, &b] {
+            assert!(core.secrets.get(&project_key_account(&p.id)).unwrap().is_some());
+        }
+        core.clear_local_data().await.unwrap();
+        for p in [&a, &b] {
+            assert!(core.secrets.get(&project_key_account(&p.id)).unwrap().is_none());
+            assert!(core.migration_load(&p.id).await.unwrap().is_none());
+        }
+        assert!(!core.paths.store_dir().exists());
     }
 }

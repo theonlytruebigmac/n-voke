@@ -32,6 +32,10 @@ pub(crate) fn forget_plan(project_id: &str) {
     plan_cache().lock().unwrap().remove(project_id);
 }
 
+pub(crate) fn forget_all_plans() {
+    plan_cache().lock().unwrap().clear();
+}
+
 /// What an operator can choose for one device in the plan.
 #[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "DeviceChoice.ts"))]
@@ -210,7 +214,11 @@ impl Core {
     /// Plans the source's devices. Reads both servers (and Ecoverse) the first time, which is slow on a large server, then
     /// works the plan out again from what was read when only the operator's choices change. `refresh` reads again.
     pub async fn migration_plan_view(&self, id: &str, refresh: bool, query: &PlanQuery) -> Result<PlanView, String> {
-        let project = self.migration_load(id).await?.ok_or_else(|| format!("There is no migration project {id}."))?;
+        let project = self.migration_load_shared(id).await?.ok_or_else(|| format!("There is no migration project {id}."))?;
+        if refresh {
+            super::readcache::forget_server(&project.source_server_id);
+            super::readcache::forget_server(&project.dest_server_id);
+        }
         let cached = if refresh { None } else { plan_cache().lock().unwrap().get(id).filter(|(at, _)| at.elapsed() < PLAN_READ_FOR).map(|(_, s)| s.clone()) };
         let survey = match cached {
             Some(mut survey) => {

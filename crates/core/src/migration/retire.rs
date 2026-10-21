@@ -72,7 +72,7 @@ pub fn retire_view(project: &Project, source_host: &str, now: DateTime<Utc>) -> 
 
 impl Core {
     pub async fn migration_retire_view(&self, id: &str) -> Result<RetireView, String> {
-        let project = self.migration_load(id).await?.ok_or_else(|| format!("There is no migration project {id}."))?;
+        let project = self.migration_load_shared(id).await?.ok_or_else(|| format!("There is no migration project {id}."))?;
         let host = self.ncentral_server(&project.source_server_id).map(|s| s.host).unwrap_or_default();
         Ok(retire_view(&project, &host, Utc::now()))
     }

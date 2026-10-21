@@ -154,6 +154,15 @@ pub struct ProjectDevice {
     /// What the destination's Ecoverse showed the last time it was read for this device. None until it has been.
     #[serde(default)]
     pub ecoverse: Option<EcoState>,
+    /// The source customer's and the destination unit's names when the device was planned, so the screens that show them
+    /// (Track, waves) need no read of the servers. A project from before this was kept has none and looks them up.
+    #[serde(default)]
+    pub customer_name: Option<String>,
+    #[serde(default)]
+    pub dest_name: Option<String>,
+    /// When `ecoverse` was last read, so a device Ecoverse is already receiving data from isn't looked at every pass.
+    #[serde(default)]
+    pub ecoverse_read_at: Option<String>,
     pub entered_stage_at: String,
     pub events: Vec<Event>,
 }
@@ -180,6 +189,9 @@ impl ProjectDevice {
             last_error: None,
             launch_unsure: false,
             ecoverse: None,
+            customer_name: None,
+            dest_name: None,
+            ecoverse_read_at: None,
             entered_stage_at: at.clone(),
             events: vec![Event { at, kind: "stage".into(), detail: format!("{stage:?}") }],
         }
@@ -464,6 +476,34 @@ impl Project {
             }
         }
         self.updated_at = stamp(now);
+    }
+
+    /// Remembers the names of the customer and destination unit each device has, from what was just read.
+    pub fn fill_names(&mut self, source: &[crate::ncentral::model::OrgUnit], dest: &[crate::ncentral::model::OrgUnit]) {
+        let find = |units: &[crate::ncentral::model::OrgUnit], id: &str| units.iter().find(|u| u.org_unit_id == id).map(|u| u.org_unit_name.clone());
+        for d in &mut self.devices {
+            if d.customer_name.is_none() {
+                d.customer_name = d.source_customer_id.as_deref().and_then(|id| find(source, id));
+            }
+            if d.dest_name.is_none() {
+                d.dest_name = d.dest_org_unit_id.as_deref().and_then(|id| find(dest, id));
+            }
+        }
+    }
+
+    /// The names kept on the devices, by unit ID: source customers and destination units.
+    pub fn stored_names(&self) -> (HashMap<String, String>, HashMap<String, String>) {
+        let mut source = HashMap::new();
+        let mut dest = HashMap::new();
+        for d in &self.devices {
+            if let (Some(id), Some(name)) = (&d.source_customer_id, &d.customer_name) {
+                source.entry(id.clone()).or_insert_with(|| name.clone());
+            }
+            if let (Some(id), Some(name)) = (&d.dest_org_unit_id, &d.dest_name) {
+                dest.entry(id.clone()).or_insert_with(|| name.clone());
+            }
+        }
+        (source, dest)
     }
 
     /// A wave has been launched, so devices have been sent the migration and the delivery can no longer change.
