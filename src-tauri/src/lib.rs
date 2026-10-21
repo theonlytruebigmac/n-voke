@@ -10,13 +10,16 @@ use nvoke_core::{
         connect::ConnectReport,
         mapping::Override,
         finish::{CleanupReport, FinishView, ReportFormat},
-        launchview::{LaunchPreview, LaunchResult, LaunchView},
+        retire::{RetireReport, RetireView},
+        structure::{StructurePreview, StructureReport},
+        launchview::{CandidatePage, CandidateQuery, LaunchPreview, LaunchResult, LaunchView},
         mapview::{MapDetails, MapView},
-        planview::{PlanAdded, PlanView},
+        planview::{DeviceChoice, PlanAdded, PlanQuery, PlanView},
         prepare::{PrepareView, ScriptSide},
         project::{Delivery, DestEcoverse, ProjectOptions, ScriptOrg},
         store::ProjectSummary,
-        trackview::{DeviceCommand, DeviceDetail, PollDigest, TrackView},
+        settings::MigrationSettings,
+        trackview::{DeviceCommand, DeviceDetail, PollDigest, TrackQuery, TrackView},
         workflow::TokenReport,
     },
     ncentral::{EcoCredential, ServerView, model::ServerInfo},
@@ -161,9 +164,6 @@ impl ProjectLocks {
 #[derive(Default)]
 struct CleanupStops(Mutex<HashSet<String>>);
 
-/// How long the tracker waits between passes.
-const POLL_EVERY: Duration = Duration::from_secs(60);
-
 impl Trackers {
     fn stop(&self, id: &str) {
         if let Some(handle) = self.0.lock().unwrap().remove(id) {
@@ -179,7 +179,7 @@ async fn project_close(core: State<'_, Core>, trackers: State<'_, Trackers>, id:
     core.migration_release_lease(&id, &instance()).await
 }
 
-/// Reads the project's devices now and then every minute, saving what moved, and tells the page after each pass
+/// Reads the project's devices now and then at the interval in the migration settings (a minute by default), saving what moved, and tells the page after each pass
 /// with the `migration-polled` event. It runs only while the project is open.
 #[tauri::command]
 fn tracker_start(app: AppHandle, trackers: State<'_, Trackers>, id: String) {
@@ -197,7 +197,7 @@ fn tracker_start(app: AppHandle, trackers: State<'_, Trackers>, id: String) {
                 Err(error) => serde_json::json!({ "id": task_id, "digest": null, "error": error }),
             };
             let _ = app.emit("migration-polled", payload);
-            tokio::time::sleep(POLL_EVERY).await;
+            tokio::time::sleep(Duration::from_secs(u64::from(core.migration_settings().poll_seconds))).await;
         }
     });
     trackers.0.lock().unwrap().insert(id, handle);
@@ -216,10 +216,29 @@ async fn project_poll(core: State<'_, Core>, locks: State<'_, ProjectLocks>, id:
     core.migration_poll_digest(&id, &instance()).await
 }
 
-/// The source's devices as the plan sees them. Reads both servers, so it takes a moment.
+/// One page of the source's devices as the plan sees them. Reads both servers when `refresh` is set or the last read is
+/// old, so that takes a moment.
 #[tauri::command]
-async fn project_plan(core: State<'_, Core>, id: String) -> Result<PlanView, String> {
-    core.migration_plan_view(&id).await
+async fn project_plan(core: State<'_, Core>, id: String, refresh: bool, query: PlanQuery) -> Result<PlanView, String> {
+    core.migration_plan_view(&id, refresh, &query).await
+}
+
+/// Picks the path for one device, leaves it out, or puts it back.
+#[tauri::command]
+async fn project_device_choice(core: State<'_, Core>, locks: State<'_, ProjectLocks>, id: String, device_id: String, choice: DeviceChoice) -> Result<String, String> {
+    let lock = locks.get(&id);
+    let _held = lock.lock().await;
+    core.migration_device_choice(&id, &instance(), &device_id, choice).await
+}
+
+#[tauri::command]
+fn migration_settings_get(core: State<'_, Core>) -> MigrationSettings {
+    core.migration_settings()
+}
+
+#[tauri::command]
+fn migration_settings_save(core: State<'_, Core>, settings: MigrationSettings) -> Result<MigrationSettings, String> {
+    core.save_migration_settings(settings)
 }
 
 /// Adds the ready devices to the project.
@@ -242,6 +261,20 @@ async fn project_wave_create(core: State<'_, Core>, locks: State<'_, ProjectLock
     core.migration_wave_create(&id, &instance(), &label, max).await
 }
 
+/// The devices that could still go into a new wave, a page at a time.
+#[tauri::command]
+async fn project_wave_candidates(core: State<'_, Core>, id: String, query: CandidateQuery) -> Result<CandidatePage, String> {
+    core.migration_wave_candidates(&id, &query).await
+}
+
+/// A wave of exactly the devices chosen.
+#[tauri::command]
+async fn project_wave_create_from(core: State<'_, Core>, locks: State<'_, ProjectLocks>, id: String, label: String, device_ids: Vec<String>) -> Result<String, String> {
+    let lock = locks.get(&id);
+    let _held = lock.lock().await;
+    core.migration_wave_create_from(&id, &instance(), &label, device_ids).await
+}
+
 #[tauri::command]
 async fn project_wave_preview(core: State<'_, Core>, id: String, wave: u32) -> Result<LaunchPreview, String> {
     core.migration_launch_preview(&id, wave).await
@@ -256,8 +289,8 @@ async fn project_wave_launch(core: State<'_, Core>, locks: State<'_, ProjectLock
 }
 
 #[tauri::command]
-async fn project_track(core: State<'_, Core>, id: String) -> Result<TrackView, String> {
-    core.migration_track_view(&id).await
+async fn project_track(core: State<'_, Core>, id: String, query: TrackQuery) -> Result<TrackView, String> {
+    core.migration_track_view(&id, &query).await
 }
 
 #[tauri::command]
@@ -303,6 +336,34 @@ async fn project_cleanup(app: AppHandle, core: State<'_, Core>, locks: State<'_,
         .await;
     stops.0.lock().unwrap().remove(&id);
     result
+}
+
+/// The customers and sites the destination is missing, and where each would go. Nothing is written.
+#[tauri::command]
+async fn project_structure_preview(core: State<'_, Core>, id: String, only: Option<Vec<String>>) -> Result<StructurePreview, String> {
+    core.migration_structure_preview(&id, only).await
+}
+
+/// Creates the missing customers and sites on the destination, then their registration tokens. With `dry_run` nothing is sent.
+#[tauri::command]
+async fn project_structure_create(core: State<'_, Core>, locks: State<'_, ProjectLocks>, id: String, service_org_id: String, only: Option<Vec<String>>, dry_run: bool) -> Result<StructureReport, String> {
+    let lock = locks.get(&id);
+    let _held = lock.lock().await;
+    core.migration_structure_create(&id, &instance(), &service_org_id, only, dry_run).await
+}
+
+/// What retiring the old source records would delete, and why anything isn't offered yet.
+#[tauri::command]
+async fn project_retire_view(core: State<'_, Core>, id: String) -> Result<RetireView, String> {
+    core.migration_retire_view(&id).await
+}
+
+/// Deletes the old source records of the cleaned-up devices whose review period is over. With `dry_run` nothing is sent.
+#[tauri::command]
+async fn project_retire(core: State<'_, Core>, locks: State<'_, ProjectLocks>, id: String, dry_run: bool) -> Result<RetireReport, String> {
+    let lock = locks.get(&id);
+    let _held = lock.lock().await;
+    core.migration_retire_sources(&id, &instance(), dry_run).await
 }
 
 /// Asks a running bulk cleanup to stop after the device it is on.
@@ -483,6 +544,11 @@ pub fn run() {
             tracker_stop,
             project_poll,
             project_plan,
+            project_device_choice,
+            project_wave_candidates,
+            project_wave_create_from,
+            migration_settings_get,
+            migration_settings_save,
             project_plan_add,
             project_launch,
             project_wave_create,
@@ -495,6 +561,10 @@ pub fn run() {
             project_report,
             project_cleanup,
             project_cleanup_cancel,
+            project_structure_preview,
+            project_structure_create,
+            project_retire_view,
+            project_retire,
             project_map,
             project_map_details,
             project_map_set,
