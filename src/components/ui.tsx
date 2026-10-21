@@ -110,7 +110,7 @@ export function Segmented<T extends string>({
           role="tab"
           aria-selected={value === o.value}
           onClick={() => onChange(o.value)}
-          className={`inline-flex h-6 items-center gap-1.5 rounded px-2.5 text-xs font-medium transition-colors [&_svg]:size-3.5 ${
+          className={`inline-flex h-6 items-center gap-1.5 rounded px-2.5 text-xs font-medium whitespace-nowrap transition-colors [&_svg]:size-3.5 ${
             value === o.value ? "bg-surface text-text shadow-sm" : "text-muted hover:text-text"
           }`}
         >
@@ -241,9 +241,10 @@ export function Modal({
       <DialogPrimitive.Portal>
         <DialogPrimitive.Overlay className="fixed inset-0 z-40 bg-black/50" />
         <DialogPrimitive.Content
+          onOpenAutoFocus={focusTheDialogNotClose}
           onEscapeKeyDown={(e) => !dismissible && e.preventDefault()}
           onPointerDownOutside={(e) => !dismissible && e.preventDefault()}
-          className={`fixed top-1/2 left-1/2 z-50 flex max-h-[88vh] w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-xl border border-border bg-surface shadow-2xl ${width} ${bare ? "h-[min(760px,88vh)]" : ""}`}
+          className={`fixed top-1/2 left-1/2 z-50 flex max-h-[88vh] w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-xl border border-border bg-surface shadow-2xl focus:outline-none ${width} ${bare ? "h-[min(760px,88vh)]" : ""}`}
         >
           <div className="flex shrink-0 items-start justify-between gap-4 px-5 pt-4 pb-3">
             <div className="min-w-0">
@@ -274,13 +275,28 @@ export function Modal({
   );
 }
 
+/**
+ * A dialog focuses its first control when it opens, and that is the Close button, whose tooltip opens on focus as well
+ * as on hover: it showed on every dialog with nobody pointing at it. Keep focus on a field that took it itself (an
+ * autofocused input), otherwise on the dialog, so Tab and Escape still work from there.
+ */
+function focusTheDialogNotClose(e: Event) {
+  const dialog = e.currentTarget as HTMLElement | null;
+  if (!dialog || dialog.contains(document.activeElement)) return;
+  e.preventDefault();
+  dialog.focus();
+}
+
 /** Right-side panel for details, so the list behind stays in view. */
 export function Sheet({ title, subtitle, onClose, children }: { title: ReactNode; subtitle?: ReactNode; onClose: () => void; children: ReactNode }) {
   return (
     <DialogPrimitive.Root open onOpenChange={(open) => !open && onClose()}>
       <DialogPrimitive.Portal>
         <DialogPrimitive.Overlay className="fixed inset-0 z-40 bg-black/30" />
-        <DialogPrimitive.Content className="fixed top-0 right-0 bottom-0 z-50 flex w-[min(560px,92vw)] flex-col border-l border-border bg-bg shadow-2xl">
+        <DialogPrimitive.Content
+          onOpenAutoFocus={focusTheDialogNotClose}
+          className="fixed top-0 right-0 bottom-0 z-50 flex w-[min(560px,92vw)] flex-col border-l border-border bg-bg shadow-2xl focus:outline-none"
+        >
           <div className="flex h-[52px] shrink-0 items-center justify-between gap-3 border-b border-border px-5">
             <div className="min-w-0">
               <DialogPrimitive.Title className="truncate text-base font-semibold">{title}</DialogPrimitive.Title>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { STAGE_WORDS } from "./words";
+import { ECO_WORDS, STAGE_WORDS, describeStage, ecoWords, stageView } from "./words";
 
 describe("STAGE_WORDS", () => {
   const entries = Object.entries(STAGE_WORDS);
@@ -26,5 +26,38 @@ describe("STAGE_WORDS", () => {
     for (const stage of ["unreachable", "launchFailed", "lost"]) expect(STAGE_WORDS[stage as keyof typeof STAGE_WORDS].tone).toBe("err");
     for (const stage of ["notPickedUp", "stuckStaged", "wrongPlace"]) expect(STAGE_WORDS[stage as keyof typeof STAGE_WORDS].tone).toBe("warn");
     for (const stage of ["healthy", "cleanedUp", "retired"]) expect(STAGE_WORDS[stage as keyof typeof STAGE_WORDS].tone).toBe("ok");
+  });
+});
+
+describe("describeStage", () => {
+  it("fills the blanks and never leaves a brace in a sentence", () => {
+    for (const stage of Object.keys(STAGE_WORDS) as (keyof typeof STAGE_WORDS)[]) {
+      expect(describeStage(stage, { since: "34 min", destination: "Acme", reason: "No token." })).not.toMatch(/[{}]/);
+      expect(describeStage(stage, { since: "" })).not.toMatch(/[{}]/);
+    }
+  });
+
+  it("says how long and why where the words ask for it", () => {
+    expect(describeStage("notPickedUp", { since: "34 min" })).toContain("Launched 34 min ago and still not running");
+    expect(describeStage("launchFailed", { since: "", reason: "The token expired." })).toContain("refused: The token expired.");
+    expect(describeStage("healthy", { since: "", destination: "Acme HQ" })).toBe("Checking in to Acme HQ.");
+  });
+});
+
+describe("a healthy device and Ecoverse", () => {
+  it("reads Healthy only once Ecoverse has data, and Checking in until then", () => {
+    expect(stageView("healthy", false).short).toBe("Healthy");
+    expect(stageView("healthy", true)).toMatchObject({ short: "Checking in", tone: "accent" });
+    expect(stageView("lost", true).short).toBe("Lost");
+  });
+
+  it("says it isn't fully working while waiting, and what that means", () => {
+    expect(describeStage("healthy", { since: "", destination: "Acme HQ", waitingForEcoverse: true })).toContain("Ecoverse isn't receiving its data yet");
+    expect(ECO_WORDS.waitingForData.long).toContain("scripts can't run");
+  });
+
+  it("has words for every state, and for one not read yet", () => {
+    for (const state of ["reporting", "waitingForData", "notSeen", "notLinked"] as const) expect(ecoWords(state).short).not.toBe("");
+    expect(ecoWords(null).short).toBe("Ecoverse not read yet");
   });
 });

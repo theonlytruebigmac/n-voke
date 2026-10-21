@@ -18,7 +18,7 @@ function Item({ item }: { item: ConnectItem }) {
 }
 
 /** Is everything the project depends on reachable and signed in? (step 1 in docs/migration/11-gui-design.md) */
-export function ConnectStep({ projectId }: { projectId: string }) {
+export function ConnectStep({ projectId, onContinue }: { projectId: string; onContinue: () => void }) {
   const check = useConnectCheck(projectId);
   const report = check.data;
 
@@ -43,9 +43,14 @@ export function ConnectStep({ projectId }: { projectId: string }) {
               <Item key={i.id} item={i} />
             ))}
           </ul>
-          <p className={`text-sm ${report.canContinue ? "text-ok" : "text-err"}`}>
-            {report.canContinue ? "Everything this project needs is reachable. Mapping customers and sites is the next step." : "Fix the red items before going on, then check again."}
-          </p>
+          <div className="flex items-center justify-between gap-3">
+            <p className={`text-sm ${report.canContinue ? "text-ok" : "text-err"}`}>
+              {report.canContinue ? "Everything this project needs is reachable. Mapping customers and sites is the next step." : "Fix the red items before going on, then check again."}
+            </p>
+            <Button variant="primary" size="sm" onClick={onContinue} disabled={!report.canContinue}>
+              Continue
+            </Button>
+          </div>
         </>
       )}
     </div>

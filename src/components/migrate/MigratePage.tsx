@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ArrowRightLeft, MoreHorizontal, Plus, Server } from "lucide-react";
 import type { ProjectSummary, ServerView } from "../../lib/migrate/bindings";
 import { projectProgress } from "../../lib/migrate/progress";
@@ -80,6 +80,12 @@ export function MigratePage({ ecoverseReady }: { ecoverseReady: boolean }) {
   const [deleting, setDeleting] = useState<ProjectSummary | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const list = projects.data ?? [];
+
+  // The list stays mounted while a project is open, so read it again when coming back to it.
+  const refetchProjects = projects.refetch;
+  useEffect(() => {
+    if (openId === null) void refetchProjects();
+  }, [openId, refetchProjects]);
 
   const overlays = (
     <>

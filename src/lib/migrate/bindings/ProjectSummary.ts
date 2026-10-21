@@ -4,4 +4,8 @@ import type { Stage } from "./Stage";
 /**
  * What the project list shows.
  */
-export type ProjectSummary = { id: string, name: string, sourceServerId: string, destServerId: string, updatedAt: string, devices: number, attention: number, closed: boolean, stageCounts: { [key in Stage]?: number }, };
+export type ProjectSummary = { id: string, name: string, sourceServerId: string, destServerId: string, updatedAt: string, devices: number, attention: number, closed: boolean, stageCounts: { [key in Stage]?: number }, 
+/**
+ * Healthy in N-central but not yet sending asset data to Ecoverse: registered, not fully working.
+ */
+ecoverseWaiting: number, };

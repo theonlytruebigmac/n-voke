@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ConnectReport, Delivery, DestEcoverse, EcoCredential, ProjectSummary, ServerInfo, ServerView } from "./bindings";
+import type { CleanupReport, ConnectReport, DeviceCommand, DeviceDetail, FinishView, LaunchPreview, LaunchResult, LaunchView, PlanAdded, PlanView, PollDigest, ReportFormat, TrackView, Delivery, DestEcoverse, EcoCredential, MapDetails, MapView, Override, PrepareView, ProjectOptions, ScriptSide, ProjectSummary, ScriptOrg, ServerInfo, ServerView, TokenReport } from "./bindings";
 
 // Thin typed wrappers over the Tauri commands. No logic lives here: the rules are in nvoke-core, and the types
 // come from the Rust types (`npm run bindings`), so this file only names the commands.
@@ -42,3 +42,38 @@ export const getProject = (id: string) => invoke<ProjectSummary>("project_summar
 export const createProject = (p: NewProject) => invoke<ProjectSummary>("project_create", { ...p });
 export const deleteProject = (id: string) => invoke<void>("project_delete", { id });
 export const checkConnection = (id: string) => invoke<ConnectReport>("project_connect_check", { id });
+export const closeProject = (id: string) => invoke<void>("project_close", { id });
+
+export const getMap = (id: string) => invoke<MapView>("project_map", { id });
+export const getMapDetails = (id: string) => invoke<MapDetails>("project_map_details", { id });
+export const setMapping = (id: string, sourceId: string, decision: Override) => invoke<void>("project_map_set", { id, sourceId, decision });
+export const clearMapping = (id: string, sourceId: string) => invoke<void>("project_map_clear", { id, sourceId });
+export const generateTokens = (id: string) => invoke<TokenReport>("project_tokens_generate", { id });
+
+export const getPrepare = (id: string) => invoke<PrepareView>("project_prepare", { id });
+export const searchScriptOrgs = (id: string, side: ScriptSide, term: string) => invoke<ScriptOrg[]>("project_script_orgs", { id, side, term });
+export const defaultScriptOrg = (id: string, side: ScriptSide) => invoke<ScriptOrg | null>("project_default_org", { id, side });
+export const publishScript = (id: string, side: ScriptSide, org: ScriptOrg) => invoke<string>("project_publish", { id, side, org });
+export const exportScript = () => invoke<string>("project_export_script");
+export const setRestScript = (id: string, side: ScriptSide, itemId: string, version: string) => invoke<void>("project_rest_script", { id, side, itemId, version });
+export const setOptions = (id: string, options: ProjectOptions) => invoke<void>("project_options", { id, options });
+
+export const getPlan = (id: string) => invoke<PlanView>("project_plan", { id });
+export const addPlanned = (id: string) => invoke<PlanAdded>("project_plan_add", { id });
+
+export const getLaunch = (id: string) => invoke<LaunchView>("project_launch", { id });
+export const createWave = (id: string, label: string, max: number) => invoke<string>("project_wave_create", { id, label, max });
+export const previewWave = (id: string, wave: number) => invoke<LaunchPreview>("project_wave_preview", { id, wave });
+export const launchWave = (id: string, wave: number, dryRun: boolean) => invoke<LaunchResult>("project_wave_launch", { id, wave, dryRun });
+
+export const getTrack = (id: string) => invoke<TrackView>("project_track", { id });
+export const getDevice = (id: string, index: number) => invoke<DeviceDetail>("project_device", { id, index });
+export const deviceCommand = (id: string, index: number, command: DeviceCommand) => invoke<string>("project_device_command", { id, index, command });
+export const pollNow = (id: string) => invoke<PollDigest>("project_poll", { id });
+export const startTracker = (id: string) => invoke<void>("tracker_start", { id });
+export const stopTracker = (id: string) => invoke<void>("tracker_stop", { id });
+
+export const getFinish = (id: string) => invoke<FinishView>("project_finish", { id });
+export const writeReport = (id: string, format: ReportFormat) => invoke<string>("project_report", { id, format });
+export const cleanupHealthy = (id: string) => invoke<CleanupReport>("project_cleanup", { id });
+export const cancelCleanup = (id: string) => invoke<void>("project_cleanup_cancel", { id });
