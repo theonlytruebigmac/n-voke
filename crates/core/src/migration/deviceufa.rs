@@ -10,8 +10,8 @@ use super::project::Event;
 
 /// Where the Probe's answer carries the device's `status.json`, after the message line.
 const MARKER: &str = "\nstatus.json: ";
-/// The history entries that are the watcher doing something about the agent.
-const STEP_EVENTS: [&str; 4] = ["ufa-sync-restart", "ufa-repair", "ufa-repair-restart", "ufa-absent-restart"];
+/// The history entries that are the watcher doing something about the agent, or finding that it can't recover.
+const STEP_EVENTS: [&str; 4] = ["ufa-sync-restart", "ufa-repair", "ufa-repair-restart", "ufa-registration-broken"];
 const MAX_STEPS: usize = 6;
 
 /// The Ecoverse agent's state on the device, as the installer's watcher classifies it from the agent's own log.
@@ -35,17 +35,20 @@ pub enum UfaState {
     Rejected,
     /// The login works but the component downloads are refused (403).
     Denied,
+    /// Registered on the device but its program is gone and it has no service: the Windows Agent can only try to remove it
+    /// and never installs a new one. Needs a person.
+    Broken,
     /// No log to read, or a state this version doesn't know.
     Unknown,
 }
 
-/// One thing the watcher did about the agent.
+/// One thing the watcher did about the agent, or found.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "UfaStep.ts"))]
 #[serde(rename_all = "camelCase")]
 pub struct UfaStep {
     pub at: String,
-    /// `ufa-sync-restart`, `ufa-repair`, `ufa-repair-restart` or `ufa-absent-restart`.
+    /// `ufa-sync-restart`, `ufa-repair`, `ufa-repair-restart` or `ufa-registration-broken`.
     pub event: String,
     pub detail: String,
 }
@@ -61,8 +64,10 @@ pub struct DeviceUfa {
     pub restarts: u32,
     /// When the one-time repair was done, if it was.
     pub repaired_at: Option<String>,
-    /// When the Windows Agent services were restarted because the agent never appeared after the install, if they were.
-    pub absent_restarted_at: Option<String>,
+    /// For a broken registration: how many removals Windows Installer logged as failed since the install.
+    pub removal_failures: Option<u32>,
+    /// For a broken registration: the last MSI error code of those (1721 the program could not be run, 1722 it failed).
+    pub removal_error: Option<u32>,
     /// When the watcher first saw a fault, if it did.
     pub fault_seen_at: Option<String>,
     /// After a repair: files written to the agent's folder since the last restart, the sign that it is being redeployed.
@@ -91,17 +96,21 @@ fn text(value: &Value, key: &str) -> Option<String> {
 fn from_status(probed_at: &str, status: &Value) -> Option<DeviceUfa> {
     let ufa = status.get("ufa")?.as_object()?;
     let flag = |key: &str| ufa.get(key).and_then(Value::as_bool).unwrap_or(false);
-    let state = match ufa.get("sync").and_then(Value::as_str) {
-        Some("synced") => UfaState::Synced,
-        Some("stalled") => UfaState::Stalled,
-        Some("blocked") => UfaState::Blocked,
-        Some("rejected") => UfaState::Rejected,
-        Some("denied") => UfaState::Denied,
-        Some("waiting") => UfaState::Waiting,
-        Some(_) => UfaState::Unknown,
-        None if !flag("present") => UfaState::NotInstalled,
-        None if !flag("provisioned") => UfaState::NotProvisioned,
-        None => UfaState::Waiting,
+    let state = if flag("brokenRegistration") {
+        UfaState::Broken
+    } else {
+        match ufa.get("sync").and_then(Value::as_str) {
+            Some("synced") => UfaState::Synced,
+            Some("stalled") => UfaState::Stalled,
+            Some("blocked") => UfaState::Blocked,
+            Some("rejected") => UfaState::Rejected,
+            Some("denied") => UfaState::Denied,
+            Some("waiting") => UfaState::Waiting,
+            Some(_) => UfaState::Unknown,
+            None if !flag("present") => UfaState::NotInstalled,
+            None if !flag("provisioned") => UfaState::NotProvisioned,
+            None => UfaState::Waiting,
+        }
     };
     let steps: Vec<UfaStep> = status
         .get("history")
@@ -122,7 +131,8 @@ fn from_status(probed_at: &str, status: &Value) -> Option<DeviceUfa> {
         probed_at: probed_at.to_string(),
         restarts: status.get("ufaSyncRestarts").and_then(Value::as_u64).unwrap_or(0) as u32,
         repaired_at: text(status, "ufaRepairedAt"),
-        absent_restarted_at: text(status, "ufaAbsentRestartedAt"),
+        removal_failures: ufa.get("removalFailures").and_then(Value::as_u64).map(|n| n as u32),
+        removal_error: ufa.get("removalError").and_then(Value::as_u64).map(|n| n as u32),
         fault_seen_at: text(status, "ufaFaultSeenAt"),
         redeploy_files: ufa.get("redeployFiles").and_then(Value::as_u64).map(|n| n as u32),
         warning: text(status, "warning"),
@@ -184,15 +194,21 @@ mod tests {
     }
 
     #[test]
-    fn a_restart_for_an_agent_that_never_appeared_comes_through_as_a_step_and_a_time() {
-        let status = r#"{"ufaAbsentRestartedAt":"2026-10-21T21:43:00Z","ufa":{"present":false,"running":false,"provisioned":false,"redeployFiles":0},
+    fn a_registered_agent_whose_program_is_gone_is_broken_with_what_windows_installer_logged() {
+        let status = r#"{"ufaBrokenReportedAt":"2026-10-21T21:58:00Z","ufa":{"present":false,"running":false,"provisioned":false,"brokenRegistration":true,"removalFailures":5,"removalError":1721},
             "history":[
               {"at":"2026-10-21T21:38:57Z","event":"awaiting-ufa","detail":"MspAgent is not installed yet; 12 min since install"},
-              {"at":"2026-10-21T21:43:00Z","event":"ufa-absent-restart","detail":"restarted the Windows Agent services once"},
+              {"at":"2026-10-21T21:58:00Z","event":"ufa-registration-broken","detail":"MSP Core Agent 3.47.0 is registered but msp-agent-core.exe is missing"},
               {"at":"2026-10-21T21:26:04Z","event":"cleanup-ufa-leftover","detail":"Ecoverse agent folders left in place on purpose"}]}"#;
-        let ufa = device_ufa(&[probe("2026-10-21T21:50:00Z", status)]).unwrap();
-        assert_eq!((ufa.state, ufa.absent_restarted_at.as_deref(), ufa.repaired_at), (UfaState::NotInstalled, Some("2026-10-21T21:43:00Z"), None));
-        assert_eq!(ufa.steps.iter().map(|s| s.event.as_str()).collect::<Vec<_>>(), ["ufa-absent-restart"]);
+        let ufa = device_ufa(&[probe("2026-10-21T22:00:00Z", status)]).unwrap();
+        assert_eq!((ufa.state, ufa.removal_failures, ufa.removal_error), (UfaState::Broken, Some(5), Some(1721)));
+        assert_eq!(ufa.steps.iter().map(|s| s.event.as_str()).collect::<Vec<_>>(), ["ufa-registration-broken"]);
+    }
+
+    #[test]
+    fn a_broken_registration_that_was_cleared_is_no_longer_broken() {
+        let status = r#"{"ufa":{"present":false,"running":false,"provisioned":false,"brokenRegistration":false}}"#;
+        assert_eq!(device_ufa(&[probe("2026-10-21T22:30:00Z", status)]).unwrap().state, UfaState::NotInstalled);
     }
 
     #[test]

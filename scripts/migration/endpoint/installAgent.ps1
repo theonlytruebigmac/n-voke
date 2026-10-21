@@ -35,7 +35,7 @@ $UfaBlockedSettleMinutes = 20
 $UfaRepairAfterMinutes = 30
 $UfaRepairWaitMinutes = 90
 $UfaRepairRestartAfterMinutes = 10
-$UfaAbsentRestartAfterMinutes = 15
+$UfaBrokenConfirmMinutes = 10
 $UfaRepairMaxFinalRestarts = 2
 
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
@@ -242,11 +242,52 @@ function Test-UfaRedeployRestartDue([bool]$UfaPresent, [datetime]$LastActionUtc,
     return (($NowUtc - $LastActionUtc).TotalMinutes -ge $AfterMinutes)
 }
 
-# The Windows Agent didn't deploy the UFA at all: still no MspAgent service AfterMinutes after the install, and the
-# Windows Agent services haven't been restarted for it yet. Once per device; needs a known install time.
-function Test-UfaAbsentRestartDue([bool]$UfaPresent, [datetime]$InstalledUtc, [datetime]$NowUtc, [int]$AfterMinutes, [bool]$AlreadyRestarted) {
-    if ($UfaPresent -or $AlreadyRestarted -or $InstalledUtc -le [datetime]::MinValue) { return $false }
-    return (($NowUtc - $InstalledUtc).TotalMinutes -ge $AfterMinutes)
+# The state SUP-2190 ended up in (lab, 2026-10-21): the Ecoverse agent (the MSP Core Agent MSI) is registered, its program
+# msp-agent-core.exe is gone and there is no MspAgent service. The Windows Agent then only tries to remove it, and that removal
+# runs the exe, so it fails (MSI error 1721) and nothing new is ever installed. Reported, never repaired by the installer.
+function Test-UfaRegistrationBroken([bool]$Registered, [bool]$ExePresent, [bool]$ServiceExists) {
+    return ($Registered -and -not $ExePresent -and -not $ServiceExists)
+}
+
+# Seen on two runs at least ConfirmMinutes apart, so a removal or install that is merely in progress isn't reported.
+function Test-UfaBrokenConfirmed([bool]$Broken, $FirstSeenUtc, [datetime]$NowUtc, [int]$ConfirmMinutes) {
+    if (-not $Broken -or -not $FirstSeenUtc) { return $false }
+    return (($NowUtc - $FirstSeenUtc).TotalMinutes -ge $ConfirmMinutes)
+}
+
+# What Windows Installer logged for the Ecoverse agent's product: 11725 removal failed (with 11721 or 11722 carrying the MSI
+# error: 1721 the program could not be run, 1722 it ran and failed), 11724 removal completed. Events are objects with Id and TimeCreated.
+function Get-UfaRemovalSummary($Events) {
+    $failed = @($Events | Where-Object { $_.Id -eq 11725 } | Sort-Object TimeCreated)
+    $coded = @($Events | Where-Object { $_.Id -eq 11721 -or $_.Id -eq 11722 } | Sort-Object TimeCreated)
+    [pscustomobject]@{
+        Failures      = $failed.Count
+        LastErrorCode = $(if ($coded.Count -gt 0) { [int]$coded[$coded.Count - 1].Id - 10000 } else { $null })
+        LastFailureAt = $(if ($failed.Count -gt 0) { $failed[$failed.Count - 1].TimeCreated.ToUniversalTime() } else { $null })
+        Completed     = @($Events | Where-Object { $_.Id -eq 11724 }).Count
+    }
+}
+
+# Read-only: the Application log's MsiInstaller events for the MSP Core Agent since SinceUtc.
+function Get-UfaRemovalEvent([datetime]$SinceUtc) {
+    if ($SinceUtc -le [datetime]::MinValue.AddDays(2)) { $SinceUtc = (Get-Date).ToUniversalTime().AddDays(-1) }
+    try {
+        @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'MsiInstaller'; StartTime = $SinceUtc.ToLocalTime() } -ErrorAction Stop |
+            Where-Object { ($_.Id -in 11721, 11722, 11724, 11725) -and $_.Message -match 'MSP Core Agent' })
+    } catch { @() }
+}
+
+# Read-only: is the Ecoverse agent registered, is its program there, does its service exist.
+function Get-UfaRegistration {
+    $entry = Get-UninstallEntry 'MSP Core Agent'
+    $core = [Environment]::GetFolderPath('ProgramFilesX86') + '\Msp Agent\msp-agent-core.exe'
+    [pscustomobject]@{
+        Registered    = [bool]$entry
+        ProductCode   = $(if ($entry -and $entry.Key -match '^\{[0-9A-Fa-f-]{36}\}$') { $entry.Key } else { $null })
+        Version       = $(if ($entry) { $entry.Version } else { $null })
+        ExePresent    = (Test-Path -LiteralPath $core)
+        ServiceExists = [bool](Get-Service -Name 'MspAgent' -ErrorAction SilentlyContinue)
+    }
 }
 
 function Test-RebootPending {
@@ -281,7 +322,7 @@ function Get-UninstallEntry([string]$DisplayName) {
         foreach ($name in $uninstall.GetSubKeyNames()) {
             $k = $uninstall.OpenSubKey($name)
             if ($k -and $k.GetValue('DisplayName') -eq $DisplayName) {
-                return [pscustomobject]@{ Key = $name; Msi = [bool]$k.GetValue('WindowsInstaller') -or ([string]$k.GetValue('UninstallString')) -match '^MsiExec'; Uninstall = [string]$k.GetValue('UninstallString') }
+                return [pscustomobject]@{ Key = $name; Msi = [bool]$k.GetValue('WindowsInstaller') -or ([string]$k.GetValue('UninstallString')) -match '^MsiExec'; Uninstall = [string]$k.GetValue('UninstallString'); Version = [string]$k.GetValue('DisplayVersion') }
             }
         }
     }
@@ -464,30 +505,38 @@ try {
         }
 
         # The Windows Agent installs the UFA a few minutes after itself. When the destination is linked, a UFA that isn't
-        # there yet is not a healthy device: wait for it, up to the same limit as the data sync. If it still hasn't appeared
-        # some minutes after the install, restart the Windows Agent services once: that is the step that made a Windows
-        # Agent redeploy a UFA in the lab. Then watch the Msp Agent folder for new data and keep waiting.
+        # there yet is not a healthy device: wait for it, up to the same limit as the data sync. One state can't fix itself
+        # (SUP-2190, see Test-UfaRegistrationBroken): the Ecoverse agent is registered but its program is gone, so the Windows
+        # Agent never installs a new one. That is reported plainly, with what Windows Installer logged, and never repaired here.
         if ($job.expectUfa -eq 'true' -and -not $ufaService -and -not $status.ufaRepairedAt) {
-            $waitedAbsent = ((Get-Date).ToUniversalTime() - $since).TotalMinutes
-            if (Test-UfaAbsentRestartDue ([bool]$ufaService) $since (Get-Date).ToUniversalTime() $UfaAbsentRestartAfterMinutes ([bool]$status.ufaAbsentRestartedAt)) {
-                Restart-WindowsAgentService
-                $status.ufaAbsentRestartedAt = (Get-Date).ToUniversalTime().ToString('o')
-                Add-StatusHistory $status 'ufa-absent-restart' ('MspAgent was still not installed {0:N0} min after the install; restarted the Windows Agent services once so the Windows Agent redeploys it' -f $waitedAbsent)
+            $nowUtc = (Get-Date).ToUniversalTime()
+            $waitedAbsent = ($nowUtc - $since).TotalMinutes
+            $reg = Get-UfaRegistration
+            $broken = Test-UfaRegistrationBroken $reg.Registered $reg.ExePresent $reg.ServiceExists
+            if ($broken -and -not $status.ufaBrokenFirstSeenAt) { $status.ufaBrokenFirstSeenAt = $nowUtc.ToString('o') }
+            if (-not $broken) { $status.Remove('ufaBrokenFirstSeenAt') }
+            $firstSeen = if ($status.ufaBrokenFirstSeenAt) { [datetime]::Parse($status.ufaBrokenFirstSeenAt).ToUniversalTime() } else { $null }
+            $confirmed = Test-UfaBrokenConfirmed $broken $firstSeen $nowUtc $UfaBrokenConfirmMinutes
+            $status.ufa.brokenRegistration = $confirmed
+            $brokenNote = ''
+            if ($confirmed) {
+                $removal = Get-UfaRemovalSummary (Get-UfaRemovalEvent $since)
+                $status.ufa.removalFailures = $removal.Failures
+                $status.ufa.removalError = $removal.LastErrorCode
+                $removalText = 'Windows Installer removal failures since the install: {0}{1}' -f $removal.Failures, $(if ($removal.LastErrorCode) { ", last MSI error $($removal.LastErrorCode)" } else { '' })
+                $brokenNote = "; the Ecoverse agent is registered but msp-agent-core.exe is missing, so the Windows Agent cannot install a new one ($removalText)"
+                if (-not $status.ufaBrokenReportedAt) {
+                    $status.ufaBrokenReportedAt = $nowUtc.ToString('o')
+                    Add-StatusHistory $status 'ufa-registration-broken' ('MSP Core Agent {0} is registered but msp-agent-core.exe is missing and there is no MspAgent service (seen since {1:o}). The Windows Agent can only try to remove it, which runs that program, and will not install a new one. {2}. See the troubleshooting guide for the recovery steps' -f $reg.Version, $firstSeen, $removalText)
+                }
             }
             if ($waitedAbsent -lt $UfaSyncGraceMinutes) {
                 $status.stage = 'awaiting-ufa'
-                $folderNote = ''
-                if ($status.ufaAbsentRestartedAt) {
-                    $activity = Get-UfaFolderActivity ([Environment]::GetFolderPath('ProgramFilesX86') + '\Msp Agent') ([datetime]::Parse($status.ufaAbsentRestartedAt).ToUniversalTime())
-                    $status.ufa.redeployFiles = $activity.Files
-                    $status.ufa.redeployNewestAt = if ($activity.NewestAt) { $activity.NewestAt.ToUniversalTime().ToString('o') } else { $null }
-                    $folderNote = if ($activity.Files -gt 0) { '; {0} file(s) written to the Msp Agent folder since the restart' -f $activity.Files } else { '; no new data in the Msp Agent folder since the restart' }
-                }
-                Add-StatusHistory $status 'awaiting-ufa' ('MspAgent is not installed yet; {0:N0} min since install{1}' -f $waitedAbsent, $folderNote)
+                Add-StatusHistory $status 'awaiting-ufa' ('MspAgent is not installed yet; {0:N0} min since install{1}' -f $waitedAbsent, $brokenNote)
                 Save-Status $status
                 exit 0
             }
-            $status.warning = "MspAgent was not installed $([math]::Round($waitedAbsent)) min after the install"
+            $status.warning = "MspAgent was not installed $([math]::Round($waitedAbsent)) min after the install$(if ($confirmed) { ' (the Ecoverse agent is registered but msp-agent-core.exe is missing)' })"
         }
 
         # Only wait for the UFA when the destination is linked to Ecoverse (the project says so); otherwise it can't provision there.

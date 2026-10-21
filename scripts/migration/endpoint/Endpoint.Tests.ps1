@@ -341,7 +341,7 @@ Describe 'Hide-RegistrationToken' {
 
 Describe 'Get-UfaSyncState' {
     BeforeAll {
-        . ([scriptblock]::Create((Get-FunctionText (Join-Path $here 'installAgent.ps1') @('Get-UfaSyncState', 'Test-UfaRepairDue', 'Test-UfaBlockedRestartDue', 'Test-UfaRedeployRestartDue', 'Test-UfaAbsentRestartDue', 'Get-UfaFolderActivity'))))
+        . ([scriptblock]::Create((Get-FunctionText (Join-Path $here 'installAgent.ps1') @('Get-UfaSyncState', 'Test-UfaRepairDue', 'Test-UfaBlockedRestartDue', 'Test-UfaRedeployRestartDue', 'Test-UfaRegistrationBroken', 'Test-UfaBrokenConfirmed', 'Get-UfaRemovalSummary', 'Get-UfaFolderActivity'))))
         $auth = 'https://auth.example.invalid/oauth2/token'
         $timeout = "context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
         $lines = @{
@@ -509,13 +509,42 @@ Describe 'Get-UfaSyncState' {
         } finally { Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue }
         (Get-UfaFolderActivity (Join-Path ([IO.Path]::GetTempPath()) 'nvoke-no-such-folder') ([datetime]::MinValue)).Files | Should -Be 0
     }
-    It 'restarts the Windows Agent services once when the Ecoverse agent never appeared, some minutes after the install' {
-        $installed = [datetime]'2026-10-21T21:27:00Z'
-        Test-UfaAbsentRestartDue $false $installed ([datetime]'2026-10-21T21:40:00Z') 15 $false | Should -BeFalse
-        Test-UfaAbsentRestartDue $false $installed ([datetime]'2026-10-21T21:43:00Z') 15 $false | Should -BeTrue
-        Test-UfaAbsentRestartDue $false $installed ([datetime]'2026-10-21T23:00:00Z') 15 $true | Should -BeFalse
-        Test-UfaAbsentRestartDue $true $installed ([datetime]'2026-10-21T23:00:00Z') 15 $false | Should -BeFalse
-        Test-UfaAbsentRestartDue $false ([datetime]::MinValue) ([datetime]'2026-10-21T23:00:00Z') 15 $false | Should -BeFalse
+    It 'calls an Ecoverse agent broken only when it is registered, its program is gone and it has no service' {
+        Test-UfaRegistrationBroken $true $false $false | Should -BeTrue
+        Test-UfaRegistrationBroken $false $false $false | Should -BeFalse   # nothing registered: the Windows Agent installs a fresh one
+        Test-UfaRegistrationBroken $true $true $false | Should -BeFalse     # the program is there: a removal can run
+        Test-UfaRegistrationBroken $true $false $true | Should -BeFalse     # a service exists: it is running or starting
+        Test-UfaRegistrationBroken $true $true $true | Should -BeFalse
+    }
+    It 'reports a broken registration only once it has been seen on two runs some minutes apart' {
+        $first = [datetime]'2026-10-21T21:43:00Z'
+        Test-UfaBrokenConfirmed $true $first ([datetime]'2026-10-21T21:43:00Z') 10 | Should -BeFalse
+        Test-UfaBrokenConfirmed $true $first ([datetime]'2026-10-21T21:50:00Z') 10 | Should -BeFalse
+        Test-UfaBrokenConfirmed $true $first ([datetime]'2026-10-21T21:58:00Z') 10 | Should -BeTrue
+        Test-UfaBrokenConfirmed $false $first ([datetime]'2026-10-21T23:00:00Z') 10 | Should -BeFalse
+        Test-UfaBrokenConfirmed $true $null ([datetime]'2026-10-21T23:00:00Z') 10 | Should -BeFalse
+    }
+    It 'summarises what Windows Installer logged for the product: failures, the last MSI error and completed removals' {
+        $ev = { param($id, $t) [pscustomobject]@{ Id = $id; TimeCreated = [datetime]$t } }
+        # SUP-2190, 2026-10-21 (local times): the removal was cut short (1722), then failed with 1721 every time
+        $events = @(
+            (& $ev 11722 '2026-10-21T17:26:04'), (& $ev 11725 '2026-10-21T17:26:04'),
+            (& $ev 11721 '2026-10-21T17:29:04'), (& $ev 11725 '2026-10-21T17:29:04'),
+            (& $ev 11721 '2026-10-21T18:13:31'), (& $ev 11725 '2026-10-21T18:13:31')
+        )
+        $s = Get-UfaRemovalSummary $events
+        ($s.Failures, $s.LastErrorCode, $s.Completed) | Should -Be 3, 1721, 0
+        $s.LastFailureAt | Should -Not -BeNullOrEmpty
+        $none = Get-UfaRemovalSummary @()
+        ($none.Failures, $none.Completed) | Should -Be 0, 0
+        $none.LastErrorCode | Should -BeNullOrEmpty
+        (Get-UfaRemovalSummary @((& $ev 11724 '2026-10-21T14:24:36'))).Completed | Should -Be 1
+    }
+    It 'only reads: the detection never removes, restarts, stops or uninstalls anything' {
+        $path = Join-Path $here 'installAgent.ps1'
+        $text = Get-FunctionText $path @('Test-UfaRegistrationBroken', 'Test-UfaBrokenConfirmed', 'Get-UfaRemovalSummary', 'Get-UfaRemovalEvent', 'Get-UfaRegistration')
+        $text | Should -Not -Match 'Remove-Item|Remove-TreeSafely|Restart-|Stop-|Start-Process|msiexec|Invoke-WithTimeout|Set-ItemProperty|New-Item'
+        (Get-Content -Raw $path) | Should -Not -Match 'ufa-absent-restart|Test-UfaAbsentRestartDue'
     }
     It 'says unknown when there is no log' {
         (Get-UfaSyncState (Join-Path ([IO.Path]::GetTempPath()) 'nvoke-no-such-core.log') ([datetime]::MinValue)).State | Should -Be 'unknown'

@@ -16,9 +16,13 @@ restarts: number,
  */
 repairedAt: string | null, 
 /**
- * When the Windows Agent services were restarted because the agent never appeared after the install, if they were.
+ * For a broken registration: how many removals Windows Installer logged as failed since the install.
  */
-absentRestartedAt: string | null, 
+removalFailures: number | null, 
+/**
+ * For a broken registration: the last MSI error code of those (1721 the program could not be run, 1722 it failed).
+ */
+removalError: number | null, 
 /**
  * When the watcher first saw a fault, if it did.
  */
