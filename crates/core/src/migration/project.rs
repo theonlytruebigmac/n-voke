@@ -15,6 +15,22 @@ use super::{
     planner::{DeliveryPath, PlannedDevice},
 };
 
+/// What the destination's Ecoverse shows for a device that has moved. "Healthy" in N-central is not the same as
+/// working in Ecoverse: a device is registered there long before its agent has sent any asset data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "EcoState.ts"))]
+#[serde(rename_all = "camelCase")]
+pub enum EcoState {
+    /// The destination isn't linked to Ecoverse, so there is nothing to wait for.
+    NotLinked,
+    /// No asset in the destination's Ecoverse tenant yet.
+    NotSeen,
+    /// An asset exists (it shows in Ecoverse) but no asset data has arrived: scripts can't run on it yet.
+    WaitingForData,
+    /// Asset data is arriving.
+    Reporting,
+}
+
 /// A device's place in the migration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "Stage.ts"))]
@@ -135,6 +151,9 @@ pub struct ProjectDevice {
     /// can't be launched again until the operator has checked and said it didn't go.
     #[serde(default)]
     pub launch_unsure: bool,
+    /// What the destination's Ecoverse showed the last time it was read for this device. None until it has been.
+    #[serde(default)]
+    pub ecoverse: Option<EcoState>,
     pub entered_stage_at: String,
     pub events: Vec<Event>,
 }
@@ -160,6 +179,7 @@ impl ProjectDevice {
             attempts: 0,
             last_error: None,
             launch_unsure: false,
+            ecoverse: None,
             entered_stage_at: at.clone(),
             events: vec![Event { at, kind: "stage".into(), detail: format!("{stage:?}") }],
         }
@@ -201,6 +221,7 @@ pub enum DestEcoverse {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "CleanMode.ts"))]
 #[serde(rename_all = "camelCase")]
 pub enum CleanMode {
     /// Remove every N-central component before installing (the default).
@@ -222,6 +243,7 @@ pub enum Delivery {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "ProjectOptions.ts"))]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectOptions {
     pub review_days: u32,
@@ -238,6 +260,15 @@ impl Default for ProjectOptions {
     fn default() -> Self {
         Self { review_days: 7, clean_mode: CleanMode::Full, task_repeat_minutes: 15, task_expiry_days: 14, wave_size: 50, retire_source_records: false, delivery: Delivery::EcoverseFirst }
     }
+}
+
+/// An Ecoverse organization the endpoint script is published in.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "ScriptOrg.ts"))]
+#[serde(rename_all = "camelCase")]
+pub struct ScriptOrg {
+    pub id: String,
+    pub name: String,
 }
 
 /// The endpoint script as uploaded by hand to a server's repository (REST path).
@@ -285,6 +316,17 @@ pub struct Project {
     /// The version of the script that was published there, so a launch can refuse an out-of-date copy.
     #[serde(default)]
     pub ecoverse_script_version: Option<String>,
+    /// Where the script was published, so the page can say and publishing again goes to the same place.
+    #[serde(default)]
+    pub ecoverse_script_org: Option<ScriptOrg>,
+    /// The same script published in the destination's own Ecoverse tenant, for a destination linked to another
+    /// tenant: it is what reaches a device after it has moved there.
+    #[serde(default)]
+    pub dest_ecoverse_script_id: Option<String>,
+    #[serde(default)]
+    pub dest_ecoverse_script_version: Option<String>,
+    #[serde(default)]
+    pub dest_ecoverse_script_org: Option<ScriptOrg>,
     /// The device IDs on each destination org unit before launching, so a device that appears later is known to be new.
     #[serde(default)]
     pub dest_baseline: HashMap<String, Vec<String>>,
@@ -316,6 +358,10 @@ impl Project {
             dest_ecoverse_org_ids: vec![],
             ecoverse_script_id: None,
             ecoverse_script_version: None,
+            ecoverse_script_org: None,
+            dest_ecoverse_script_id: None,
+            dest_ecoverse_script_version: None,
+            dest_ecoverse_script_org: None,
             dest_baseline: HashMap::new(),
             devices: vec![],
             waves: vec![],
@@ -391,13 +437,26 @@ impl Project {
         counts
     }
 
+    /// Devices that are healthy in N-central but whose Ecoverse asset hasn't sent data (or hasn't been read yet), when the
+    /// destination is linked to Ecoverse. They are registered, but not fully working.
+    pub fn ecoverse_waiting(&self) -> usize {
+        self.devices.iter().filter(|d| self.waiting_for_ecoverse(d)).count()
+    }
+
+    /// Healthy in N-central, but its Ecoverse asset hasn't sent data (or hasn't been read yet) and the destination is
+    /// linked to Ecoverse: registered there, not fully working. It stays in the Healthy stage; this is how it is told apart.
+    pub fn waiting_for_ecoverse(&self, device: &ProjectDevice) -> bool {
+        device.stage == Stage::Healthy && self.dest_ecoverse != DestEcoverse::NotLinked && device.ecoverse != Some(EcoState::Reporting)
+    }
+
     pub fn attention_count(&self) -> usize {
         self.devices.iter().filter(|d| d.stage.needs_attention() || !d.match_candidates.is_empty()).count()
     }
 
-    /// Every device is in a final stage (and there is at least one).
+    /// Every device is finished with (and there is at least one). A device that has cleaned up is the end of the road
+    /// unless the project retires the old source records, which is the one more step after it.
     pub fn is_closed(&self) -> bool {
-        !self.devices.is_empty() && self.devices.iter().all(|d| d.stage.is_final())
+        !self.devices.is_empty() && self.devices.iter().all(|d| d.stage.is_final() || (d.stage == Stage::CleanedUp && !self.options.retire_source_records))
     }
 }
 
@@ -553,5 +612,36 @@ mod tests {
     fn a_same_server_project_is_a_reinstall() {
         assert!(!project().is_reinstall());
         assert!(Project::new("m".into(), "r", "a", "a", DestEcoverse::SameTenant, now()).is_reinstall());
+    }
+
+    #[test]
+    fn a_project_closes_when_every_device_has_cleaned_up_unless_it_also_retires_the_source_records() {
+        let now = chrono::Utc::now();
+        let planned = |id: &str| PlannedDevice {
+            device_id: id.into(),
+            name: format!("PC-{id}"),
+            source_customer_id: Some("1".into()),
+            source_site_id: None,
+            dest_org_unit_id: Some("2".into()),
+            path: Some(DeliveryPath::Rest),
+            asset_id: None,
+            blockers: vec![],
+            warnings: vec![],
+            excluded: false,
+        };
+        let mut p = Project::new("p".into(), "x", "a", "b", DestEcoverse::NotLinked, now);
+        p.add_planned(&[planned("1"), planned("2")], now);
+        assert!(!p.is_closed());
+        p.devices[0].stage = Stage::CleanedUp;
+        p.devices[1].stage = Stage::Healthy;
+        assert!(!p.is_closed(), "one is still in its review period");
+        p.devices[1].stage = Stage::Resolved;
+        assert!(p.is_closed(), "cleaned up and resolved is everything done");
+        p.options.retire_source_records = true;
+        assert!(!p.is_closed(), "retiring the old records is one more step");
+        p.devices[0].stage = Stage::Retired;
+        assert!(p.is_closed());
+        p.devices.clear();
+        assert!(!p.is_closed(), "an empty project isn't finished");
     }
 }

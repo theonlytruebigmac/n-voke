@@ -29,8 +29,9 @@ use crate::{
 /// How a request will reach the device.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Route {
-    /// An Ecoverse asset, with the script published for that tenant.
-    Ecoverse { asset_id: String, script_id: String },
+    /// An Ecoverse asset, with the script published for that tenant. `server_id` is the N-central server whose Ecoverse
+    /// key reaches that tenant.
+    Ecoverse { asset_id: String, script_id: String, server_id: String },
     /// An N-central server's direct task, with the script's repository item and the customer ID the task is recorded under.
     Rest { server_id: String, item_id: String, device_id: String, customer_id: String },
 }
@@ -61,34 +62,79 @@ pub fn side_for(device: &ProjectDevice, reinstall: bool) -> Result<Side, String>
 }
 
 impl Core {
+    /// A device that moved into another Ecoverse tenant can only be reached through a copy of the script published in
+    /// *that* tenant. When it isn't there (or is an older version), publish it now in the tenant's service
+    /// organization, so Probe and Cleanup just work. Says what it did, or why it couldn't; the device is then reached
+    /// over N-central if that is set up.
+    pub(crate) async fn ensure_destination_script(&self, project: &mut Project, package: &Package) -> Result<Option<String>, String> {
+        if !matches!(project.dest_ecoverse, DestEcoverse::OtherTenant { .. }) || !self.server_uses_ecoverse(&project.dest_server_id) {
+            return Ok(None);
+        }
+        let current = project.dest_ecoverse_script_id.is_some() && project.dest_ecoverse_script_version.as_deref() == Some(package.version.as_str());
+        if current {
+            return Ok(None);
+        }
+        let org = match project.dest_ecoverse_script_org.clone() {
+            Some(org) => org,
+            None => self
+                .migration_default_script_org(&project.dest_server_id)
+                .await?
+                .ok_or("The destination's Ecoverse has more than one top-level organization (or none), so the script wasn't published there. Choose one in Prepare.")?,
+        };
+        let published = self.with_ecoverse(&project.dest_server_id, self.publish_migration_script(package, &org.id)).await?;
+        project.dest_ecoverse_script_id = Some(published.script_id);
+        project.dest_ecoverse_script_version = Some(package.version.clone());
+        project.dest_ecoverse_script_org = Some(org.clone());
+        Ok(Some(format!("Published the endpoint script in the destination's Ecoverse ({}) so it can reach this device.", org.name)))
+    }
+
     /// Works out how to reach the device now. Reads from the servers where it has to (the destination's record and Ecoverse asset).
     pub async fn migration_route(&self, project: &Project, device: &ProjectDevice) -> Result<Route, String> {
         let side = side_for(device, project.is_reinstall())?;
         let rest_for = |server_id: &str, device_id: &str, customer_id: Option<String>| -> Result<Route, String> {
             let item = project.rest_scripts.get(server_id).ok_or_else(|| {
                 let host = self.ncentral_server(server_id).map(|s| s.host).unwrap_or_default();
-                format!("The endpoint script hasn't been uploaded to {host}, so N-central can't be used to reach this device.{}", if side == Side::Destination { " Its records will remove themselves after the review period." } else { "" })
+                format!(
+                    "The endpoint script hasn't been uploaded to {host}, so N-central can't be used to reach this device. Upload it and record it in Prepare.{}",
+                    if side == Side::Destination { " Until then its records will remove themselves after the review period." } else { "" }
+                )
             })?;
             Ok(Route::Rest { server_id: server_id.into(), item_id: item.item_id.clone(), device_id: device_id.into(), customer_id: customer_id.ok_or("The device's customer isn't known.")? })
         };
         match side {
             Side::Source => match (device.path, &device.asset_id, &project.ecoverse_script_id) {
-                (Some(DeliveryPath::Ecoverse), Some(asset), Some(script)) => Ok(Route::Ecoverse { asset_id: asset.clone(), script_id: script.clone() }),
+                (Some(DeliveryPath::Ecoverse), Some(asset), Some(script)) => Ok(Route::Ecoverse { asset_id: asset.clone(), script_id: script.clone(), server_id: project.source_server_id.clone() }),
                 _ => rest_for(&project.source_server_id, &device.source_device_id, device.source_customer_id.clone()),
             },
             Side::Destination => {
                 let dest_id = device.dest_device_id.clone().ok_or("The device hasn't been found on the destination yet.")?;
                 let dest_host = self.ncentral_server(&project.dest_server_id)?.host;
-                if project.dest_ecoverse == DestEcoverse::SameTenant
-                    && let Some(script) = &project.ecoverse_script_id
-                    && let Ok(assets) = self.with_ecoverse(&project.source_server_id, self.eco_devices(&project.source_ecoverse_org_ids)).await
-                    && let Some(asset) = index_by_ncentral_id(&assets, &dest_host).remove(&dest_id)
-                    && asset.connected
-                {
-                    return Ok(Route::Ecoverse { asset_id: asset.asset_id, script_id: script.clone() });
+                // Where the device shows up in Ecoverse once it has moved: the source's tenant (same tenant), or the
+                // destination's own (another tenant), each with its own key and its own copy of the script.
+                let tenant = match project.dest_ecoverse {
+                    DestEcoverse::SameTenant => project.ecoverse_script_id.as_ref().map(|s| (project.source_server_id.clone(), s.clone(), &project.source_ecoverse_org_ids)),
+                    DestEcoverse::OtherTenant { .. } => project.dest_ecoverse_script_id.as_ref().map(|s| (project.dest_server_id.clone(), s.clone(), &project.dest_ecoverse_org_ids)),
+                    DestEcoverse::NotLinked => None,
+                };
+                // Why Ecoverse isn't used, so that when N-central can't help either the message says what is actually missing.
+                let mut why_not_ecoverse = match (&project.dest_ecoverse, &tenant) {
+                    (DestEcoverse::NotLinked, _) => String::new(),
+                    (DestEcoverse::OtherTenant { .. }, None) => "The endpoint script isn't published in the destination's Ecoverse.".to_string(),
+                    (DestEcoverse::SameTenant, None) => "The endpoint script isn't published in Ecoverse.".to_string(),
+                    _ => String::new(),
+                };
+                if let Some((server_id, script, org_ids)) = tenant {
+                    match self.with_ecoverse(&server_id, self.eco_devices(org_ids)).await {
+                        Ok(assets) => match index_by_ncentral_id(&assets, &dest_host).remove(&dest_id) {
+                            Some(asset) if asset.connected => return Ok(Route::Ecoverse { asset_id: asset.asset_id, script_id: script, server_id }),
+                            Some(_) => why_not_ecoverse = "Ecoverse shows this device, but it isn't connected there right now.".into(),
+                            None => why_not_ecoverse = "Ecoverse doesn't show this device yet.".into(),
+                        },
+                        Err(error) => why_not_ecoverse = format!("Ecoverse couldn't be read ({error})."),
+                    }
                 }
                 let record = self.ncentral_device(&project.dest_server_id, &dest_id).await.map_err(|e| e.message)?;
-                rest_for(&project.dest_server_id, &dest_id, record.customer_id)
+                rest_for(&project.dest_server_id, &dest_id, record.customer_id).map_err(|e| if why_not_ecoverse.is_empty() { e } else { format!("{why_not_ecoverse} {e}") })
             }
         }
     }
@@ -103,7 +149,21 @@ impl Core {
         if operation == Operation::Cleanup && !matches!(stage, Stage::Healthy | Stage::CleanedUp) {
             return Err(format!("{} is {stage:?}. Cleanup removes the leftovers of the old agent, and is only for a device that has moved and is healthy.", project.devices[index].name));
         }
-        let route = self.migration_route(project, &project.devices[index]).await?;
+        // After a move into another Ecoverse tenant the script has to be in that tenant: put it there first if it isn't.
+        let published = match side_for(&project.devices[index], project.is_reinstall()) {
+            Ok(Side::Destination) => self.ensure_destination_script(project, package).await,
+            _ => Ok(None),
+        };
+        if let Ok(Some(note)) = &published {
+            project.devices[index].record(chrono::Utc::now(), "note", note);
+        }
+        let route = match self.migration_route(project, &project.devices[index]).await {
+            Ok(route) => route,
+            Err(error) => return Err(match published {
+                Err(why) => format!("{error} ({why})"),
+                _ => error,
+            }),
+        };
         let device = &project.devices[index];
         let wave = device.wave.unwrap_or(0);
         let params = launch_params(project, wave, package, operation.clone());
@@ -111,7 +171,7 @@ impl Core {
         let name = device.name.clone();
 
         let (via, result) = match &route {
-            Route::Ecoverse { asset_id, script_id } => {
+            Route::Ecoverse { asset_id, script_id, server_id } => {
                 let input = RunScriptInput {
                     script_id: script_id.clone(),
                     script_name: package.script_name(),
@@ -122,9 +182,8 @@ impl Core {
                     inputs: params.ecoverse_inputs()?,
                     run_when_online: true,
                 };
-                let source_server = project.source_server_id.clone();
                 let report = self
-                    .with_ecoverse(&source_server, async {
+                    .with_ecoverse(server_id, async {
                         let run = self.run_script(&input).await?;
                         let task_id = run.tasks.first().map(|(id, _)| id.clone()).ok_or("Ecoverse created no task.")?;
                         self.wait_for_ecoverse_report(&task_id, wait).await
@@ -281,7 +340,7 @@ mod tests {
         let route = core.migration_route(&p, &p.devices[0]).await.unwrap();
         assert!(matches!(route, Route::Rest { .. }), "no Ecoverse script is known, so N-central is used");
         p.ecoverse_script_id = Some("script-1".into());
-        assert_eq!(core.migration_route(&p, &p.devices[0]).await.unwrap(), Route::Ecoverse { asset_id: "a1".into(), script_id: "script-1".into() });
+        assert_eq!(core.migration_route(&p, &p.devices[0]).await.unwrap(), Route::Ecoverse { asset_id: "a1".into(), script_id: "script-1".into(), server_id: p.source_server_id.clone() });
         p.devices[0].path = Some(DeliveryPath::Rest);
         match core.migration_route(&p, &p.devices[0]).await.unwrap() {
             Route::Rest { item_id, device_id, customer_id, .. } => assert_eq!((item_id.as_str(), device_id.as_str(), customer_id.as_str()), ("77", "9001", "10")),
@@ -309,6 +368,95 @@ mod tests {
         }
         p.devices[0].dest_device_id = None;
         assert!(core.migration_route(&p, &p.devices[0]).await.unwrap_err().contains("hasn't been found on the destination"));
+    }
+
+    #[tokio::test]
+    async fn a_device_that_moved_to_another_tenant_is_reached_through_the_destinations_own_ecoverse_script_and_key() {
+        let fake = Fake::new(|req: &RestRequest, _| match req.url.trim_start_matches("https://") {
+            u if u.ends_with("/authenticate") => auth_ok(3600),
+            "dst.example.com/api/devices/5001" => ok(json!({ "data": { "deviceId": 5001, "customerId": 110, "siteId": 111 } })),
+            other => panic!("unexpected {other}"),
+        });
+        let (core, mut p) = setup(Stage::Healthy, DeliveryPath::Rest, false).await;
+        core.set_rest_transport(fake);
+        p.dest_ecoverse = DestEcoverse::OtherTenant { tenant_id: "t".into() };
+        p.ecoverse_script_id = Some("source-script".into());
+        p.rest_scripts.insert(p.dest_server_id.clone(), RestScript { item_id: "88".into(), version: "v".into() });
+        core.set_graphql_fake(|_, _| {
+            let asset = json!({ "id": "asset-new", "name": "PC", "agentConnection": { "status": "CONNECTED" }, "ncentralDevice": { "deviceId": "5001", "server": { "id": "s", "origin": "https://dst.example.com" } } });
+            (200, json!({ "data": { "page": { "totalCount": 1, "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [asset] } } }).to_string())
+        });
+
+        // The destination's tenant has no script of its own yet, so the device is reached through N-central.
+        assert!(matches!(core.migration_route(&p, &p.devices[0]).await.unwrap(), Route::Rest { .. }));
+
+        // With it, the source tenant's script is not used for a device that is now in the other tenant.
+        p.dest_ecoverse_script_id = Some("dest-script".into());
+        assert_eq!(core.migration_route(&p, &p.devices[0]).await.unwrap(), Route::Ecoverse { asset_id: "asset-new".into(), script_id: "dest-script".into(), server_id: p.dest_server_id.clone() });
+    }
+
+    fn orgs_fake(core: &Core, orgs: &'static [(&'static str, &'static str)]) {
+        core.set_graphql_fake(move |query, _| {
+            let body = if query.contains("organizationSearch") {
+                let nodes: Vec<Value> = orgs.iter().map(|(id, kind)| json!({ "id": id, "name": format!("Org {id}"), "__typename": kind })).collect();
+                json!({ "data": { "page": { "totalCount": nodes.len(), "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": nodes } } })
+            } else if query.contains("scriptSearch") {
+                json!({ "data": { "byName": { "nodes": [] } } })
+            } else {
+                json!({ "data": { "scriptCreate": { "item": { "id": "dest-script" }, "errors": [] } } })
+            };
+            (200, body.to_string())
+        });
+    }
+
+    #[tokio::test]
+    async fn the_destinations_script_is_published_on_demand_in_the_tenants_one_service_organization() {
+        let (core, mut p) = setup(Stage::Healthy, DeliveryPath::Rest, false).await;
+        p.dest_ecoverse = DestEcoverse::OtherTenant { tenant_id: "t".into() };
+        orgs_fake(&core, &[("c1", "Customer"), ("so", "ServiceOrganization"), ("s1", "Site")]);
+
+        let note = core.ensure_destination_script(&mut p, &package()).await.unwrap().expect("it published");
+        assert!(note.contains("Org so"), "{note}");
+        assert_eq!((p.dest_ecoverse_script_id.as_deref(), p.dest_ecoverse_script_org.as_ref().map(|o| o.id.as_str())), (Some("dest-script"), Some("so")));
+        assert_eq!(p.dest_ecoverse_script_version.as_deref(), Some(package().version.as_str()));
+        assert!(core.ensure_destination_script(&mut p, &package()).await.unwrap().is_none(), "already there at this version: nothing to do");
+
+        // A destination that isn't in another tenant has nothing to publish.
+        let (core2, mut same) = setup(Stage::Healthy, DeliveryPath::Rest, false).await;
+        assert!(core2.ensure_destination_script(&mut same, &package()).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn with_no_single_top_level_organization_it_asks_the_person_instead_of_guessing() {
+        for orgs in [&[("c1", "Customer")][..], &[("a", "ServiceOrganization"), ("b", "ServiceOrganization")][..]] {
+            let (core, mut p) = setup(Stage::Healthy, DeliveryPath::Rest, false).await;
+            p.dest_ecoverse = DestEcoverse::OtherTenant { tenant_id: "t".into() };
+            orgs_fake(&core, Box::leak(orgs.to_vec().into_boxed_slice()));
+            let error = core.ensure_destination_script(&mut p, &package()).await.unwrap_err();
+            assert!(error.contains("Choose one in Prepare"), "{error}");
+            assert!(p.dest_ecoverse_script_id.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn when_neither_path_works_the_message_says_why_ecoverse_wasnt_used_before_asking_for_the_upload() {
+        let fake = Fake::new(|req: &RestRequest, _| match req.url.trim_start_matches("https://") {
+            u if u.ends_with("/authenticate") => auth_ok(3600),
+            "dst.example.com/api/devices/5001" => ok(json!({ "data": { "deviceId": 5001, "customerId": 110, "siteId": 111 } })),
+            other => panic!("unexpected {other}"),
+        });
+        let (core, mut p) = setup(Stage::Healthy, DeliveryPath::Rest, false).await;
+        core.set_rest_transport(fake);
+        p.dest_ecoverse = DestEcoverse::OtherTenant { tenant_id: "t".into() };
+        let error = core.migration_route(&p, &p.devices[0]).await.unwrap_err();
+        assert!(error.starts_with("The endpoint script isn't published in the destination's Ecoverse."), "{error}");
+        assert!(error.contains("hasn't been uploaded to dst.example.com"), "{error}");
+
+        // With the script there but no asset for the device yet, that is the reason given.
+        p.dest_ecoverse_script_id = Some("dest-script".into());
+        core.set_graphql_fake(|_, _| (200, json!({ "data": { "page": { "totalCount": 0, "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [] } } }).to_string()));
+        let error = core.migration_route(&p, &p.devices[0]).await.unwrap_err();
+        assert!(error.starts_with("Ecoverse doesn't show this device yet."), "{error}");
     }
 
     const STATUS_LINE: &str = r#"NVOKE-RESULT {"action":"Status","result":"ok","errorCode":0,"message":"Last log: installing","taskState":"Ready","statusJson":"{\"stage\":\"installing\",\"attempts\":2}"}"#;
@@ -429,5 +577,49 @@ mod tests {
         assert_eq!((outcome.via.as_str(), outcome.result.message.as_str()), ("Ecoverse", "Last log: downloading"));
         assert!(*polls.lock().unwrap() >= 2);
         assert!(p.devices[0].events.last().unwrap().detail.contains("\"stage\":\"downloading\""));
+    }
+
+    #[tokio::test]
+    async fn probing_a_device_that_moved_to_another_tenant_publishes_the_script_there_first_then_runs_it() {
+        let fake = Fake::new(|req: &RestRequest, _| match req.url.trim_start_matches("https://") {
+            u if u.ends_with("/authenticate") => auth_ok(3600),
+            "dst.example.com/api/devices/5001" => ok(json!({ "data": { "deviceId": 5001, "customerId": 110, "siteId": 111 } })),
+            other => panic!("unexpected {other}"),
+        });
+        let (core, mut p) = setup(Stage::Healthy, DeliveryPath::Rest, false).await;
+        core.set_rest_transport(fake);
+        p.dest_ecoverse = DestEcoverse::OtherTenant { tenant_id: "t".into() };
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let log = seen.clone();
+        core.set_graphql_fake(move |query, variables| {
+            let body = if query.contains("organizationSearch") && !query.contains("assetSearch") {
+                log.lock().unwrap().push("orgs".into());
+                json!({ "data": { "page": { "totalCount": 1, "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [{ "id": "so", "name": "Dest SO", "__typename": "ServiceOrganization" }] } } })
+            } else if query.contains("scriptSearch") {
+                json!({ "data": { "byName": { "nodes": [] } } })
+            } else if query.contains("scriptCreate") {
+                log.lock().unwrap().push("publish".into());
+                json!({ "data": { "scriptCreate": { "item": { "id": "dest-script" }, "errors": [] } } })
+            } else if query.contains("assetSearch") {
+                let asset = json!({ "id": "asset-new", "agentConnection": { "status": "CONNECTED" }, "ncentralDevice": { "deviceId": "5001", "server": { "id": "s", "origin": "https://dst.example.com" } } });
+                json!({ "data": { "page": { "totalCount": 1, "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [asset] } } })
+            } else if query.contains("assetsScriptRun") {
+                log.lock().unwrap().push(format!("run {}", variables["input"]["configuration"]["scriptId"]));
+                json!({ "data": { "assetsScriptRun": { "items": [{ "id": B64.encode("t:asset-new") }], "errors": [] } } })
+            } else {
+                let outputs: Vec<Value> = [("Result", "ok"), ("Message", "Last log: fine"), ("StatusJson", "{}"), ("TaskState", "Ready")]
+                    .iter()
+                    .map(|(v, s)| json!({ "name": v, "variable": v, "type": "STRING", "value": { "stringValue": s } }))
+                    .collect();
+                json!({ "data": { "task": { "id": "x", "status": "COMPLETED", "executions": { "nodes": [{ "id": "e", "status": "SUCCEEDED", "output": { "outputs": outputs } }] } } } })
+            };
+            (200, body.to_string())
+        });
+
+        let outcome = core.migration_run_action(&mut p, 0, Operation::Status, &package(), Duration::from_secs(60)).await.unwrap();
+        assert_eq!(outcome.via, "Ecoverse");
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen, ["orgs", "publish", "run \"dest-script\""], "published in the destination's service organization, then run with that copy");
+        assert!(p.devices[0].events.iter().any(|e| e.kind == "note" && e.detail.contains("Published the endpoint script in the destination's Ecoverse (Dest SO)")));
     }
 }

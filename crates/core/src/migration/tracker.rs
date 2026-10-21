@@ -7,7 +7,7 @@
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 
-use super::project::{ProjectDevice, Stage};
+use super::project::{EcoState, ProjectDevice, Stage};
 use crate::ncentral::model::DeviceIdentity;
 
 /// How long each wait is before it becomes a problem. All configurable per project later.
@@ -77,6 +77,8 @@ pub struct Observation {
     pub dest: Option<DestObservation>,
     /// The device's asset in the destination's Ecoverse tenant is `CONNECTED`. None when the destination isn't linked.
     pub dest_ecoverse_connected: Option<bool>,
+    /// What the destination's Ecoverse shows for it, when that was read.
+    pub dest_ecoverse: Option<EcoState>,
     /// `Cleanup` ran and returned `Cleaned = true`.
     pub cleaned: bool,
     /// The old source record was deleted (or tagged) as the last step.

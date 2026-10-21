@@ -133,6 +133,7 @@ pub fn is_dry_run_error(error: &str) -> bool {
 
 /// A change that dry-run mode held back: what would have been sent.
 #[derive(Serialize, Clone, Debug)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "DryRunEntry.ts"))]
 #[serde(rename_all = "camelCase")]
 pub struct DryRunEntry {
     pub timestamp: String,
@@ -141,6 +142,7 @@ pub struct DryRunEntry {
     /// The GraphQL operation name, e.g. "RunScript".
     pub operation: Option<String>,
     /// The exact variables that would have been sent, with password inputs redacted.
+    #[cfg_attr(feature = "ts", ts(type = "unknown"))]
     pub variables: Value,
 }
 

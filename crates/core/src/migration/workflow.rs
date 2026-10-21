@@ -32,6 +32,7 @@ pub struct PlanIntoReport {
 
 /// What generating missing registration tokens did.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "TokenReport.ts"))]
 #[serde(rename_all = "camelCase")]
 pub struct TokenReport {
     /// Destination customers and sites that now have a token.
@@ -182,18 +183,32 @@ impl Core {
 
     /// Records the repository item the operator uploaded the endpoint script as, on the project's source server.
     pub fn migration_set_rest_script(&self, project: &mut Project, item_id: &str, version: &str) -> Result<(), String> {
+        let server_id = project.source_server_id.clone();
+        self.migration_set_rest_script_on(project, &server_id, item_id, version)
+    }
+
+    /// The same for either server of the project: the destination's repository holds the copy that reaches a device
+    /// after it has moved.
+    pub fn migration_set_rest_script_on(&self, project: &mut Project, server_id: &str, item_id: &str, version: &str) -> Result<(), String> {
         if item_id.is_empty() || !item_id.chars().all(|c| c.is_ascii_digit()) {
             return Err("The script item ID is the number N-central shows for the uploaded script.".into());
         }
-        let host = self.ncentral_server(&project.source_server_id)?.host;
-        project.rest_scripts.insert(project.source_server_id.clone(), RestScript { item_id: item_id.into(), version: version.into() });
+        if server_id != project.source_server_id && server_id != project.dest_server_id {
+            return Err("That server isn't part of this project.".into());
+        }
+        let host = self.ncentral_server(server_id)?.host;
+        project.rest_scripts.insert(server_id.to_string(), RestScript { item_id: item_id.into(), version: version.into() });
         self.record(&AuditEntry::new("migration.restScript.set", &format!("Set the endpoint script item for {host} to {item_id}"), Ok(()), json!({ "server": host, "itemId": item_id, "version": version })));
         Ok(())
     }
 
     /// Publishes the endpoint script to Ecoverse (unless it is already there at this version) and remembers its ID.
     pub async fn migration_publish(&self, project: &mut Project, package: &Package, organization_id: Option<&str>) -> Result<Published, String> {
-        let org = organization_id.map(String::from).or_else(|| project.source_ecoverse_org_ids.first().cloned()).ok_or("Name the Ecoverse organization to publish the script in.")?;
+        let org = organization_id
+            .map(String::from)
+            .or_else(|| project.ecoverse_script_org.as_ref().map(|o| o.id.clone()))
+            .or_else(|| project.source_ecoverse_org_ids.first().cloned())
+            .ok_or("Name the Ecoverse organization to publish the script in.")?;
         let published = self.with_ecoverse(&project.source_server_id, self.publish_migration_script(package, &org)).await?;
         project.ecoverse_script_id = Some(published.script_id.clone());
         project.ecoverse_script_version = Some(package.version.clone());

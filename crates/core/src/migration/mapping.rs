@@ -23,6 +23,7 @@ pub enum Confidence {
 
 /// What the operator decided for a source unit, overriding the automatic match.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "Override.ts"))]
 #[serde(rename_all = "camelCase", tag = "kind", content = "destId")]
 pub enum Override {
     /// Map to this destination unit.

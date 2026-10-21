@@ -91,6 +91,13 @@ pub struct EcoDevice {
 }
 
 impl EcoDevice {
+    /// The agent has sent asset data: a host name or serial number, or a network address. An asset can exist and be
+    /// `CONNECTED` for a long while before any of this arrives, and scripts are held until it does.
+    pub fn has_data(&self) -> bool {
+        let filled = |text: &Option<String>| text.as_deref().is_some_and(|t| !t.trim().is_empty());
+        self.system_info.as_ref().is_some_and(|s| filled(&s.hostname) || filled(&s.serial_number)) || !self.macs().is_empty()
+    }
+
     pub fn connected(&self) -> bool {
         self.agent_connection.as_ref().is_some_and(|c| c.status.eq_ignore_ascii_case("CONNECTED"))
     }
@@ -121,6 +128,22 @@ pub fn index_by_ncentral_id(devices: &[EcoDevice], host: &str) -> HashMap<String
         .iter()
         .filter(|d| d.server_host().as_deref() == Some(host))
         .filter_map(|d| Some((d.ncentral_device.as_ref()?.device_id.clone()?, EcoAsset { asset_id: d.id.clone(), connected: d.connected() })))
+        .collect()
+}
+
+/// What Ecoverse shows for a device that has moved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EcoSeen {
+    pub connected: bool,
+    pub has_data: bool,
+}
+
+/// By N-central device ID on `host`: whether each has an asset, whether it is connected, and whether it has sent data.
+pub fn dest_asset_states(devices: &[EcoDevice], host: &str) -> HashMap<String, EcoSeen> {
+    devices
+        .iter()
+        .filter(|d| d.server_host().as_deref() == Some(host))
+        .filter_map(|d| Some((d.ncentral_device.as_ref()?.device_id.clone()?, EcoSeen { connected: d.connected(), has_data: d.has_data() })))
         .collect()
 }
 

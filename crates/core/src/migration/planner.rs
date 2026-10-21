@@ -12,6 +12,7 @@ use super::mapping::{MappingEntry, MappingStatus, destination_for};
 use crate::ncentral::model::{Device, TokenStatus};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "DeliveryPath.ts"))]
 #[serde(rename_all = "camelCase")]
 pub enum DeliveryPath {
     /// Through the device's Unified Agent: preferred.
@@ -30,6 +31,7 @@ pub struct EcoAsset {
 
 /// Why a device can't be launched yet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "Blocker.ts"))]
 #[serde(rename_all = "camelCase")]
 pub enum Blocker {
     NotWindows,
@@ -69,6 +71,7 @@ impl Blocker {
 
 /// Things worth knowing that don't stop a launch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "Warning.ts"))]
 #[serde(rename_all = "camelCase")]
 pub enum Warning {
     /// The destination's token ends soon: launches after that date fail.

@@ -35,6 +35,8 @@ pub struct ProjectSummary {
     pub attention: usize,
     pub closed: bool,
     pub stage_counts: BTreeMap<Stage, usize>,
+    /// Healthy in N-central but not yet sending asset data to Ecoverse: registered, not fully working.
+    pub ecoverse_waiting: usize,
 }
 
 impl ProjectSummary {
@@ -49,6 +51,7 @@ impl ProjectSummary {
             attention: project.attention_count(),
             closed: project.is_closed(),
             stage_counts: project.stage_counts(),
+            ecoverse_waiting: project.ecoverse_waiting(),
         }
     }
 }

@@ -11,10 +11,10 @@ use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 
 use super::{
-    ecoverse::{EcoDevice, index_by_ncentral_id},
+    ecoverse::{EcoDevice, EcoSeen, dest_asset_states},
     endpoint_result::{launch_outcome_from_ecoverse, launch_outcome_from_rest},
     planner::DeliveryPath,
-    project::{DestEcoverse, MatchCandidate, Project, ProjectDevice, Stage},
+    project::{DestEcoverse, EcoState, MatchCandidate, Project, ProjectDevice, Stage},
     tracker::{Attention, Candidate, Context, DestObservation, LaunchOutcome, MatchResult, Observation, Thresholds, advance, attention, match_destination},
 };
 use crate::{
@@ -56,7 +56,7 @@ struct Found {
 #[derive(Default)]
 struct Shared {
     eco_source: Option<Result<HashMap<String, EcoDevice>, String>>,
-    eco_dest: Option<Result<HashMap<String, bool>, String>>,
+    eco_dest: Option<Result<HashMap<String, EcoSeen>, String>>,
     dest_units: HashMap<String, Result<Vec<Device>, String>>,
     /// Destination devices a source device has been matched to in this pass, so two can't claim the same one.
     claimed: HashSet<String>,
@@ -93,6 +93,9 @@ impl Core {
             device.match_candidates = found.ambiguous.iter().map(|(device_id, name)| MatchCandidate { device_id: device_id.clone(), name: name.clone() }).collect();
             if !found.ambiguous.is_empty() {
                 report.ambiguous.push((device.name.clone(), found.ambiguous.iter().map(|(id, _)| id.clone()).collect()));
+            }
+            if let Some(state) = observation.dest_ecoverse {
+                device.ecoverse = Some(state);
             }
             let from = device.stage;
             for step in advance(device, &observation, &ctx) {
@@ -211,22 +214,31 @@ impl Core {
                     Err(e) => report.errors.push(format!("{}: could not look for it on the destination: {e}", device.name)),
                 }
             }
+            if !linked && matches!(device.stage, Stage::Registered | Stage::Healthy) {
+                obs.dest_ecoverse = Some(EcoState::NotLinked);
+            }
             if linked && matches!(device.stage, Stage::Registered | Stage::Healthy) {
                 let dest_id = found.dest_device_id.clone().or_else(|| device.dest_device_id.clone());
                 if project.dest_ecoverse != DestEcoverse::NotLinked {
                     if shared.eco_dest.is_none() {
-                        let fetched = self.with_ecoverse(project.dest_ecoverse_server(), self.eco_devices(&project.dest_ecoverse_org_ids)).await.map(|d| index_by_ncentral_id(&d, &dest_host).into_iter().map(|(k, v)| (k, v.connected)).collect());
+                        let fetched = self.with_ecoverse(project.dest_ecoverse_server(), self.eco_devices(&project.dest_ecoverse_org_ids)).await.map(|d| dest_asset_states(&d, &dest_host));
                         shared.eco_dest = Some(fetched);
                     }
-                    obs.dest_ecoverse_connected = match (shared.eco_dest.as_ref(), dest_id) {
-                        (Some(Ok(map)), Some(id)) => Some(map.get(&id).copied().unwrap_or(false)),
-                        (Some(Ok(_)), None) => Some(false),
+                    let seen = match (shared.eco_dest.as_ref(), dest_id) {
+                        (Some(Ok(map)), Some(id)) => Ok(map.get(&id).copied()),
+                        (Some(Ok(_)), None) => Ok(None),
                         (Some(Err(e)), _) => {
                             report.errors.push(format!("{}: could not read the destination's Ecoverse: {e}", device.name));
-                            None
+                            Err(())
                         }
-                        (None, _) => None,
+                        (None, _) => Err(()),
                     };
+                    obs.dest_ecoverse_connected = seen.as_ref().ok().map(|s| s.is_some_and(|s| s.connected));
+                    obs.dest_ecoverse = seen.ok().map(|s| match s {
+                        None => EcoState::NotSeen,
+                        Some(s) if s.has_data => EcoState::Reporting,
+                        Some(_) => EcoState::WaitingForData,
+                    });
                 } else {
                     obs.dest_ecoverse_connected = Some(false);
                 }
@@ -590,6 +602,57 @@ mod tests {
         core.migration_poll_at(&mut p, &t, now()).await;
         assert_eq!(stages(&p), [Stage::Healthy]);
         assert_eq!(p.devices[0].dest_device_id.as_deref(), Some("9001"));
+    }
+
+    #[tokio::test]
+    async fn a_healthy_device_is_only_fully_working_in_ecoverse_once_its_asset_has_sent_data() {
+        let world = Arc::new(Mutex::new(World::default()));
+        let (core, mut p) = setup(&[planned("9001", DeliveryPath::Rest, None)], true).await;
+        core.set_rest_transport(rest_fake(&world));
+        p.dest_ecoverse = DestEcoverse::SameTenant;
+        p.devices[0].stage = Stage::Healthy;
+        p.devices[0].dest_device_id = Some("9001".into());
+        p.devices[0].entered_stage_at = super::super::project::stamp(now() - Duration::minutes(10));
+        world.lock().unwrap().placement.insert("src.example.com/9001".into(), ("110".into(), "111".into()));
+        world.lock().unwrap().checkin.insert("src.example.com/9001".into(), 1);
+        let t = Thresholds::default();
+        assert_eq!(p.devices[0].ecoverse, None, "not read yet");
+        assert_eq!(p.ecoverse_waiting(), 1, "healthy, but Ecoverse hasn't been read, so not counted as working");
+
+        let asset = |extra: Value| {
+            let mut a = json!({ "id": "asset-1", "agentConnection": { "status": "CONNECTED" }, "ncentralDevice": { "deviceId": "9001", "server": { "id": "s", "origin": "https://src.example.com" } } });
+            a.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            a
+        };
+        let serve = |core: &Core, nodes: Vec<Value>| {
+            core.set_graphql_fake(move |_, _| (200, json!({ "data": { "page": { "totalCount": nodes.len(), "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": nodes } } }).to_string()));
+        };
+
+        // Registered and connected, but no asset data: it shows in Ecoverse, and scripts are still held.
+        serve(&core, vec![asset(json!({}))]);
+        core.migration_poll_at(&mut p, &t, now()).await;
+        assert_eq!((p.devices[0].stage, p.devices[0].ecoverse), (Stage::Healthy, Some(EcoState::WaitingForData)));
+        assert_eq!(p.ecoverse_waiting(), 1);
+
+        // Empty values are not data either.
+        serve(&core, vec![asset(json!({ "systemInfo": { "hostname": " ", "serialNumber": null }, "networkInterfaces": [{ "macAddress": "" }] }))]);
+        core.migration_poll_at(&mut p, &t, now()).await;
+        assert_eq!(p.devices[0].ecoverse, Some(EcoState::WaitingForData));
+
+        // The first asset data arrives.
+        serve(&core, vec![asset(json!({ "systemInfo": { "hostname": "PC-9001", "serialNumber": "SN1" } }))]);
+        core.migration_poll_at(&mut p, &t, now()).await;
+        assert_eq!((p.devices[0].ecoverse, p.ecoverse_waiting()), (Some(EcoState::Reporting), 0));
+
+        // No asset for it at all.
+        serve(&core, vec![]);
+        core.migration_poll_at(&mut p, &t, now()).await;
+        assert_eq!(p.devices[0].ecoverse, Some(EcoState::NotSeen));
+
+        // A destination that isn't linked has nothing to wait for.
+        p.dest_ecoverse = DestEcoverse::NotLinked;
+        core.migration_poll_at(&mut p, &t, now()).await;
+        assert_eq!((p.devices[0].ecoverse, p.ecoverse_waiting()), (Some(EcoState::NotLinked), 0));
     }
 
     #[tokio::test]

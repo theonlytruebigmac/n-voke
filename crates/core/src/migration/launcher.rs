@@ -119,6 +119,7 @@ pub fn match_tasks(requested: &[(usize, String)], result: &RunResult) -> (Vec<(u
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "LaunchReport.ts"))]
 #[serde(rename_all = "camelCase")]
 pub struct LaunchReport {
     pub launched_ecoverse: usize,
