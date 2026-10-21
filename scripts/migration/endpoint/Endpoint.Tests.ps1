@@ -38,7 +38,8 @@ BeforeAll {
         } else {
             $file = $null
             $arguments = @('-NoProfile', '-File', $built)
-            foreach ($key in $Inputs.Keys) { $arguments += "-$key"; $arguments += [string]$Inputs[$key] }
+            # Windows PowerShell 5.1 joins -ArgumentList with spaces and quotes nothing, so a value with a space would split into several arguments.
+            foreach ($key in $Inputs.Keys) { $value = [string]$Inputs[$key]; if ($value -match '\s') { $value = '"' + $value + '"' }; $arguments += "-$key"; $arguments += $value }
         }
         $out = [IO.Path]::GetTempFileName(); $err = [IO.Path]::GetTempFileName()
         try {
