@@ -1,6 +1,6 @@
 [package]
 name = "nvoke-tui"
-version = "0.2.1"
+version = "0.2.2"
 license = "MIT"
 description = "Terminal interface for N-voke"
 authors = ["theonlytruebigmac"]
