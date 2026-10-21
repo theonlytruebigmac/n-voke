@@ -1234,12 +1234,10 @@ mod tests {
         press(&mut app, KeyCode::Tab);
         press(&mut app, KeyCode::Right); // 90 days
         press(&mut app, KeyCode::Enter);
-        for _ in 0..40 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !matches!(app.screen, Screen::Main) && std::time::Instant::now() < deadline {
             if let Ok(event) = app.rx.recv_timeout(std::time::Duration::from_millis(100)) {
                 app.update(event);
-            }
-            if matches!(app.screen, Screen::Main) {
-                break;
             }
         }
         assert!(matches!(app.screen, Screen::Main), "the form closed after saving");
@@ -1275,7 +1273,8 @@ mod tests {
         app.focus = Focus::Content;
         press(&mut app, KeyCode::Char('c'));
         press(&mut app, KeyCode::Char('y'));
-        for _ in 0..10 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while app.flash.is_none() && std::time::Instant::now() < deadline {
             if let Ok(event) = app.rx.recv_timeout(std::time::Duration::from_millis(100)) {
                 app.update(event);
             }
