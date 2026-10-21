@@ -1,50 +1,155 @@
 import { Plus } from "lucide-react";
 import { useState } from "react";
 import type { WaveRow } from "../../../lib/migrate/bindings";
-import { useLaunch, useLaunchActions } from "../../../lib/migrate/queries";
-import { Button, ErrorNote, Field, Modal, Status, inputClass } from "../../ui";
+import { useLaunch, useLaunchActions, useCandidates } from "../../../lib/migrate/queries";
+import { useDebounced } from "../../../lib/useDebounced";
+import { Button, ErrorNote, Field, Modal, Segmented, Status, inputClass } from "../../ui";
 import { LaunchDialog } from "../parts/LaunchDialog";
 import type { StepId } from "../parts/StepRail";
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 const PILOT = 5;
 
+const CANDIDATES = 50;
+
 function NewWaveDialog({ projectId, unassigned, defaultSize, onClose }: { projectId: string; unassigned: number; defaultSize: number; onClose: () => void }) {
-  const { createWave } = useLaunchActions(projectId);
+  const { createWave, createWaveFrom } = useLaunchActions(projectId);
+  const [how, setHow] = useState<"count" | "choose">("count");
   const [label, setLabel] = useState("");
   const [size, setSize] = useState(String(Math.min(defaultSize, unassigned)));
+  const [text, setText] = useState("");
+  const [offset, setOffset] = useState(0);
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const search = useDebounced(text.trim());
+  const candidates = useCandidates(projectId, { text: search, offset, limit: CANDIDATES }, how === "choose");
   const count = Number(size);
   const valid = Number.isInteger(count) && count >= 1 && count <= unassigned;
+  const page = candidates.data;
+  const toggle = (id: string) =>
+    setPicked((current) => {
+      const next = new Set(current);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+  const pickPage = () =>
+    setPicked((current) => {
+      const next = new Set(current);
+      for (const r of page?.rows ?? []) next.add(r.deviceId);
+      return next;
+    });
+  const pending = createWave.isPending || createWaveFrom.isPending;
+  const failure = createWave.error ?? createWaveFrom.error;
+  const choosing = how === "choose";
+
   return (
     <Modal
       title="New wave"
-      description={`${plural(unassigned, "planned device")} aren't in a wave yet. The wave takes the next ones in name order.`}
+      size={choosing ? "lg" : "md"}
+      description={
+        choosing
+          ? `${plural(unassigned, "planned device")} aren't in a wave yet. Tick the ones this wave should take.`
+          : `${plural(unassigned, "planned device")} aren't in a wave yet. The wave takes the next ones in name order.`
+      }
       onClose={onClose}
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
-          <Button variant="primary" busy={createWave.isPending} disabled={!valid} onClick={() => createWave.mutate({ label, max: count }, { onSuccess: onClose })}>
-            Create wave
-          </Button>
+          {choosing ? (
+            <Button variant="primary" busy={pending} disabled={picked.size === 0} onClick={() => createWaveFrom.mutate({ label, deviceIds: [...picked] }, { onSuccess: onClose })}>
+              {picked.size > 0 ? `Create wave with ${plural(picked.size, "device")}` : "Create wave"}
+            </Button>
+          ) : (
+            <Button variant="primary" busy={pending} disabled={!valid} onClick={() => createWave.mutate({ label, max: count }, { onSuccess: onClose })}>
+              Create wave
+            </Button>
+          )}
         </>
       }
     >
       <div className="space-y-3">
+        <Segmented
+          value={how}
+          onChange={setHow}
+          options={[
+            { value: "count", label: "By number" },
+            { value: "choose", label: "Choose devices" },
+          ]}
+        />
         <Field label="Name (optional)" hint="Wave 2, pilot, Friday night…">
           <input className={inputClass} value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Pilot" autoFocus />
         </Field>
-        <Field label="Devices" error={valid ? null : `Between 1 and ${unassigned}.`}>
-          <div className="flex items-center gap-2">
-            <input className={`${inputClass} w-28`} inputMode="numeric" value={size} onChange={(e) => setSize(e.target.value)} aria-label="Devices in the wave" />
-            <Button size="sm" onClick={() => (setSize(String(Math.min(PILOT, unassigned))), setLabel(label || "Pilot"))}>
-              Pilot ({Math.min(PILOT, unassigned)})
-            </Button>
-            <Button size="sm" onClick={() => setSize(String(Math.min(defaultSize, unassigned)))}>
-              Wave size ({Math.min(defaultSize, unassigned)})
-            </Button>
+        {!choosing ? (
+          <Field label="Devices" error={valid ? null : `Between 1 and ${unassigned}.`}>
+            <div className="flex items-center gap-2">
+              <input className={`${inputClass} w-28`} inputMode="numeric" value={size} onChange={(e) => setSize(e.target.value)} aria-label="Devices in the wave" />
+              <Button size="sm" onClick={() => (setSize(String(Math.min(PILOT, unassigned))), setLabel(label || "Pilot"))}>
+                Pilot ({Math.min(PILOT, unassigned)})
+              </Button>
+              <Button size="sm" onClick={() => setSize(String(Math.min(defaultSize, unassigned)))}>
+                Wave size ({Math.min(defaultSize, unassigned)})
+              </Button>
+            </div>
+          </Field>
+        ) : (
+          <div className="space-y-2">
+            <input
+              className={inputClass}
+              placeholder="Search by device or customer"
+              value={text}
+              onChange={(e) => (setText(e.target.value), setOffset(0))}
+              aria-label="Search the planned devices"
+            />
+            {candidates.isError ? (
+              <ErrorNote>{String(candidates.error)}</ErrorNote>
+            ) : !page ? (
+              <p className="text-sm text-muted">Loading…</p>
+            ) : page.rows.length === 0 ? (
+              <p className="text-sm text-muted">{page.waiting === 0 ? "Every planned device is already in a wave." : "No planned device matches."}</p>
+            ) : (
+              <>
+                <div className="max-h-72 overflow-y-auto rounded-lg border border-border">
+                  <table className="w-full border-collapse text-sm [&_td]:px-3 [&_td]:py-1.5">
+                    <tbody className="[&>tr]:border-t [&>tr]:border-border first:[&>tr]:border-t-0">
+                      {page.rows.map((r) => (
+                        <tr key={r.deviceId} className="cursor-pointer hover:bg-surface-2/60" onClick={() => toggle(r.deviceId)}>
+                          <td className="w-8">
+                            <input type="checkbox" checked={picked.has(r.deviceId)} onChange={() => toggle(r.deviceId)} onClick={(e) => e.stopPropagation()} aria-label={`Take ${r.name}`} />
+                          </td>
+                          <td className="font-medium">{r.name}</td>
+                          <td className="text-muted">{r.customer}</td>
+                          <td className="text-faint">{r.path === "ecoverse" ? "Ecoverse" : r.path === "rest" ? "N-central" : "–"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
+                  <span>
+                    {plural(page.matching, "device")} match
+                    {picked.size > 0 && ` · ${picked.size} ticked`}
+                  </span>
+                  <span className="flex items-center gap-2">
+                    <Button size="sm" onClick={pickPage}>
+                      Tick this page
+                    </Button>
+                    {picked.size > 0 && (
+                      <Button size="sm" onClick={() => setPicked(new Set())}>
+                        Clear
+                      </Button>
+                    )}
+                    <Button size="sm" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - CANDIDATES))}>
+                      Previous
+                    </Button>
+                    <Button size="sm" disabled={offset + CANDIDATES >= page.matching} onClick={() => setOffset(offset + CANDIDATES)}>
+                      Next
+                    </Button>
+                  </span>
+                </div>
+              </>
+            )}
           </div>
-        </Field>
-        {createWave.isError && <ErrorNote>{String(createWave.error)}</ErrorNote>}
+        )}
+        {failure != null && <ErrorNote>{String(failure)}</ErrorNote>}
       </div>
     </Modal>
   );

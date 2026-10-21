@@ -1,13 +1,22 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
-import type { CleanupProgress, DeviceCommand, LaunchResult, MapView, Override, PollDigest, ReportFormat, ScriptOrg, ScriptSide } from "./bindings";
+import type { CandidateQuery, CleanupProgress, DeviceChoice, DeviceCommand, MigrationSettings, PlanQuery, TrackQuery, LaunchResult, MapView, Override, PollDigest, ReportFormat, ScriptOrg, ScriptSide } from "./bindings";
 import { applyChoice } from "./map";
 import {
   addPlanned,
+  chooseForDevice,
+  createWaveFrom,
+  getCandidates,
+  getMigrationSettings,
+  saveMigrationSettings,
   cancelCleanup,
   checkConnection,
   cleanupHealthy,
+  createStructure,
+  getStructurePreview,
+  getRetire,
+  retireSources,
   createWave,
   deviceCommand,
   getDevice,
@@ -124,15 +133,32 @@ export function usePrepareActions(id: string) {
     publish: useMutation({ mutationFn: ({ side, org }: { side: ScriptSide; org: ScriptOrg }) => publishScript(id, side, org), onSuccess: refresh }),
     exportScript: useMutation({ mutationFn: exportScript }),
     restScript: useMutation({ mutationFn: ({ side, itemId, version }: { side: ScriptSide; itemId: string; version: string }) => setRestScript(id, side, itemId, version), onSuccess: refresh }),
-    options: useMutation({ mutationFn: (options: Parameters<typeof setOptions>[1]) => setOptions(id, options), onSuccess: refresh }),
+    // A delivery change re-paths the planned devices, so what Plan, Launch and Track show changes too.
+    options: useMutation({
+      mutationFn: (options: Parameters<typeof setOptions>[1]) => setOptions(id, options),
+      onSuccess: () => Promise.all([refresh(), ...["plan", "launch", "track", "wave-preview"].map((what) => qc.invalidateQueries({ queryKey: ["migrate", what, id] }))]),
+    }),
   };
 }
 
 // ---- Plan -------------------------------------------------------------------------------------------------------
 
 // The plan reads both servers and Ecoverse, so it is read when the step opens and when asked, never in the background.
-const planQuery = (id: string) => ({ queryKey: ["migrate", "plan", id], queryFn: () => getPlan(id), staleTime: Infinity, gcTime: 300_000, retry: false, refetchOnWindowFocus: false }) as const;
-export const usePlan = (id: string) => useQuery(planQuery(id));
+// Reading the servers is the slow part, so the core keeps what it read for a while; a page, filter or choice is quick.
+// Asking to read again goes through `useReread`, which sets the result under the same key.
+export const usePlan = (id: string, query: PlanQuery) =>
+  useQuery({ queryKey: ["migrate", "plan", id, query], queryFn: () => getPlan(id, false, query), staleTime: Infinity, gcTime: 300_000, retry: false, refetchOnWindowFocus: false, placeholderData: keepPreviousData });
+
+export function useRereadPlan(id: string, query: PlanQuery) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => getPlan(id, true, query),
+    onSuccess: (view) => {
+      qc.invalidateQueries({ queryKey: ["migrate", "plan", id], refetchType: "none" });
+      qc.setQueryData(["migrate", "plan", id, query], view);
+    },
+  });
+}
 
 /** Everything the steps after Plan show comes from the saved project, so adding devices refreshes all of it. */
 function useRefreshProject(id: string) {
@@ -147,12 +173,17 @@ function useRefreshProject(id: string) {
 
 export function usePlanActions(id: string) {
   const refresh = useRefreshProject(id);
-  return { add: useMutation({ mutationFn: () => addPlanned(id), onSuccess: refresh }) };
+  return {
+    add: useMutation({ mutationFn: () => addPlanned(id), onSuccess: refresh }),
+    choose: useMutation({ mutationFn: ({ deviceId, choice }: { deviceId: string; choice: DeviceChoice }) => chooseForDevice(id, deviceId, choice), onSuccess: refresh }),
+  };
 }
 
 // ---- Launch -----------------------------------------------------------------------------------------------------
 
 export const useLaunch = (id: string) => useQuery({ queryKey: ["migrate", "launch", id], queryFn: () => getLaunch(id), staleTime: 0, retry: false });
+export const useCandidates = (id: string, query: CandidateQuery, enabled: boolean) =>
+  useQuery({ queryKey: ["migrate", "candidates", id, query], queryFn: () => getCandidates(id, query), enabled, staleTime: 0, gcTime: 0, retry: false, placeholderData: keepPreviousData });
 export const useWavePreview = (id: string, wave: number | null) =>
   useQuery({ queryKey: ["migrate", "wave-preview", id, wave], queryFn: () => previewWave(id, wave as number), enabled: wave !== null, staleTime: 0, gcTime: 0, retry: false });
 
@@ -160,13 +191,15 @@ export function useLaunchActions(id: string) {
   const refresh = useRefreshProject(id);
   return {
     createWave: useMutation({ mutationFn: ({ label, max }: { label: string; max: number }) => createWave(id, label, max), onSuccess: refresh }),
+    createWaveFrom: useMutation({ mutationFn: ({ label, deviceIds }: { label: string; deviceIds: string[] }) => createWaveFrom(id, label, deviceIds), onSuccess: refresh }),
     launch: useMutation<LaunchResult, unknown, { wave: number; dryRun: boolean }>({ mutationFn: ({ wave, dryRun }) => launchWave(id, wave, dryRun), onSuccess: refresh }),
   };
 }
 
 // ---- Track ------------------------------------------------------------------------------------------------------
 
-export const useTrack = (id: string) => useQuery({ queryKey: ["migrate", "track", id], queryFn: () => getTrack(id), staleTime: 0, retry: false });
+export const useTrack = (id: string, query: TrackQuery) =>
+  useQuery({ queryKey: ["migrate", "track", id, query], queryFn: () => getTrack(id, query), staleTime: 0, retry: false, placeholderData: keepPreviousData });
 export const useDevice = (id: string, index: number | null) =>
   useQuery({ queryKey: ["migrate", "device", id, index], queryFn: () => getDevice(id, index as number), enabled: index !== null, staleTime: 0, retry: false });
 
@@ -243,6 +276,29 @@ export function useFinishActions(id: string) {
   };
 }
 
+export const useStructurePreview = (id: string, enabled: boolean) =>
+  useQuery({ queryKey: ["migrate", "structure", id], queryFn: () => getStructurePreview(id), enabled, staleTime: 0, gcTime: 0, retry: false });
+
+/** Creating customers and sites changes what the Map and Plan show and what tokens are missing. */
+export function useCreateStructure(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ serviceOrgId, dryRun }: { serviceOrgId: string; dryRun: boolean }) => createStructure(id, serviceOrgId, dryRun),
+    onSettled: () => Promise.all(["map", "map-details", "plan", "structure"].map((what) => qc.invalidateQueries({ queryKey: ["migrate", what, id] }))),
+  });
+}
+
+export const useRetire = (id: string) => useQuery({ queryKey: ["migrate", "retire", id], queryFn: () => getRetire(id), staleTime: 0, retry: false });
+
+export function useRetireActions(id: string) {
+  const qc = useQueryClient();
+  const refresh = useRefreshProject(id);
+  return useMutation({
+    mutationFn: (dryRun: boolean) => retireSources(id, dryRun),
+    onSettled: () => Promise.all([refresh(), qc.invalidateQueries({ queryKey: ["migrate", "retire", id] })]),
+  });
+}
+
 /** The latest step of each device in a bulk cleanup, by device name, while it runs. */
 export function useCleanupProgress(id: string, active: boolean): Record<string, CleanupProgress> {
   const [steps, setSteps] = useState<Record<string, CleanupProgress>>({});
@@ -270,3 +326,11 @@ export function useCleanupProgress(id: string, active: boolean): Record<string, 
 }
 
 export const stopCleanup = (id: string) => cancelCleanup(id).catch(() => undefined);
+
+// ---- Migration settings -----------------------------------------------------------------------------------------
+
+export const useMigrationSettings = (enabled = true) => useQuery({ queryKey: ["migrate", "settings"], queryFn: getMigrationSettings, enabled, staleTime: Infinity, retry: false });
+export function useSaveMigrationSettings() {
+  const qc = useQueryClient();
+  return useMutation({ mutationFn: (settings: MigrationSettings) => saveMigrationSettings(settings), onSuccess: (saved) => qc.setQueryData(["migrate", "settings"], saved) });
+}

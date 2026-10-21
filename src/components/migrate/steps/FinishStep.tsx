@@ -3,6 +3,7 @@ import { useState } from "react";
 import type { CleanupReport } from "../../../lib/migrate/bindings";
 import { stopCleanup, useCleanupProgress, useFinish, useFinishActions } from "../../../lib/migrate/queries";
 import { Button, CopyButton, Dot, ErrorNote, Modal, Status } from "../../ui";
+import { RetireCard } from "../parts/RetireCard";
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
@@ -19,7 +20,7 @@ function Card({ title, aside, children }: { title: string; aside?: React.ReactNo
 }
 
 /** Where the project stands, the report, and tidying up (step 7 in docs/migration/11-gui-design.md). */
-export function FinishStep({ projectId }: { projectId: string }) {
+export function FinishStep({ projectId, onOptions }: { projectId: string; onOptions: () => void }) {
   const finish = useFinish(projectId);
   const { report, cleanup } = useFinishActions(projectId);
   const [savedAt, setSavedAt] = useState<string | null>(null);
@@ -112,13 +113,7 @@ export function FinishStep({ projectId }: { projectId: string }) {
             </Button>
           </Card>
 
-          <Card title="Old source records" aside={<Status tone="muted" label="Not available yet" />}>
-            <p className="text-sm text-muted">
-              {v.retireSourceRecords
-                ? "This project is set to retire the old records after the review period, but deleting them from the source server isn't built yet. Remove them in N-central for now."
-                : "Deleting the old device records from the source server isn't built yet. Remove them in N-central when you are done."}
-            </p>
-          </Card>
+          <RetireCard projectId={projectId} onOptions={onOptions} />
         </>
       )}
 

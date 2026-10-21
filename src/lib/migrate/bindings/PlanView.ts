@@ -6,4 +6,12 @@ export type PlanView = { total: number,
 /**
  * Ready now and not yet in the project.
  */
-readyNew: number, readyEcoverse: number, readyRest: number, blocked: number, leftOut: number, inProject: number, blockedBy: Array<BlockerCount>, warnings: Array<string>, rows: Array<PlanRow>, };
+readyNew: number, readyEcoverse: number, readyRest: number, blocked: number, leftOut: number, inProject: number, blockedBy: Array<BlockerCount>, warnings: Array<string>, 
+/**
+ * Every source customer with devices, for the filter.
+ */
+customers: Array<string>, 
+/**
+ * How many rows match the query (the rows below are one page of them), and where the page starts.
+ */
+matching: number, offset: number, rows: Array<PlanRow>, };

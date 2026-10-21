@@ -1,10 +1,11 @@
-import { ChevronRight, KeyRound, RefreshCw } from "lucide-react";
+import { ChevronRight, KeyRound, PlusSquare, RefreshCw } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { MapRow, MapView, TokenReport, TokenRow, UnitRef } from "../../../lib/migrate/bindings";
 import { MATCH_WORDS, TOKEN_WORDS, mapCounts, missingTokens, needsChoice, tokenCell, visibleRows } from "../../../lib/migrate/map";
 import { useMap, useMapActions, useMapDetails } from "../../../lib/migrate/queries";
 import { Button, Dot, ErrorNote, Menu, MenuContent, MenuItem, MenuTrigger, Segmented, Table, Tooltip, inputClass } from "../../ui";
 import { DestPicker } from "../parts/DestPicker";
+import { StructureDialog } from "../parts/StructureDialog";
 import { GenerateTokensDialog, TokenResultDialog } from "../parts/TokenDialogs";
 
 function TokenCellView({ row, details, loading }: { row: MapRow; details: ReturnType<typeof useMapDetails>["data"]; loading: boolean }) {
@@ -42,6 +43,7 @@ export function MapStep({ projectId, onContinue }: { projectId: string; onContin
   const [text, setText] = useState("");
   const [onlyNeeds, setOnlyNeeds] = useState<"all" | "needs">("all");
   const [confirming, setConfirming] = useState(false);
+  const [creating, setCreating] = useState(false);
   const [report, setReport] = useState<TokenReport | null>(null);
   const [rowError, setRowError] = useState<string | null>(null);
 
@@ -65,6 +67,10 @@ export function MapStep({ projectId, onContinue }: { projectId: string; onContin
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="text-sm font-semibold">Map</h2>
         <div className="flex items-center gap-2">
+          <Button size="sm" disabled={!view || rows.every((r) => r.status !== "unmatched")} onClick={() => setCreating(true)}>
+            <PlusSquare />
+            Create missing…
+          </Button>
           <Menu>
             <MenuTrigger asChild>
               <Button size="sm" disabled={!details.data}>
@@ -205,6 +211,7 @@ export function MapStep({ projectId, onContinue }: { projectId: string; onContin
         />
       )}
       {report && <TokenResultDialog report={report} onClose={() => setReport(null)} />}
+      {creating && <StructureDialog projectId={projectId} onClose={() => setCreating(false)} />}
     </div>
   );
 }

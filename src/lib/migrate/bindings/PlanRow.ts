@@ -14,6 +14,14 @@ customer: string, site: string | null,
  */
 destination: string | null, path: DeliveryPath | null, blockers: Array<Blocker>, warnings: Array<Warning>, ready: boolean, leftOut: boolean, 
 /**
+ * The operator took this device out (as opposed to its customer or site being left out in Map).
+ */
+leftOutByChoice: boolean, 
+/**
+ * The operator chose the path, over the suggested one.
+ */
+pathChosen: boolean, 
+/**
  * Already in the project, and where it is.
  */
 stage: Stage | null, };

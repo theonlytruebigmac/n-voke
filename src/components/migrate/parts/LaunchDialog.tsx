@@ -1,5 +1,7 @@
 import { useState } from "react";
 import type { LaunchResult } from "../../../lib/migrate/bindings";
+import { jobsFromLaunch } from "../../../lib/migrate/activity";
+import { jobStore } from "../../../lib/jobs";
 import { useLaunchActions, useWavePreview } from "../../../lib/migrate/queries";
 import { Button, ErrorNote, Modal } from "../../ui";
 
@@ -99,7 +101,15 @@ export function LaunchDialog({ projectId, wave, onClose, onLaunched }: { project
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
-          <Button variant="primary" busy={launch.isPending} disabled={blocked} onClick={() => launch.mutate({ wave, dryRun }, { onSuccess: setResult })}>
+          <Button variant="primary" busy={launch.isPending} disabled={blocked} onClick={() => launch.mutate(
+                { wave, dryRun },
+                {
+                  onSuccess: (r) => {
+                    if (!r.wasDryRun) jobsFromLaunch(r.report).forEach((job) => jobStore.add(job));
+                    setResult(r);
+                  },
+                },
+              )}>
             {dryRun ? "Show the requests" : p ? `Launch ${total}` : "Launch"}
           </Button>
         </>

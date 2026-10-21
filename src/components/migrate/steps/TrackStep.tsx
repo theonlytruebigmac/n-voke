@@ -1,39 +1,40 @@
 import { RefreshCw } from "lucide-react";
 import { useMemo, useState } from "react";
-import type { TrackRow } from "../../../lib/migrate/bindings";
+import type { GroupCount, TrackGroup, TrackRow } from "../../../lib/migrate/bindings";
 import { useNow } from "../../../lib/format";
 import { useDeviceActions, useProject, useTrack, useTracker } from "../../../lib/migrate/queries";
 import { readyToFinish } from "../../../lib/migrate/progress";
-import { GROUPS, ago, filterTrack, groupCounts, needsYou, type GroupId } from "../../../lib/migrate/track";
+import { GROUP_LABELS, ago } from "../../../lib/migrate/track";
+import { useDebounced } from "../../../lib/useDebounced";
 import { describeStage, ecoWords, STAGE_WORDS, stageView } from "../../../lib/migrate/words";
 import { Button, ErrorNote, Status, Table, inputClass, selectClass } from "../../ui";
 import { DeviceSheet } from "../parts/DeviceSheet";
 
-const PAGE = 200;
+const PAGE = 100;
 const PATH_WORDS = { ecoverse: "Ecoverse", rest: "N-central" } as const;
 
-function Strip({ counts, active, onPick }: { counts: ReturnType<typeof groupCounts>; active: GroupId | null; onPick: (id: GroupId | null) => void }) {
+function Strip({ counts, active, onPick }: { counts: GroupCount[]; active: TrackGroup | null; onPick: (id: TrackGroup | null) => void }) {
   const total = counts.reduce((n, c) => n + c.count, 0);
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap gap-1.5">
         {counts.map((c) => (
           <button
-            key={c.id}
-            onClick={() => onPick(active === c.id ? null : c.id)}
-            aria-pressed={active === c.id}
-            className={`rounded-md border px-2.5 py-1 text-xs transition-colors ${active === c.id ? "border-accent bg-accent-soft" : "border-border hover:bg-surface-2"} ${c.id === "needsYou" && c.count > 0 ? "text-warn" : ""}`}
+            key={c.group}
+            onClick={() => onPick(active === c.group ? null : c.group)}
+            aria-pressed={active === c.group}
+            className={`rounded-md border px-2.5 py-1 text-xs transition-colors ${active === c.group ? "border-accent bg-accent-soft" : "border-border hover:bg-surface-2"} ${c.group === "needsYou" && c.count > 0 ? "text-warn" : ""}`}
           >
-            {c.label} <span className="tabular-nums">{c.count}</span>
+            {GROUP_LABELS[c.group]} <span className="tabular-nums">{c.count}</span>
           </button>
         ))}
       </div>
       <div className="flex h-1.5 overflow-hidden rounded-full bg-surface-3" aria-hidden>
         {counts.map((c) => (
           <div
-            key={c.id}
+            key={c.group}
             style={{ width: total ? `${(c.count / total) * 100}%` : 0 }}
-            className={c.id === "needsYou" ? "bg-warn" : c.id === "healthy" || c.id === "done" ? "bg-ok" : c.id === "planned" ? "bg-faint" : "bg-accent"}
+            className={c.group === "needsYou" ? "bg-warn" : c.group === "healthy" || c.group === "done" ? "bg-ok" : c.group === "planned" ? "bg-faint" : "bg-accent"}
           />
         ))}
       </div>
@@ -41,13 +42,13 @@ function Strip({ counts, active, onPick }: { counts: ReturnType<typeof groupCoun
   );
 }
 
-function NeedsYou({ rows, now, onOpen }: { rows: TrackRow[]; now: number; onOpen: (index: number) => void }) {
+function NeedsYou({ rows, total, now, onOpen, onShowAll }: { rows: TrackRow[]; total: number; now: number; onOpen: (index: number) => void; onShowAll: () => void }) {
   if (rows.length === 0) return null;
   return (
     <section className="space-y-2">
-      <h3 className="text-sm font-semibold">Needs you ({rows.length})</h3>
+      <h3 className="text-sm font-semibold">Needs you ({total})</h3>
       <ul className="divide-y divide-border rounded-lg border border-border">
-        {rows.slice(0, 8).map((r) => (
+        {rows.map((r) => (
           <li key={r.index} className="flex items-start justify-between gap-3 px-3 py-2.5">
             <div className="min-w-0 text-sm">
               <span className="font-medium">{r.name}</span> <span className="text-warn">{r.needsMatch ? "Several fit" : STAGE_WORDS[r.stage].short}</span>
@@ -61,7 +62,14 @@ function NeedsYou({ rows, now, onOpen }: { rows: TrackRow[]; now: number; onOpen
           </li>
         ))}
       </ul>
-      {rows.length > 8 && <p className="text-xs text-faint">{rows.length - 8} more: choose Needs you above to see them all.</p>}
+      {total > rows.length && (
+        <p className="text-xs text-faint">
+          {total - rows.length} more.{" "}
+          <button className="underline hover:text-text" onClick={onShowAll}>
+            Show them all
+          </button>
+        </p>
+      )}
     </section>
   );
 }
@@ -69,21 +77,25 @@ function NeedsYou({ rows, now, onOpen }: { rows: TrackRow[]; now: number; onOpen
 /** The home of a running project: the stages, what needs the person, and every device (step 6 in docs/migration/11-gui-design.md). */
 export function TrackStep({ projectId, onContinue }: { projectId: string; onContinue: () => void }) {
   const project = useProject(projectId);
-  const track = useTrack(projectId);
   const tracker = useTracker(projectId, true);
   const { poll } = useDeviceActions(projectId);
   const now = useNow();
-  const [group, setGroup] = useState<GroupId | null>(null);
+  const [group, setGroup] = useState<TrackGroup | null>(null);
   const [wave, setWave] = useState<number | null>(null);
   const [customer, setCustomer] = useState<string | null>(null);
   const [text, setText] = useState("");
-  const [shown, setShown] = useState(PAGE);
+  const [offset, setOffset] = useState(0);
   const [open, setOpen] = useState<number | null>(null);
+  const search = useDebounced(text.trim());
+  const query = useMemo(() => ({ group, wave, customer, text: search, offset, limit: PAGE }), [group, wave, customer, search, offset]);
+  const track = useTrack(projectId, query);
+  const narrow = (change: () => void) => {
+    change();
+    setOffset(0);
+  };
 
   const view = track.data;
-  const counts = useMemo(() => groupCounts(project.data?.stageCounts ?? {}, project.data?.ecoverseWaiting ?? 0), [project.data]);
-  const rows = useMemo(() => (view ? filterTrack(view.rows, { group, wave, customer, text }) : []), [view, group, wave, customer, text]);
-  const attention = useMemo(() => (view ? view.rows.filter(needsYou) : []), [view]);
+  const rows = view?.rows ?? [];
 
   const readOnly = tracker.error?.includes("Another N-voke window") ?? false;
   const status = readOnly ? (
@@ -120,7 +132,7 @@ export function TrackStep({ projectId, onContinue }: { projectId: string; onCont
         </div>
       )}
 
-      <Strip counts={counts} active={group} onPick={(g) => (setGroup(g), setShown(PAGE))} />
+      {view && <Strip counts={view.counts} active={group} onPick={(g) => narrow(() => setGroup(g))} />}
       {project.data && readyToFinish(project.data) && (
         <div className="flex items-center justify-between gap-3 rounded-lg border border-ok/40 bg-ok-soft px-4 py-3">
           <p className="text-sm">
@@ -131,20 +143,20 @@ export function TrackStep({ projectId, onContinue }: { projectId: string; onCont
           </Button>
         </div>
       )}
-      <NeedsYou rows={attention} now={now} onOpen={setOpen} />
+      {view && <NeedsYou rows={view.needsYou} total={view.needsYouTotal} now={now} onOpen={setOpen} onShowAll={() => narrow(() => setGroup("needsYou"))} />}
 
       {track.isError ? (
         <ErrorNote>{String(track.error)}</ErrorNote>
       ) : !view ? (
         <p className="text-sm text-muted">Loading…</p>
-      ) : view.rows.length === 0 ? (
+      ) : view.counts.every((c) => c.count === 0) ? (
         <p className="text-sm text-muted">No devices are in this project yet. Add them in Plan.</p>
       ) : (
         <section className="space-y-2">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <h3 className="text-sm font-semibold">Devices</h3>
             <div className="flex items-center gap-2">
-              <select className={`${selectClass} w-36`} value={wave ?? ""} onChange={(e) => setWave(e.target.value ? Number(e.target.value) : null)} aria-label="Wave">
+              <select className={`${selectClass} w-36`} value={wave ?? ""} onChange={(e) => narrow(() => setWave(e.target.value ? Number(e.target.value) : null))} aria-label="Wave">
                 <option value="">All waves</option>
                 {view.waves.map((w) => (
                   <option key={w.number} value={w.number}>
@@ -152,7 +164,7 @@ export function TrackStep({ projectId, onContinue }: { projectId: string; onCont
                   </option>
                 ))}
               </select>
-              <select className={`${selectClass} w-40`} value={customer ?? ""} onChange={(e) => setCustomer(e.target.value || null)} aria-label="Customer">
+              <select className={`${selectClass} w-40`} value={customer ?? ""} onChange={(e) => narrow(() => setCustomer(e.target.value || null))} aria-label="Customer">
                 <option value="">All customers</option>
                 {view.customers.map((c) => (
                   <option key={c} value={c}>
@@ -160,11 +172,11 @@ export function TrackStep({ projectId, onContinue }: { projectId: string; onCont
                   </option>
                 ))}
               </select>
-              <input className={`${inputClass} w-40`} placeholder="Search" value={text} onChange={(e) => setText(e.target.value)} aria-label="Search devices" />
+              <input className={`${inputClass} w-40`} placeholder="Search" value={text} onChange={(e) => narrow(() => setText(e.target.value))} aria-label="Search devices" />
             </div>
           </div>
           {rows.length === 0 ? (
-            <p className="text-sm text-muted">No devices match{group ? ` ${GROUPS.find((g) => g.id === group)?.label}` : ""}.</p>
+            <p className="text-sm text-muted">No devices match{group ? ` ${GROUP_LABELS[group]}` : ""}.</p>
           ) : (
             <>
               <Table
@@ -179,7 +191,7 @@ export function TrackStep({ projectId, onContinue }: { projectId: string; onCont
                   </>
                 }
               >
-                {rows.slice(0, shown).map((r) => (
+                {rows.map((r) => (
                   <tr key={r.index} className="cursor-pointer hover:bg-surface-2/60" onClick={() => setOpen(r.index)}>
                     <td className="font-medium">{r.name}</td>
                     <td className="text-muted">{r.customer}</td>
@@ -194,11 +206,21 @@ export function TrackStep({ projectId, onContinue }: { projectId: string; onCont
                   </tr>
                 ))}
               </Table>
-              {rows.length > shown && (
-                <Button size="sm" onClick={() => setShown(shown + PAGE)}>
-                  Show more ({rows.length - shown} left)
-                </Button>
-              )}
+              <div className="flex items-center justify-between gap-3 text-xs text-muted">
+                <span>
+                  {view.offset + 1}–{view.offset + rows.length} of {view.matching}
+                </span>
+                {view.matching > PAGE && (
+                  <span className="flex items-center gap-2">
+                    <Button size="sm" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE))}>
+                      Previous
+                    </Button>
+                    <Button size="sm" disabled={offset + PAGE >= view.matching} onClick={() => setOffset(offset + PAGE)}>
+                      Next
+                    </Button>
+                  </span>
+                )}
+              </div>
             </>
           )}
         </section>

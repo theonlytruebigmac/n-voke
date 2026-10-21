@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import { ArrowRightLeft, MoreHorizontal, Plus, Server } from "lucide-react";
+import { ArrowRightLeft, MoreHorizontal, Plus, Server, Settings2 } from "lucide-react";
 import type { ProjectSummary, ServerView } from "../../lib/migrate/bindings";
 import { projectProgress } from "../../lib/migrate/progress";
 import { useProjectActions, useProjects, useServers } from "../../lib/migrate/queries";
 import { formatRelative, useNow } from "../../lib/format";
 import { Button, EmptyState, ErrorNote, IconButton, Menu, MenuContent, MenuItem, MenuTrigger, Modal, PageHeader, Status, Table } from "../ui";
+import { MigrationSettingsSheet } from "./MigrationSettingsSheet";
 import { NewProjectDialog } from "./NewProjectDialog";
 import { ServersSheet } from "./ServersSheet";
 import { Workspace } from "./Workspace";
@@ -77,6 +78,7 @@ export function MigratePage({ ecoverseReady }: { ecoverseReady: boolean }) {
   const [openId, setOpenId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [showServers, setShowServers] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [deleting, setDeleting] = useState<ProjectSummary | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const list = projects.data ?? [];
@@ -90,6 +92,7 @@ export function MigratePage({ ecoverseReady }: { ecoverseReady: boolean }) {
   const overlays = (
     <>
       {showServers && <ServersSheet onClose={() => setShowServers(false)} />}
+      {showSettings && <MigrationSettingsSheet onClose={() => setShowSettings(false)} />}
       {creating && (
         <NewProjectDialog
           ecoverseReady={ecoverseReady}
@@ -149,6 +152,10 @@ export function MigratePage({ ecoverseReady }: { ecoverseReady: boolean }) {
             <Button size="sm" onClick={() => setShowServers(true)}>
               <Server />
               Manage servers
+            </Button>
+            <Button size="sm" onClick={() => setShowSettings(true)}>
+              <Settings2 />
+              Settings
             </Button>
             <Button
               size="sm"

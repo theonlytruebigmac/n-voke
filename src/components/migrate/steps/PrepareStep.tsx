@@ -2,9 +2,10 @@ import { Download } from "lucide-react";
 import { useEffect, useState } from "react";
 import { defaultScriptOrg, searchScriptOrgs as searchOrgs } from "../../../lib/migrate/api";
 import type { EcoverseCard as EcoverseCardData, PrepareView, RestCard as RestCardData, ScriptOrg, ScriptSide, ScriptState } from "../../../lib/migrate/bindings";
-import { LIMITS, parseOptions, sameOptions, toForm, type OptionsForm } from "../../../lib/migrate/options";
+import { parseOptions, sameOptions, toForm, type OptionsForm } from "../../../lib/migrate/options";
 import { usePrepare, usePrepareActions } from "../../../lib/migrate/queries";
 import { Combobox } from "../../Combobox";
+import { OptionsFields } from "../parts/OptionsFields";
 import { Button, CopyButton, ErrorNote, Field, Status, inputClass } from "../../ui";
 
 const STATE: Record<ScriptState, { tone: "ok" | "warn" | "muted"; label: string }> = {
@@ -160,53 +161,11 @@ function OptionsCard({ projectId, view }: { projectId: string; view: PrepareView
   const parsed = parseOptions(form);
   const errors = parsed.ok ? {} : parsed.errors;
   const changed = !parsed.ok || !sameOptions(parsed.options, view.options);
-  const number = (key: keyof typeof LIMITS, width = "w-24") => (
-    <input className={`${inputClass} ${width}`} inputMode="numeric" value={form[key]} onChange={(e) => setForm({ ...form, [key]: e.target.value })} aria-invalid={!!errors[key]} />
-  );
 
   return (
     <Card title="Options">
       <div className="space-y-4">
-        <fieldset className="space-y-2">
-          <legend className="text-xs font-medium text-muted">What happens to the old agent</legend>
-          {(
-            [
-              ["full", "Full cleanup", "Removes every N-central component, then installs. The default."],
-              ["none", "Install over the top", "Installs without removing first. A newer destination agent can leave the device in the source's Ecoverse tenant."],
-            ] as const
-          ).map(([value, title, text]) => (
-            <label key={value} className="flex cursor-pointer items-start gap-2.5 rounded-md border border-border px-3 py-2 has-[:checked]:border-accent has-[:checked]:bg-accent-soft">
-              <input type="radio" name="clean" className="mt-1" checked={form.cleanMode === value} onChange={() => setForm({ ...form, cleanMode: value })} />
-              <span className="text-sm">
-                <span className="font-medium">{title}</span>
-                <span className="block text-xs text-muted">{text}</span>
-              </span>
-            </label>
-          ))}
-        </fieldset>
-
-        <div className="grid grid-cols-2 gap-4">
-          <Field label="Review period (days)" error={errors.reviewDays} hint="How long each device keeps its migration record before it removes itself.">
-            {number("reviewDays")}
-          </Field>
-          <Field label="Wave size (devices)" error={errors.waveSize} hint="How many devices go in one wave.">
-            {number("waveSize")}
-          </Field>
-          <Field label="Retry every (minutes)" error={errors.taskRepeatMinutes} hint="How often a device tries again until the migration works.">
-            {number("taskRepeatMinutes")}
-          </Field>
-          <Field label="Keep retrying for (days)" error={errors.taskExpiryDays} hint="After this the device stops trying.">
-            {number("taskExpiryDays")}
-          </Field>
-        </div>
-
-        <label className="flex cursor-pointer items-start gap-2.5 text-sm">
-          <input type="checkbox" className="mt-1" checked={form.retireSourceRecords} onChange={(e) => setForm({ ...form, retireSourceRecords: e.target.checked })} />
-          <span>
-            After the review period, retire the old source records
-            <span className="block text-xs text-muted">The finish step asks again before anything is deleted.</span>
-          </span>
-        </label>
+        <OptionsFields form={form} setForm={setForm} errors={errors} deliveryLocked={view.deliveryLocked} />
 
         {options.isError && <ErrorNote>{String(options.error)}</ErrorNote>}
         <div className="flex items-center justify-end gap-3">

@@ -9,7 +9,11 @@ export type PrepareView = {
 /**
  * For example `0.1.0+fa1d1a0`.
  */
-scriptVersion: string, scriptName: string, fileName: string, delivery: Delivery, ecoverse: EcoverseCard, rest: RestCard, options: ProjectOptions, 
+scriptVersion: string, scriptName: string, fileName: string, delivery: Delivery, 
+/**
+ * A wave has launched, so the delivery can't be changed any more.
+ */
+deliveryLocked: boolean, ecoverse: EcoverseCard, rest: RestCard, options: ProjectOptions, 
 /**
  * This destination is the same server, so the agents are reinstalled in place.
  */

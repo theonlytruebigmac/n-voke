@@ -36,32 +36,9 @@ export const WARNING_WORDS: Record<Warning, string> = {
   pathOverridden: "The delivery path was changed from the suggested one.",
 };
 
-export type PlanShow = "all" | "ready" | "blocked";
-
-export interface PlanFilter {
-  show: PlanShow;
-  /** A customer name, or null for all. */
-  customer: string | null;
-  text: string;
-}
-
-const isBlocked = (r: PlanRow) => !r.ready && !r.leftOut;
-
-export function filterPlan(rows: PlanRow[], f: PlanFilter): PlanRow[] {
-  const term = f.text.trim().toLowerCase();
-  return rows.filter((r) => {
-    if (f.show === "ready" && !r.ready) return false;
-    if (f.show === "blocked" && !isBlocked(r)) return false;
-    if (f.customer !== null && r.customer !== f.customer) return false;
-    return !term || r.name.toLowerCase().includes(term) || r.customer.toLowerCase().includes(term) || (r.destination?.toLowerCase().includes(term) ?? false);
-  });
-}
-
-export const planCustomers = (rows: PlanRow[]): string[] => [...new Set(rows.map((r) => r.customer))].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
-
 /** Whether the table's note for a row is a problem (blocked), something to know, or nothing. */
 export function rowNote(r: PlanRow): { tone: "err" | "warn" | "ok" | "muted"; text: string } {
-  if (r.leftOut) return { tone: "muted", text: "Left out" };
+  if (r.leftOut) return { tone: "muted", text: r.leftOutByChoice ? "Left out by you" : "Left out" };
   if (r.blockers.length) return { tone: "err", text: r.blockers.map((b) => BLOCKER_WORDS[b].short).join(", ") };
   if (r.warnings.length) return { tone: "warn", text: r.warnings.map((w) => WARNING_WORDS[w]).join(" ") };
   return { tone: "ok", text: "Ready" };

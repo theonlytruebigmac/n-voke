@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { CleanupReport, ConnectReport, DeviceCommand, DeviceDetail, FinishView, LaunchPreview, LaunchResult, LaunchView, PlanAdded, PlanView, PollDigest, ReportFormat, TrackView, Delivery, DestEcoverse, EcoCredential, MapDetails, MapView, Override, PrepareView, ProjectOptions, ScriptSide, ProjectSummary, ScriptOrg, ServerInfo, ServerView, TokenReport } from "./bindings";
+import type { StructurePreview, StructureReport, RetireReport, RetireView, CandidatePage, CandidateQuery, DeviceChoice, MigrationSettings, PlanQuery, TrackQuery, CleanupReport, ConnectReport, DeviceCommand, DeviceDetail, FinishView, LaunchPreview, LaunchResult, LaunchView, PlanAdded, PlanView, PollDigest, ReportFormat, TrackView, Delivery, DestEcoverse, EcoCredential, MapDetails, MapView, Override, PrepareView, ProjectOptions, ScriptSide, ProjectSummary, ScriptOrg, ServerInfo, ServerView, TokenReport } from "./bindings";
 
 // Thin typed wrappers over the Tauri commands. No logic lives here: the rules are in nvoke-core, and the types
 // come from the Rust types (`npm run bindings`), so this file only names the commands.
@@ -58,15 +58,18 @@ export const exportScript = () => invoke<string>("project_export_script");
 export const setRestScript = (id: string, side: ScriptSide, itemId: string, version: string) => invoke<void>("project_rest_script", { id, side, itemId, version });
 export const setOptions = (id: string, options: ProjectOptions) => invoke<void>("project_options", { id, options });
 
-export const getPlan = (id: string) => invoke<PlanView>("project_plan", { id });
+export const getPlan = (id: string, refresh: boolean, query: PlanQuery) => invoke<PlanView>("project_plan", { id, refresh, query });
+export const chooseForDevice = (id: string, deviceId: string, choice: DeviceChoice) => invoke<string>("project_device_choice", { id, deviceId, choice });
 export const addPlanned = (id: string) => invoke<PlanAdded>("project_plan_add", { id });
 
 export const getLaunch = (id: string) => invoke<LaunchView>("project_launch", { id });
 export const createWave = (id: string, label: string, max: number) => invoke<string>("project_wave_create", { id, label, max });
+export const getCandidates = (id: string, query: CandidateQuery) => invoke<CandidatePage>("project_wave_candidates", { id, query });
+export const createWaveFrom = (id: string, label: string, deviceIds: string[]) => invoke<string>("project_wave_create_from", { id, label, deviceIds });
 export const previewWave = (id: string, wave: number) => invoke<LaunchPreview>("project_wave_preview", { id, wave });
 export const launchWave = (id: string, wave: number, dryRun: boolean) => invoke<LaunchResult>("project_wave_launch", { id, wave, dryRun });
 
-export const getTrack = (id: string) => invoke<TrackView>("project_track", { id });
+export const getTrack = (id: string, query: TrackQuery) => invoke<TrackView>("project_track", { id, query });
 export const getDevice = (id: string, index: number) => invoke<DeviceDetail>("project_device", { id, index });
 export const deviceCommand = (id: string, index: number, command: DeviceCommand) => invoke<string>("project_device_command", { id, index, command });
 export const pollNow = (id: string) => invoke<PollDigest>("project_poll", { id });
@@ -76,4 +79,11 @@ export const stopTracker = (id: string) => invoke<void>("tracker_stop", { id });
 export const getFinish = (id: string) => invoke<FinishView>("project_finish", { id });
 export const writeReport = (id: string, format: ReportFormat) => invoke<string>("project_report", { id, format });
 export const cleanupHealthy = (id: string) => invoke<CleanupReport>("project_cleanup", { id });
+export const getStructurePreview = (id: string) => invoke<StructurePreview>("project_structure_preview", { id, only: null });
+export const createStructure = (id: string, serviceOrgId: string, dryRun: boolean) => invoke<StructureReport>("project_structure_create", { id, serviceOrgId, only: null, dryRun });
+export const getRetire = (id: string) => invoke<RetireView>("project_retire_view", { id });
+export const retireSources = (id: string, dryRun: boolean) => invoke<RetireReport>("project_retire", { id, dryRun });
 export const cancelCleanup = (id: string) => invoke<void>("project_cleanup_cancel", { id });
+
+export const getMigrationSettings = () => invoke<MigrationSettings>("migration_settings_get");
+export const saveMigrationSettings = (settings: MigrationSettings) => invoke<MigrationSettings>("migration_settings_save", { settings });
