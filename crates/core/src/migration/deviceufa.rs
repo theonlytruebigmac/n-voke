@@ -11,7 +11,7 @@ use super::project::Event;
 /// Where the Probe's answer carries the device's `status.json`, after the message line.
 const MARKER: &str = "\nstatus.json: ";
 /// The history entries that are the watcher doing something about the agent.
-const STEP_EVENTS: [&str; 3] = ["ufa-sync-restart", "ufa-repair", "ufa-repair-restart"];
+const STEP_EVENTS: [&str; 4] = ["ufa-sync-restart", "ufa-repair", "ufa-repair-restart", "ufa-absent-restart"];
 const MAX_STEPS: usize = 6;
 
 /// The Ecoverse agent's state on the device, as the installer's watcher classifies it from the agent's own log.
@@ -45,7 +45,7 @@ pub enum UfaState {
 #[serde(rename_all = "camelCase")]
 pub struct UfaStep {
     pub at: String,
-    /// `ufa-sync-restart`, `ufa-repair` or `ufa-repair-restart`.
+    /// `ufa-sync-restart`, `ufa-repair`, `ufa-repair-restart` or `ufa-absent-restart`.
     pub event: String,
     pub detail: String,
 }
@@ -61,6 +61,8 @@ pub struct DeviceUfa {
     pub restarts: u32,
     /// When the one-time repair was done, if it was.
     pub repaired_at: Option<String>,
+    /// When the Windows Agent services were restarted because the agent never appeared after the install, if they were.
+    pub absent_restarted_at: Option<String>,
     /// When the watcher first saw a fault, if it did.
     pub fault_seen_at: Option<String>,
     /// After a repair: files written to the agent's folder since the last restart, the sign that it is being redeployed.
@@ -120,6 +122,7 @@ fn from_status(probed_at: &str, status: &Value) -> Option<DeviceUfa> {
         probed_at: probed_at.to_string(),
         restarts: status.get("ufaSyncRestarts").and_then(Value::as_u64).unwrap_or(0) as u32,
         repaired_at: text(status, "ufaRepairedAt"),
+        absent_restarted_at: text(status, "ufaAbsentRestartedAt"),
         fault_seen_at: text(status, "ufaFaultSeenAt"),
         redeploy_files: ufa.get("redeployFiles").and_then(Value::as_u64).map(|n| n as u32),
         warning: text(status, "warning"),
@@ -178,6 +181,18 @@ mod tests {
         assert_eq!(ufa.probed_at, "2026-10-21T16:25:00Z");
         assert_eq!(ufa.steps.iter().map(|s| s.event.as_str()).collect::<Vec<_>>(), ["ufa-sync-restart", "ufa-repair"]);
         assert_eq!(ufa.steps[1].detail, "removed the UFA core");
+    }
+
+    #[test]
+    fn a_restart_for_an_agent_that_never_appeared_comes_through_as_a_step_and_a_time() {
+        let status = r#"{"ufaAbsentRestartedAt":"2026-10-21T21:43:00Z","ufa":{"present":false,"running":false,"provisioned":false,"redeployFiles":0},
+            "history":[
+              {"at":"2026-10-21T21:38:57Z","event":"awaiting-ufa","detail":"MspAgent is not installed yet; 12 min since install"},
+              {"at":"2026-10-21T21:43:00Z","event":"ufa-absent-restart","detail":"restarted the Windows Agent services once"},
+              {"at":"2026-10-21T21:26:04Z","event":"cleanup-ufa-leftover","detail":"Ecoverse agent folders left in place on purpose"}]}"#;
+        let ufa = device_ufa(&[probe("2026-10-21T21:50:00Z", status)]).unwrap();
+        assert_eq!((ufa.state, ufa.absent_restarted_at.as_deref(), ufa.repaired_at), (UfaState::NotInstalled, Some("2026-10-21T21:43:00Z"), None));
+        assert_eq!(ufa.steps.iter().map(|s| s.event.as_str()).collect::<Vec<_>>(), ["ufa-absent-restart"]);
     }
 
     #[test]

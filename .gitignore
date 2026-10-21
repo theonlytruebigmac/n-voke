@@ -23,5 +23,6 @@ dist-ssr
 *.sln
 *.sw?
 
-# Logs collected from lab devices (nvoke-sup-*): job.json in them holds a registration token
+# Logs collected from lab devices (nvoke-sup-*, sup-*): job.json in them holds a registration token
 nvoke-sup-*/
+sup-*/

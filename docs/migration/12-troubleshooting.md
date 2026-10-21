@@ -42,6 +42,7 @@ What to get right:
 | **Login rejected** (`rejected`) | `400 The SSL certificate error` for the login, never accepted | After 30 minutes of it, the one-time repair. A restart doesn't help | If still refused after the repair: check TLS inspection, proxy and firewall on the path, then report it to N-able with the log |
 | **Downloads refused** (`denied`) | The login works, but the component CDN answers the downloads with `403` | After 30 minutes, the one-time repair | If still refused after the repair, report it to N-able |
 | **Being redeployed** | After the repair: the agent is gone and the Windows Agent is putting it back | Watches the `Msp Agent` folder for new files; restarts the Windows Agent services again (at most twice) only if the folder has been quiet for 10 minutes | Usually 5 to 15 minutes. Wait |
+| **Not installed yet** / **Not back yet** (`notInstalled`) | There is no `MspAgent` service after the install. The Windows Agent normally deploys it a few minutes after itself | After 15 minutes it restarts the Windows Agent services once (*Not back yet*, step *Restarted the Windows Agent services*) and keeps waiting up to 120 minutes | See [The Ecoverse agent never appeared](#the-ecoverse-agent-never-appeared) |
 | **Sending data** (`synced`) | The inventory component arrived | Marks the device healthy | Nothing |
 
 The installer watches for 360 minutes after the install once it has seen a fault (120 otherwise). After that it stops and leaves a `warning` in `status.json`; from then on it is yours.
@@ -73,6 +74,17 @@ foreach ($ip in '44.228.168.113','54.244.124.62','44.224.114.74') {   # the lab'
 ```
 
 `400` means the handshake worked, `000` a reset or timeout. Mostly `400` means the path works now; `000` on one address only means that address is bad on your path; `000` at random on all of them points at the firewall or inspection device (look for resets to those addresses in its log) or at the service.
+
+## The Ecoverse agent never appeared
+
+Seen on SUP-2190 in the reverse move ([findings](10-phase0-findings.md#the-ecoverse-agent-that-never-came-back-after-a-reverse-move-2026-10-21)): the Windows Agent installed and checks in, but there is no `MspAgent` service and no `C:\Program Files (x86)\Msp Agent` folder, and nothing comes back. On the devices that worked, the old agent's removal had finished by itself before the cleanup ran, the folder was gone and a fresh agent was deployed. On SUP-2190 the removal had not finished, the cleanup deleted the folder, and the Windows Agent never deployed an agent. **N-voke's cleanup no longer deletes the Ecoverse agent's folders**; a device moved with an older installer (v0.2.3 and before) can still end up like this.
+
+On the device, in this order, watching `C:\Program Files (x86)\Msp Agent` for new files for about 15 minutes after each step:
+
+1. Restart *Windows Agent Maintenance Service*, wait 5 seconds, then restart *Windows Agent Service*. (The installer already does this once, 15 minutes after the install.)
+2. If nothing happens, look in the Windows Agent's own log folder (under `C:\Program Files (x86)\N-able Technologies\Windows Agent`) for what it did about the Ecoverse agent.
+3. If the `Msp Agent` folder was deleted, restore it with `msp-agent-core.exe` in it, copied from a working device, and repeat step 1. In the lab, with the folder restored and both services restarted, something removed the folder itself and the agent came back. This is a lab workaround, not something N-voke does.
+4. If it still doesn't come back, report it to N-able with the Windows Agent logs and the device's `status.json`.
 
 ## Doing the repair by hand
 

@@ -5,6 +5,6 @@
  */
 export type UfaStep = { at: string, 
 /**
- * `ufa-sync-restart`, `ufa-repair` or `ufa-repair-restart`.
+ * `ufa-sync-restart`, `ufa-repair`, `ufa-repair-restart` or `ufa-absent-restart`.
  */
 event: string, detail: string, };

@@ -341,7 +341,7 @@ Describe 'Hide-RegistrationToken' {
 
 Describe 'Get-UfaSyncState' {
     BeforeAll {
-        . ([scriptblock]::Create((Get-FunctionText (Join-Path $here 'installAgent.ps1') @('Get-UfaSyncState', 'Test-UfaRepairDue', 'Test-UfaBlockedRestartDue', 'Test-UfaRedeployRestartDue', 'Get-UfaFolderActivity'))))
+        . ([scriptblock]::Create((Get-FunctionText (Join-Path $here 'installAgent.ps1') @('Get-UfaSyncState', 'Test-UfaRepairDue', 'Test-UfaBlockedRestartDue', 'Test-UfaRedeployRestartDue', 'Test-UfaAbsentRestartDue', 'Get-UfaFolderActivity'))))
         $auth = 'https://auth.example.invalid/oauth2/token'
         $timeout = "context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
         $lines = @{
@@ -509,6 +509,14 @@ Describe 'Get-UfaSyncState' {
         } finally { Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue }
         (Get-UfaFolderActivity (Join-Path ([IO.Path]::GetTempPath()) 'nvoke-no-such-folder') ([datetime]::MinValue)).Files | Should -Be 0
     }
+    It 'restarts the Windows Agent services once when the Ecoverse agent never appeared, some minutes after the install' {
+        $installed = [datetime]'2026-10-21T21:27:00Z'
+        Test-UfaAbsentRestartDue $false $installed ([datetime]'2026-10-21T21:40:00Z') 15 $false | Should -BeFalse
+        Test-UfaAbsentRestartDue $false $installed ([datetime]'2026-10-21T21:43:00Z') 15 $false | Should -BeTrue
+        Test-UfaAbsentRestartDue $false $installed ([datetime]'2026-10-21T23:00:00Z') 15 $true | Should -BeFalse
+        Test-UfaAbsentRestartDue $true $installed ([datetime]'2026-10-21T23:00:00Z') 15 $false | Should -BeFalse
+        Test-UfaAbsentRestartDue $false ([datetime]::MinValue) ([datetime]'2026-10-21T23:00:00Z') 15 $false | Should -BeFalse
+    }
     It 'says unknown when there is no log' {
         (Get-UfaSyncState (Join-Path ([IO.Path]::GetTempPath()) 'nvoke-no-such-core.log') ([datetime]::MinValue)).State | Should -Be 'unknown'
     }
@@ -561,8 +569,19 @@ Describe 'the installer' {
         $repair | Should -Not -Match 'Remove-Item|Remove-TreeSafely|Invoke-FullCleanup|Test-Path'
     }
 
+    It 'cleans only the legacy N-central agent: never the Ecoverse agent folders, and never its MSI, which only msp-agent-core.exe --uninstall removes' {
+        $text = Get-Content -Raw (Join-Path $here 'installAgent.ps1')
+        $folders = [regex]::Match($text, '(?s)\$CleanupFolders = @\((.*?)\r?\n\)').Groups[1].Value
+        $folders | Should -Match 'N-able Technologies'
+        $folders | Should -Match 'MspPlatform'
+        $folders | Should -Not -Match 'Msp Agent|MspAgent|MSPScriptExecution'
+        $products = [regex]::Match($text, '(?m)^\$CleanupProducts = (.*)$').Groups[1].Value
+        $products | Should -Match "'Windows Agent'"
+        $products | Should -Not -Match 'MSP Core Agent'
+        $text | Should -Match 'cleanup-ufa-leftover'
+    }
+
     It 'is ASCII' {
-        $bytes = [IO.File]::ReadAllBytes((Join-Path $here 'installAgent.ps1'))
         ($bytes | Where-Object { $_ -gt 126 -or ($_ -lt 32 -and $_ -notin 9, 10, 13) }).Count | Should -Be 0
     }
 }

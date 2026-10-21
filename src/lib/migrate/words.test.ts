@@ -80,7 +80,7 @@ describe("a healthy device and Ecoverse", () => {
 });
 
 describe("the Ecoverse agent on the device", () => {
-  const ufa = (state: Parameters<typeof ufaWords>[0]["state"], extra: { repairedAt?: string | null; redeployFiles?: number | null } = {}) => ({ state, repairedAt: null, redeployFiles: null, ...extra });
+  const ufa = (state: Parameters<typeof ufaWords>[0]["state"], extra: { repairedAt?: string | null; redeployFiles?: number | null; absentRestartedAt?: string | null } = {}) => ({ state, repairedAt: null, redeployFiles: null, absentRestartedAt: null, ...extra });
 
   it("has words for every state the installer can report", () => {
     for (const [state, words] of Object.entries(UFA_WORDS)) {
@@ -111,6 +111,17 @@ describe("the Ecoverse agent on the device", () => {
     expect(ufaStepTitle("ufa-sync-restart")).toBe("Restarted the Ecoverse agent");
     expect(ufaStepTitle("ufa-repair")).toContain("Repaired");
     expect(ufaStepTitle("ufa-repair-restart")).toContain("again");
+    expect(ufaStepTitle("ufa-absent-restart")).toContain("had not appeared");
     expect(ufaStepTitle("something-new")).toBe("something-new");
+  });
+
+  it("says an agent that never appeared is not back yet after the installer's restart, with what its folder shows, and not before", () => {
+    expect(ufaWords(ufa("notInstalled")).short).toBe("Not installed yet");
+    const restarted = { absentRestartedAt: "2026-10-21T21:43:00Z" };
+    expect(ufaWords(ufa("notInstalled", restarted)).short).toBe("Not back yet");
+    expect(ufaWords(ufa("notInstalled", { ...restarted, redeployFiles: 0 })).long).toContain("Nothing new in its folder");
+    expect(ufaWords(ufa("notInstalled", { ...restarted, redeployFiles: 3 })).long).toContain("3 files written");
+    expect(ufaWords(ufa("notInstalled", { ...restarted, repairedAt: "2026-10-21T22:00:00Z" })).short).toBe("Being redeployed");
+    expect(ufaWords(ufa("blocked", restarted)).short).toBe(UFA_WORDS.blocked.short);
   });
 });

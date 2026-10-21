@@ -16,6 +16,10 @@ restarts: number,
  */
 repairedAt: string | null, 
 /**
+ * When the Windows Agent services were restarted because the agent never appeared after the install, if they were.
+ */
+absentRestartedAt: string | null, 
+/**
  * When the watcher first saw a fault, if it did.
  */
 faultSeenAt: string | null, 

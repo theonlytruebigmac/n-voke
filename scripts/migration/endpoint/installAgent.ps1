@@ -35,6 +35,7 @@ $UfaBlockedSettleMinutes = 20
 $UfaRepairAfterMinutes = 30
 $UfaRepairWaitMinutes = 90
 $UfaRepairRestartAfterMinutes = 10
+$UfaAbsentRestartAfterMinutes = 15
 $UfaRepairMaxFinalRestarts = 2
 
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
@@ -241,6 +242,13 @@ function Test-UfaRedeployRestartDue([bool]$UfaPresent, [datetime]$LastActionUtc,
     return (($NowUtc - $LastActionUtc).TotalMinutes -ge $AfterMinutes)
 }
 
+# The Windows Agent didn't deploy the UFA at all: still no MspAgent service AfterMinutes after the install, and the
+# Windows Agent services haven't been restarted for it yet. Once per device; needs a known install time.
+function Test-UfaAbsentRestartDue([bool]$UfaPresent, [datetime]$InstalledUtc, [datetime]$NowUtc, [int]$AfterMinutes, [bool]$AlreadyRestarted) {
+    if ($UfaPresent -or $AlreadyRestarted -or $InstalledUtc -le [datetime]::MinValue) { return $false }
+    return (($NowUtc - $InstalledUtc).TotalMinutes -ge $AfterMinutes)
+}
+
 function Test-RebootPending {
     foreach ($k in 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending',
                    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') {
@@ -249,15 +257,21 @@ function Test-RebootPending {
     return $false
 }
 
-# Products removed by a full cleanup, in order. Matched by exact display name, never by wildcard.
-$CleanupProducts = 'Windows Agent', 'MSP Core Agent', 'Patch Management Service Controller', 'Request Handler Agent', 'File Cache Service Agent'
+# Products removed by a full cleanup, in order. Matched by exact display name, never by wildcard. Only the legacy
+# N-central agent and its companions: the Ecoverse agent (UFA, "MSP Core Agent") is touchy and is removed only by its own
+# msp-agent-core.exe --uninstall (Invoke-UfaCoreUninstall), never by an MSI uninstall or by deleting its folders.
+$CleanupProducts = 'Windows Agent', 'Patch Management Service Controller', 'Request Handler Agent', 'File Cache Service Agent'
 $ProgramFilesX86 = [Environment]::GetFolderPath('ProgramFilesX86')
 $CommonAppData = [Environment]::GetFolderPath('CommonApplicationData')
+# The legacy N-central agent's folders only. Never the Ecoverse agent's (Program Files (x86)\Msp Agent, ProgramData\MspAgent,
+# SYSTEM's MSPScriptExecution): in the lab a UFA whose folder this cleanup deleted before its own uninstall had finished
+# was never redeployed by the new Windows Agent, while one whose folder was left to the Windows Agent was.
 $CleanupFolders = @(
-    "$ProgramFilesX86\N-able Technologies", "$ProgramFilesX86\Msp Agent", "$ProgramFilesX86\MspPlatform",
-    "$CommonAppData\N-able Technologies", "$CommonAppData\MspAgent", "$CommonAppData\MspPlatform",
-    "$env:windir\System32\config\systemprofile\AppData\Local\MSPScriptExecution"
+    "$ProgramFilesX86\N-able Technologies", "$ProgramFilesX86\MspPlatform",
+    "$CommonAppData\N-able Technologies", "$CommonAppData\MspPlatform"
 )
+# What the UFA leaves behind: reported after the cleanup, never touched.
+$UfaLeftovers = @("$ProgramFilesX86\Msp Agent", "$CommonAppData\MspAgent")
 $CleanupRegistry = 'HKLM:\SOFTWARE\N-able Technologies', 'HKLM:\SOFTWARE\WOW6432Node\N-able Technologies'
 
 function Get-UninstallEntry([string]$DisplayName) {
@@ -342,7 +356,12 @@ function Invoke-FullCleanup($Status) {
     }
     # A folder that was already gone logs nothing above, so say what the old agent's folders look like now.
     $remaining = @($CleanupFolders | Where-Object { Test-Path $_ })
-    Add-StatusHistory $Status 'cleanup-verify' $(if ($remaining) { "still present: $($remaining -join ', ')" } else { 'none of the old agent folders are present' })
+    Add-StatusHistory $Status 'cleanup-verify' $(if ($remaining) { "still present: $($remaining -join ', ')" } else { 'none of the legacy agent folders are present' })
+    # The Ecoverse agent is left alone, but its state after the uninstall is the evidence if it never comes back.
+    $ufaLeft = @($UfaLeftovers | Where-Object { Test-Path -LiteralPath $_ })
+    $ufaSvc = if (Get-Service -Name 'MspAgent' -ErrorAction SilentlyContinue) { 'MspAgent service present' } else { 'MspAgent service gone' }
+    $ufaProduct = if (Get-UninstallEntry 'MSP Core Agent') { 'MSP Core Agent still registered' } else { 'MSP Core Agent not registered' }
+    Add-StatusHistory $Status 'cleanup-ufa-leftover' ('Ecoverse agent folders left in place on purpose: {0}; {1}; {2}' -f $(if ($ufaLeft) { $ufaLeft -join ', ' } else { 'none present' }), $ufaSvc, $ufaProduct)
     foreach ($key in $CleanupRegistry) {
         if (Test-Path $key) {
             Remove-Item -Path $key -Recurse -Force -ErrorAction SilentlyContinue
@@ -435,12 +454,26 @@ try {
         }
 
         # The Windows Agent installs the UFA a few minutes after itself. When the destination is linked, a UFA that isn't
-        # there yet is not a healthy device: wait for it, up to the same limit as the data sync.
+        # there yet is not a healthy device: wait for it, up to the same limit as the data sync. If it still hasn't appeared
+        # some minutes after the install, restart the Windows Agent services once: that is the step that made a Windows
+        # Agent redeploy a UFA in the lab. Then watch the Msp Agent folder for new data and keep waiting.
         if ($job.expectUfa -eq 'true' -and -not $ufaService -and -not $status.ufaRepairedAt) {
             $waitedAbsent = ((Get-Date).ToUniversalTime() - $since).TotalMinutes
+            if (Test-UfaAbsentRestartDue ([bool]$ufaService) $since (Get-Date).ToUniversalTime() $UfaAbsentRestartAfterMinutes ([bool]$status.ufaAbsentRestartedAt)) {
+                Restart-WindowsAgentService
+                $status.ufaAbsentRestartedAt = (Get-Date).ToUniversalTime().ToString('o')
+                Add-StatusHistory $status 'ufa-absent-restart' ('MspAgent was still not installed {0:N0} min after the install; restarted the Windows Agent services once so the Windows Agent redeploys it' -f $waitedAbsent)
+            }
             if ($waitedAbsent -lt $UfaSyncGraceMinutes) {
                 $status.stage = 'awaiting-ufa'
-                Add-StatusHistory $status 'awaiting-ufa' ('MspAgent is not installed yet; {0:N0} min since install' -f $waitedAbsent)
+                $folderNote = ''
+                if ($status.ufaAbsentRestartedAt) {
+                    $activity = Get-UfaFolderActivity ([Environment]::GetFolderPath('ProgramFilesX86') + '\Msp Agent') ([datetime]::Parse($status.ufaAbsentRestartedAt).ToUniversalTime())
+                    $status.ufa.redeployFiles = $activity.Files
+                    $status.ufa.redeployNewestAt = if ($activity.NewestAt) { $activity.NewestAt.ToUniversalTime().ToString('o') } else { $null }
+                    $folderNote = if ($activity.Files -gt 0) { '; {0} file(s) written to the Msp Agent folder since the restart' -f $activity.Files } else { '; no new data in the Msp Agent folder since the restart' }
+                }
+                Add-StatusHistory $status 'awaiting-ufa' ('MspAgent is not installed yet; {0:N0} min since install{1}' -f $waitedAbsent, $folderNote)
                 Save-Status $status
                 exit 0
             }

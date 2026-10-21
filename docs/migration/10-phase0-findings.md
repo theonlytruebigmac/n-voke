@@ -493,6 +493,21 @@ Three more lab VMs (SUP-2189, SUP-2190, SUP-2191), Windows build 10.0.28000, mov
 
 **Decision (operator, 2026-10-21):** a `blocked` state that lasts is included in the repair, with controls: one `MspAgent` restart after 30 minutes of it, at least 20 minutes for the restart to prove itself, the repair after 60 minutes blocked only if a failure was logged after the restart, and only on current evidence (a failed login in the last 45 minutes). **Open:** whether the repair helps a blocked device at all (a repair can't fix a service or network that is down, and no blocked device has been repaired yet), and what the Windows Agent does with the leftover folder when it redeploys.
 
+## The Ecoverse agent that never came back after a reverse move (2026-10-21)
+
+The same three lab VMs moved back, `sedemo.focusmsp.net` → `nerdstraining.n-able.com`, on the Ecoverse path (launched 17:21 local, `ExpectUfa=true`, full cleanup, the installer from release v0.2.3). SUP-2189 and SUP-2191 reached Healthy with Ecoverse data. **SUP-2190 stayed *On the new server*: the Windows Agent installed and checks in, the Ecoverse agent never reappeared.**
+
+| Observation | What it means |
+|---|---|
+| **Same build, same timing, one difference in the cleanup history.** On both SUP-2189 and SUP-2190 `msp-agent-core.exe --uninstall` ran at about 17:24 (exit 0, `MspAgent` service gone), the Windows Agent uninstall finished about 17:26, and the install about 17:27. SUP-2190's history lists `C:\Program Files (x86)\Msp Agent removed`; SUP-2189's does not, and neither did SUP-2190's own run that morning | On the devices that worked, the `Msp Agent` folder was **already gone** when the cleanup got to it. On SUP-2190 it was still there and **the cleanup deleted it** |
+| **SUP-2189** reached Healthy 12 minutes after the install, with `ufa` present, provisioned and `synced` | The normal path |
+| **SUP-2190** 12 minutes after the install: `ufa.present = false`, the installer waiting with `MspAgent is not installed yet`. The Windows Agent 2026.4.10011 installed normally (its MSI log shows it installing `UfaUtil.exe` and `UfaMaintenance.dll`, the Windows Agent's own UFA components, with no error) | The Windows Agent did not deploy the Ecoverse agent |
+| **The same VM earlier today:** with the folder and exe deleted by hand the Windows Agent did not redeploy the agent; with them restored and both Windows Agent services restarted, something removed the folder itself and the agent came back | Consistent with the above |
+
+**Reading (not proven):** the `Msp Agent` folder holds the Ecoverse agent's own removal, which normally finishes by itself and removes the folder. When it has finished, the cleanup finds no folder and the new Windows Agent deploys a fresh agent. When it hasn't (SUP-2190 this time), the cleanup deleted the folder out from under it, and the new Windows Agent never deployed one. Why SUP-2190's removal was slower is **not known**: the agent's logs are gone (the cleanup deletes the folder, and in the lab `--uninstall` had already left only `msp-agent-core.exe` in it), and the Windows Agent's logs were not collected. The agent's uninstall involves the backend (see [the UFA uninstall in the cleanup](#the-ufa-uninstall-in-the-cleanup-2026-10-20)), and this VM's Ecoverse login service was intermittently unreachable earlier in the day, which may be related; that is a guess.
+
+**Decision (operator, 2026-10-21):** the Ecoverse agent is touchy and the legacy N-central agent is safe to clean. The cleanup now removes the Ecoverse agent **only** with `msp-agent-core.exe --uninstall`, deletes none of its folders (`Program Files (x86)\Msp Agent`, `ProgramData\MspAgent`, SYSTEM's `MSPScriptExecution`) and no longer uninstalls its `MSP Core Agent` MSI. It records what was left (`cleanup-ufa-leftover`). And if the agent has not appeared 15 minutes after the install, the installer restarts the Windows Agent services once (`ufa-absent-restart`) and reports the `Msp Agent` folder's new files in each wait line. **Open:** whether leaving the folder is enough for the new Windows Agent to finish the job and redeploy (to be tested), why SUP-2190's removal stalled, and whether the single restart is enough when it doesn't. SUP-2191 was not compared here: its logs were not collected.
+
 ## Status of Phase 0 tests
 
 | # | Status |

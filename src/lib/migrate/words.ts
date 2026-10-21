@@ -133,14 +133,22 @@ export const UFA_WORDS: Record<UfaState, EcoWords> = {
 };
 
 /** The words for the agent's state; after the one-time repair, a missing agent is being put back, not just late. */
-export function ufaWords(ufa: Pick<DeviceUfa, "state" | "repairedAt" | "redeployFiles">): EcoWords {
-  if (ufa.repairedAt && (ufa.state === "notInstalled" || ufa.state === "notProvisioned")) {
-    const files = ufa.redeployFiles ?? null;
-    const progress = files === null ? "" : files > 0 ? ` ${files} file${files === 1 ? "" : "s"} written to its folder since the last restart: it is being put back.` : " Nothing new in its folder since the last restart yet.";
+export function ufaWords(ufa: Pick<DeviceUfa, "state" | "repairedAt" | "redeployFiles"> & { absentRestartedAt?: string | null }): EcoWords {
+  const missing = ufa.state === "notInstalled" || ufa.state === "notProvisioned";
+  const files = ufa.redeployFiles ?? null;
+  const progress = files === null ? "" : files > 0 ? ` ${files} file${files === 1 ? "" : "s"} written to its folder since the last restart: it is being put back.` : " Nothing new in its folder since the last restart yet.";
+  if (ufa.repairedAt && missing) {
     return {
       short: "Being redeployed",
       tone: "accent",
       long: `The installer removed the Ecoverse agent to repair it and restarted the Windows Agent services. The Windows Agent should now put it back, which usually takes 5 to 15 minutes.${progress}`,
+    };
+  }
+  if (ufa.absentRestartedAt && ufa.state === "notInstalled") {
+    return {
+      short: "Not back yet",
+      tone: "warn",
+      long: `The Windows Agent didn't put the Ecoverse agent back after the install. The installer restarted the Windows Agent services once to trigger it and keeps waiting.${progress} If it still hasn't appeared, see the troubleshooting guide.`,
     };
   }
   return UFA_WORDS[ufa.state];
@@ -150,6 +158,7 @@ const UFA_STEP_WORDS: Record<string, string> = {
   "ufa-sync-restart": "Restarted the Ecoverse agent",
   "ufa-repair": "Repaired the Ecoverse agent (removed it, then restarted the Windows Agent services)",
   "ufa-repair-restart": "Restarted the Windows Agent services again",
+  "ufa-absent-restart": "Restarted the Windows Agent services (the Ecoverse agent had not appeared)",
 };
 
 /** A step the installer took, as a title; an unknown one reads as its own name. */

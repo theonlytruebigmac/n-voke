@@ -18,6 +18,7 @@ const ufa = (over: Partial<DeviceUfa> = {}): DeviceUfa => ({
   probedAt: new Date(Date.now() - 12 * 60_000).toISOString(),
   restarts: 0,
   repairedAt: null,
+  absentRestartedAt: null,
   faultSeenAt: null,
   redeployFiles: null,
   warning: null,
@@ -100,6 +101,22 @@ describe("DeviceSheet: the Ecoverse agent on the device", () => {
     show(detail(ufa({ state: "notInstalled", repairedAt: "2026-10-21T16:10:00Z", redeployFiles: 4 })));
     expect(screen.getByText("Being redeployed")).toBeTruthy();
     expect(screen.getByText(/4 files written to its folder since the last restart/)).toBeTruthy();
+  });
+
+  it("says an agent that never appeared is not back yet after the installer restarted the Windows Agent services, and shows that step", () => {
+    show(
+      detail(
+        ufa({
+          state: "notInstalled",
+          absentRestartedAt: "2026-10-21T21:43:00Z",
+          redeployFiles: 0,
+          steps: [{ at: "2026-10-21T21:43:00Z", event: "ufa-absent-restart", detail: "restarted the Windows Agent services once" }],
+        }),
+      ),
+    );
+    expect(screen.getByText("Not back yet")).toBeTruthy();
+    expect(screen.getByText(/Nothing new in its folder since the last restart yet/)).toBeTruthy();
+    expect(screen.getByText("Restarted the Windows Agent services (the Ecoverse agent had not appeared)")).toBeTruthy();
   });
 
   it("says singular for one restart, and shows a synced agent as sending data", () => {
