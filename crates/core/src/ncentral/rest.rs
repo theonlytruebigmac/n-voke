@@ -534,7 +534,8 @@ impl Core {
     /// credential is sent, and only the path N-central documents for these files on the configured host is fetched.
     pub async fn ncentral_task_output(&self, server_id: &str, output_file_name: &str) -> Result<RestOutput, RestError> {
         const PREFIX: &str = "/download/scheduled_tasks/output_files/";
-        let plain = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | ' ');
+        // The file is named after the task, so it carries whatever the task name does (a colon, spaces); `%`, `?`, `#` and `\` stay out.
+        let plain = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | ' ' | ':');
         if !output_file_name.starts_with(PREFIX) || output_file_name.contains("..") || !output_file_name.chars().all(plain) {
             return Err(RestError::new(None, "The task's output file isn't where N-central keeps them."));
         }
@@ -1028,6 +1029,9 @@ mod tests {
         let (core, id) = core_with(&fake).await;
         let out = core.ncentral_task_output(&id, "/download/scheduled_tasks/output_files/Acme/PC/5550/Run_PC_20261020.zip").await.unwrap();
         assert_eq!((out.exit_code, out.result.unwrap().result.as_str()), (Some(0), "staged"));
+        // As N-central names the file for the task "N-voke migration: launch wave 1" (seen on a real server).
+        let named_for_the_task = "/download/scheduled_tasks/output_files/429/1680521407/673238524/N-vokemigration:launchwave1_SUP-2190_20261022093126.zip";
+        assert!(core.ncentral_task_output(&id, named_for_the_task).await.is_ok(), "a colon in the task's name is fine");
         let download = fake.seen().into_iter().find(|r| r.url.contains("/download/")).unwrap();
         assert_eq!(download.bearer, None, "nothing secret goes with an unauthenticated download");
         assert!(download.url.starts_with("https://src.example.com/download/scheduled_tasks/output_files/"));
