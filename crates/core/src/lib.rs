@@ -269,6 +269,8 @@ impl Core {
         fs::write(paths.config_file(), r#"{ "apiUrl": "https://127.0.0.1:9/graphql", "historyDays": 30 }"#).unwrap();
         let mut core = Core::new_in(paths, "test").unwrap();
         core.vault = Arc::new(Vault::for_tests());
+        // The audit log was built with the real vault (the keychain's data key): give it the test one, or a test that writes an entry asks the keychain.
+        core.audit = AuditLog::new(core.vault.clone(), core.paths.data_dir.clone());
         core.secrets = Arc::new(credentials::MemoryStore::default());
         *core.api_key.lock().unwrap() = Some("test-key-not-real".into());
         core.set_dry_run(false);

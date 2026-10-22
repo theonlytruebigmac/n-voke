@@ -31,6 +31,11 @@ healthyCheckinMinutes: number,
  */
 agentQuietMinutes: number, 
 /**
+ * How often a device waiting for Ecoverse's data is probed on its own (0 turns it off). Each probe is a script
+ * task on the device, so it shows in N-central's Job Status.
+ */
+autoProbeMinutes: number, 
+/**
  * What a new project starts with.
  */
 defaults: ProjectOptions, };

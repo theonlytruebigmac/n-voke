@@ -5,7 +5,7 @@ import { Button, ErrorNote, Field, Sheet, inputClass } from "../ui";
 import { OptionsFields } from "./parts/OptionsFields";
 
 const TRACKING_GROUPS: { title: string; keys: TrackingKey[] }[] = [
-  { title: "How often", keys: ["pollSeconds"] },
+  { title: "How often", keys: ["pollSeconds", "autoProbeMinutes"] },
   { title: "When a wait becomes a problem", keys: ["notPickedUpMinutes", "stuckStagedMinutes", "lostMinutes", "ecoverseNotMovedMinutes"] },
   { title: "What counts as checking in", keys: ["healthyCheckinMinutes", "agentQuietMinutes"] },
 ];

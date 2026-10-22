@@ -363,6 +363,9 @@ pub fn stamp(now: DateTime<Utc>) -> String {
     now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
+/// How long a healthy device may wait for Ecoverse's data before it is flagged as overdue.
+pub const ECOVERSE_OVERDUE_AFTER: chrono::Duration = chrono::Duration::minutes(120);
+
 impl Project {
     pub fn new(id: String, name: &str, source_server_id: &str, dest_server_id: &str, dest_ecoverse: DestEcoverse, now: DateTime<Utc>) -> Self {
         Self {
@@ -519,6 +522,13 @@ impl Project {
     /// linked to Ecoverse: registered there, not fully working. It stays in the Healthy stage; this is how it is told apart.
     pub fn waiting_for_ecoverse(&self, device: &ProjectDevice) -> bool {
         device.stage == Stage::Healthy && self.dest_ecoverse != DestEcoverse::NotLinked && device.ecoverse != Some(EcoState::Reporting)
+    }
+
+    /// Still waiting for Ecoverse's data after the time a healthy device needs: three test devices got theirs 86 to 94
+    /// minutes after provisioning (the agent learns of its device record at its hourly update check), so two hours
+    /// since it became healthy, which is a few minutes after provisioning, is late.
+    pub fn ecoverse_overdue(&self, device: &ProjectDevice, now: DateTime<Utc>) -> bool {
+        self.waiting_for_ecoverse(device) && DateTime::parse_from_rfc3339(&device.entered_stage_at).is_ok_and(|at| now - at.with_timezone(&Utc) >= ECOVERSE_OVERDUE_AFTER)
     }
 
     pub fn attention_count(&self) -> usize {

@@ -188,7 +188,9 @@ async fn project_close(core: State<'_, Core>, trackers: State<'_, Trackers>, id:
 }
 
 /// Reads the project's devices now and then at the interval in the migration settings (a minute by default), saving what moved, and tells the page after each pass
-/// with the `migration-polled` event. It runs only while the project is open.
+/// with the `migration-polled` event. After each pass it also probes the few devices that are waiting for Ecoverse's data
+/// and are due (see `migration_probe_due`; off when the setting is 0), and says so with `migration-probed`. It runs only
+/// while the project is open.
 #[tauri::command]
 fn tracker_start(app: AppHandle, trackers: State<'_, Trackers>, id: String) {
     trackers.stop(&id);
@@ -205,6 +207,15 @@ fn tracker_start(app: AppHandle, trackers: State<'_, Trackers>, id: String) {
                 Err(error) => serde_json::json!({ "id": task_id, "digest": null, "error": error }),
             };
             let _ = app.emit("migration-polled", payload);
+            // Then the few devices waiting for Ecoverse's data that are due a Probe, so the device sheet says why they wait.
+            if let Some(every) = core.migration_settings().auto_probe_every() {
+                let held = lock.lock().await;
+                let probed = core.migration_probe_due(&task_id, &instance(), every).await.unwrap_or(0);
+                drop(held);
+                if probed > 0 {
+                    let _ = app.emit("migration-probed", serde_json::json!({ "id": task_id }));
+                }
+            }
             tokio::time::sleep(Duration::from_secs(u64::from(core.migration_settings().poll_seconds))).await;
         }
     });

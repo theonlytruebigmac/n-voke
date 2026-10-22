@@ -27,4 +27,8 @@ ecoverse: EcoState | null,
 /**
  * Healthy in N-central but not yet sending asset data to Ecoverse: registered, not fully working.
  */
-waitingForEcoverse: boolean, };
+waitingForEcoverse: boolean, 
+/**
+ * Still waiting after two hours: healthy devices got their data in about an hour and a half.
+ */
+ecoverseOverdue: boolean, };

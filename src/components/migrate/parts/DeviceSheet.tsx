@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { DeviceAction, DeviceCommand, DeviceDetail } from "../../../lib/migrate/bindings";
 import { ACTION_WORDS, ago } from "../../../lib/migrate/track";
 import { useDevice, useDeviceActions } from "../../../lib/migrate/queries";
-import { describeStage, ecoWords, eventWords, stageView, ufaStepTitle, ufaWords } from "../../../lib/migrate/words";
+import { describeStage, ECO_OVERDUE, ecoWords, eventWords, stageView, ufaStepTitle, ufaWords } from "../../../lib/migrate/words";
 import { Button, ErrorNote, Modal, Sheet, Status } from "../../ui";
 import { useNow } from "../../../lib/format";
 
@@ -84,6 +84,7 @@ export function DeviceSheet({ projectId, index, onClose }: { projectId: string; 
             <div className={`space-y-1 rounded-lg border p-3 ${d.waitingForEcoverse ? "border-warn/40" : "border-border"}`}>
               <Status tone={ecoWords(d.ecoverse).tone} label={ecoWords(d.ecoverse).short} />
               <p className="text-xs text-muted">{ecoWords(d.ecoverse).long}</p>
+              {d.ecoverseOverdue && <p className="text-xs break-words text-warn">{ECO_OVERDUE.long}</p>}
               {d.ecoverseNote && <p className="text-xs break-words text-warn">{d.ecoverseNote}</p>}
             </div>
           )}

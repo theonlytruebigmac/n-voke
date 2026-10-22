@@ -6,7 +6,7 @@ import { useDeviceActions, useProject, useTrack, useTracker } from "../../../lib
 import { readyToFinish } from "../../../lib/migrate/progress";
 import { GROUP_LABELS, ago } from "../../../lib/migrate/track";
 import { useDebounced } from "../../../lib/useDebounced";
-import { describeStage, ecoWords, movedBanner, STAGE_WORDS, stageView, UFA_WORDS } from "../../../lib/migrate/words";
+import { describeStage, ECO_OVERDUE, ecoWords, movedBanner, STAGE_WORDS, stageView, UFA_WORDS } from "../../../lib/migrate/words";
 import { Button, ErrorNote, Modal, Status, Table, inputClass, selectClass } from "../../ui";
 import { DeviceSheet } from "../parts/DeviceSheet";
 
@@ -184,6 +184,14 @@ export function TrackStep({ projectId, onContinue, onPrepare }: { projectId: str
         </div>
       )}
 
+      {view && view.ecoverseOverdue > 0 && (
+        <div className="rounded-lg border border-warn/40 px-4 py-2.5 text-sm">
+          <span className="font-medium text-warn">
+            {view.ecoverseOverdue} {view.ecoverseOverdue === 1 ? "device has" : "devices have"} waited more than 2 hours for Ecoverse's data.
+          </span>{" "}
+          <span className="text-muted">Healthy ones got theirs in about an hour and a half. Open one, or use Probe waiting, to see what its Ecoverse agent reports.</span>
+        </div>
+      )}
       {view && <Strip counts={view.counts} active={group} onPick={(g) => narrow(() => setGroup(g))} />}
       {project.data && readyToFinish(project.data) && (
         <div className="flex items-center justify-between gap-3 rounded-lg border border-ok/40 bg-ok-soft px-4 py-3">
@@ -257,7 +265,8 @@ export function TrackStep({ projectId, onContinue, onPrepare }: { projectId: str
                     <td className="text-muted tabular-nums">{r.wave ?? "–"}</td>
                     <td>
                       <Status tone={stageView(r.stage, r.waitingForEcoverse).tone} pulse={stageView(r.stage, r.waitingForEcoverse).pulse} label={stageView(r.stage, r.waitingForEcoverse).short} />
-                      {r.waitingForEcoverse && <div className={`text-xs ${ecoWords(r.ecoverse).tone === "warn" ? "text-warn" : "text-faint"}`}>{ecoWords(r.ecoverse).short}</div>}
+                      {r.waitingForEcoverse && r.ecoverseOverdue && <div className="text-xs text-warn">{ECO_OVERDUE.short}</div>}
+                      {r.waitingForEcoverse && !r.ecoverseOverdue && <div className={`text-xs ${ecoWords(r.ecoverse).tone === "warn" ? "text-warn" : "text-faint"}`}>{ecoWords(r.ecoverse).short}</div>}
                       {r.stage === "healthy" && r.ecoverse === "reporting" && <div className="text-xs text-faint">{ecoWords(r.ecoverse).short}</div>}
                     </td>
                     <td className="text-faint">{ago(r.since, now)}</td>

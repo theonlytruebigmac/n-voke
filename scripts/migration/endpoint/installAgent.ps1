@@ -132,7 +132,10 @@ function Test-MsiBusy {
 # Reads the Ecoverse agent's core log for the one fault seen in the lab: its configuration fetch timed out while
 # fetching a login token, so the inventory components were never delivered and the asset stays CONNECTED with no
 # data. The agent retries that fetch only hourly; restarting MspAgent retries it at once. Only lines after $Since count.
-#   synced   the inventory component (generic-asset-interrogator) was downloaded
+#   synced   data is flowing. With the components' log to read (the installer passes it): the device record arrived (the
+#            core log says "device GOAT NRI was found in config response") or the inventory (DeviceAsset) was logged as
+#            sent. Without it: the inventory component (generic-asset-interrogator) was downloaded. The download alone
+#            proved nothing: it happens minutes after provisioning, long before the data can leave the device
 #   stalled  a configuration fetch failed on a timeout, the cloud answers again, and nothing was delivered since: restart
 #   blocked  a fetch failed and the cloud still doesn't answer. It often clears by itself (the lab saw it), so it is
 #            watched first. Only if it lasts, one MspAgent restart is tried, and after that gets time to prove itself
@@ -156,7 +159,7 @@ function Test-MsiBusy {
 function Get-UfaSyncState([string]$LogPath, [datetime]$Since, [string]$ComponentLogPath = '', [datetime]$NowUtc = [datetime]::UtcNow) {
     if (-not (Test-Path -LiteralPath $LogPath)) { return [pscustomobject]@{ State = 'unknown'; FailedAt = $null; RejectedSince = $null; FaultSince = $null; FaultLastAt = $null } }
     $stamp = [regex]'^\[(\d{4}-\d\d-\d\dT[\d:.]+[+-]\d\d:\d\d)\]'
-    $failedAt = $null; $failingSince = $null; $jwtFailedAt = $null; $authOkAt = $null; $syncedAt = $null; $rejectedAt = $null; $rejectedSince = $null; $deniedCount = 0; $deniedSince = $null; $deniedAt = $null
+    $failedAt = $null; $failingSince = $null; $jwtFailedAt = $null; $authOkAt = $null; $syncedAt = $null; $rejectedAt = $null; $rejectedSince = $null; $deniedCount = 0; $deniedSince = $null; $deniedAt = $null; $recordFoundAt = $null
     foreach ($line in @(Get-Content -LiteralPath $LogPath -Tail 20000 -ErrorAction SilentlyContinue)) {
         $m = $stamp.Match($line)
         if (-not $m.Success) { continue }
@@ -167,26 +170,40 @@ function Get-UfaSyncState([string]$LogPath, [datetime]$Since, [string]$Component
         elseif ($line -match 'auth::fetchJWTWithRetries error occurred when fetching jwt: unexpected status code: 400 .*The SSL certificate error') { $rejectedAt = $at; if (-not $rejectedSince) { $rejectedSince = $at } }
         elseif ($line -match 'auth::requestOauthToken Oauth token response received\. Status: 200') { $authOkAt = $at; $rejectedSince = $null; $failingSince = $null }
         elseif ($line -match 'ERROR \(\d+\): components::doRequestWithRetry received invalid status: ''403''') { $deniedCount++; $deniedAt = $at; if (-not $deniedSince) { $deniedSince = $at } }
+        elseif ($line -match 'configservice::updateDeviceConfig device GOAT NRI was found') { $recordFoundAt = $at }
         elseif ($line -match 'components::Download Successfully downloaded') {
             $deniedCount = 0; $deniedSince = $null
             if ($line -match 'generic-asset-interrogator') { $syncedAt = $at }
         }
     }
     # The components' own log: each flush of their data starts by asking for the device's identity and, without one, stops.
-    $noDeviceCount = 0; $noDeviceSince = $null; $noDeviceAt = $null
+    # And the proof that data leaves the device: the batch of inventory (DeviceAsset) the messaging layer logs as sent.
+    $noDeviceTimes = New-Object Collections.Generic.List[datetime]; $inventorySentAt = $null; $componentLogRead = $false
     if ($ComponentLogPath -and (Test-Path -LiteralPath $ComponentLogPath)) {
+        $componentLogRead = $true
         $windowStart = $NowUtc.AddMinutes(-30)
         foreach ($line in @(Get-Content -LiteralPath $ComponentLogPath -Tail 5000 -ErrorAction SilentlyContinue)) {
-            if ($line -notmatch 'ERROR \(\d+\): messaging::refreshDeviceInfo failed to get goat NRI') { continue }
+            $sentInventory = $line -match 'processMessages .*sending \d+ messages for typeURL: \S+DeviceAsset\s*$'
+            if (-not $sentInventory -and $line -notmatch 'ERROR \(\d+\): messaging::refreshDeviceInfo failed to get goat NRI') { continue }
             $m = $stamp.Match($line)
             if (-not $m.Success) { continue }
             $at = [datetimeoffset]::Parse($m.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture).UtcDateTime
-            if ($at -lt $Since -or $at -lt $windowStart) { continue }
-            $noDeviceCount++; $noDeviceAt = $at; if (-not $noDeviceSince) { $noDeviceSince = $at }
+            if ($at -lt $Since) { continue }
+            if ($sentInventory) { $inventorySentAt = $at; continue }
+            if ($at -ge $windowStart) { $noDeviceTimes.Add($at) }
         }
     }
+    # An error from before the record arrived says nothing about now.
+    $noDeviceNow = @($noDeviceTimes | Where-Object { -not $recordFoundAt -or $_ -gt $recordFoundAt })
+    $noDeviceCount = $noDeviceNow.Count
+    $noDeviceSince = if ($noDeviceCount) { $noDeviceNow[0] } else { $null }
+    $noDeviceAt = if ($noDeviceCount) { $noDeviceNow[$noDeviceCount - 1] } else { $null }
+    # With the components' log to read, "synced" is proof: the device record arrived or the inventory was sent. Without it,
+    # the inventory component having been downloaded is all there is to go on.
+    $proofAt = if ($recordFoundAt -and $inventorySentAt) { if ($recordFoundAt -gt $inventorySentAt) { $recordFoundAt } else { $inventorySentAt } } elseif ($recordFoundAt) { $recordFoundAt } else { $inventorySentAt }
+    $isSynced = if ($componentLogRead) { $proofAt -and (-not $failedAt -or $proofAt -gt $failedAt) } else { $syncedAt -and (-not $failedAt -or $syncedAt -gt $failedAt) }
     $state = if ($noDeviceCount -ge 2) { 'nodevice' }
-             elseif ($syncedAt -and (-not $failedAt -or $syncedAt -gt $failedAt)) { 'synced' }
+             elseif ($isSynced) { 'synced' }
              elseif ($failedAt -and $authOkAt -and $authOkAt -gt $failedAt) { 'stalled' }
              elseif ($rejectedAt -and (-not $authOkAt -or $authOkAt -lt $rejectedAt)) { 'rejected' }
              elseif ($deniedCount -ge 5) { 'denied' }

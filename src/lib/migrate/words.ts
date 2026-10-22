@@ -85,9 +85,9 @@ export const ECO_WORDS: Record<EcoState | "unread", EcoWords> = {
   waitingForData: {
     short: "Waiting for Ecoverse data",
     tone: "warn",
-    long: "Registered with Ecoverse and shown there, but no asset data has arrived yet. Until it does the device isn't fully working: its name, serial number and addresses are unknown and scripts can't run on it. This commonly takes 20 to 60 minutes. If the agent's first attempt to fetch its setup fails, it tries again at its next hourly check, so it can take up to about an hour and a half.",
+    long: "Registered with Ecoverse and shown there, but no asset data has arrived yet. Until it does the device isn't fully working: its name, serial number and addresses are unknown and scripts can't run on it. This commonly takes about an hour and a half (86 to 94 minutes on healthy test devices), because the agent only learns that Ecoverse has created its device record at its next hourly check. If it is still missing after about 2 hours, something is wrong: open the device and Probe it.",
   },
-  notSeen: { short: "Not in Ecoverse yet", tone: "warn", long: "The new Ecoverse agent is still setting up, and the device isn't in the destination's Ecoverse yet. This commonly takes 20 to 60 minutes and doesn't block the move. If its first attempt fails it tries again at its next hourly check, so it can take up to about an hour and a half." },
+  notSeen: { short: "Not in Ecoverse yet", tone: "warn", long: "The new Ecoverse agent is still setting up, and the device isn't in the destination's Ecoverse yet. This commonly takes about 10 minutes and doesn't block the move. If its first attempt fails it tries again at its next hourly check, so it can take up to about an hour and a half before the device's data follows." },
   notLinked: {
     short: "Ecoverse not checked",
     tone: "muted",
@@ -98,6 +98,13 @@ export const ECO_WORDS: Record<EcoState | "unread", EcoWords> = {
 
 export const ecoWords = (state: EcoState | null): EcoWords => ECO_WORDS[state ?? "unread"];
 
+/** A healthy device that has waited longer than a healthy one needs (two hours; healthy test devices got theirs in about an hour and a half). */
+export const ECO_OVERDUE: EcoWords = {
+  short: "Ecoverse data overdue",
+  tone: "warn",
+  long: "This device has waited more than 2 hours for Ecoverse's data. Healthy test devices got theirs in about an hour and a half, so something may be wrong. Probe it: the card below says what its Ecoverse agent reports (for example a device record that never arrives, a refused login or refused downloads).",
+};
+
 /**
  * What the Ecoverse agent itself is doing on the device, from the installer's watcher (see
  * docs/migration/05-endpoint-scripts.md, "UFA sync watchdog"). It is the device's own account, as of the last Probe,
@@ -107,7 +114,7 @@ export const ecoWords = (state: EcoState | null): EcoWords => ECO_WORDS[state ??
 export const UFA_WORDS: Record<UfaState, EcoWords> = {
   notInstalled: { short: "Not installed yet", tone: "muted", long: "The Windows Agent installs the Ecoverse agent a few minutes after itself." },
   notProvisioned: { short: "Setting up", tone: "accent", long: "The Ecoverse agent is installed and registering with the destination." },
-  waiting: { short: "Waiting for data", tone: "accent", long: "The Ecoverse agent is running and no problem was seen. Its data usually arrives within an hour of the install." },
+  waiting: { short: "Waiting for data", tone: "accent", long: "The Ecoverse agent is running and no problem was seen. Its data usually arrives about an hour and a half after the agent is set up: Ecoverse creates the device record some time after it registers, and the agent only asks for it hourly." },
   synced: { short: "Sending data", tone: "ok", long: "The Ecoverse agent received its components and is sending the device's data." },
   stalled: {
     short: "Needs a restart",

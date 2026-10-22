@@ -45,6 +45,7 @@ const detail = (deviceUfa: DeviceUfa | null): DeviceDetail => ({
   ecoverse: "waitingForData",
   ecoverseNote: null,
   waitingForEcoverse: true,
+  ecoverseOverdue: false,
   deviceUfa,
   candidates: [],
   actions: ["probe"],
@@ -63,6 +64,14 @@ const show = (d: DeviceDetail) => {
 afterEach(cleanup);
 
 describe("DeviceSheet: the Ecoverse agent on the device", () => {
+  it("says a device that has waited more than two hours is overdue, and not before", () => {
+    show({ ...detail(null), ecoverseOverdue: true });
+    expect(screen.getByText(/waited more than 2 hours for Ecoverse's data/)).toBeTruthy();
+    cleanup();
+    show(detail(null));
+    expect(screen.queryByText(/waited more than 2 hours/)).toBeNull();
+  });
+
   it("shows nothing about the agent until the device has been probed", () => {
     show(detail(null));
     expect(screen.queryByText("Ecoverse agent on the device")).toBeNull();

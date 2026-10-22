@@ -251,12 +251,26 @@ export function useTracker(id: string, enabled: boolean): TrackerState {
         else Promise.resolve().then(stop).catch(() => undefined);
       })
       .catch(() => undefined);
+    // After the tracker has probed devices on its own, the device sheet and table have something new to show.
+    let unlistenProbed: (() => void) | undefined;
+    listen<{ id: string }>("migration-probed", (event) => {
+      if (event.payload.id !== id) return;
+      for (const key of ["track", "device"]) qc.invalidateQueries({ queryKey: ["migrate", key, id] });
+    })
+      .then((stop) => {
+        if (!cancelled) unlistenProbed = stop;
+        else Promise.resolve().then(stop).catch(() => undefined);
+      })
+      .catch(() => undefined);
     startTracker(id).catch((e) => setState({ last: null, error: String(e), starting: false }));
     return () => {
       cancelled = true;
       // Stopping a listener that is already gone isn't an error, and it fails asynchronously.
       Promise.resolve()
         .then(() => unlisten?.())
+        .catch(() => undefined);
+      Promise.resolve()
+        .then(() => unlistenProbed?.())
         .catch(() => undefined);
       stopTracker(id).catch(() => undefined);
     };

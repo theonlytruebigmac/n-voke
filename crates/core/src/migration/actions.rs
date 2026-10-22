@@ -706,6 +706,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_tracker_probes_a_waiting_device_on_its_own_not_again_within_the_interval_and_a_failure_is_retried_after_it() {
+        let seen = Arc::new(Mutex::new(vec![]));
+        let (core, p) = waiting_project(2, 1).await;
+        core.set_rest_transport(rest_world(BLOCKED_STATUS_LINE, true, seen.clone()));
+        let half_hour = chrono::Duration::minutes(30);
+
+        assert_eq!(core.migration_probe_due(&p.id, "me", half_hour).await.unwrap(), 2, "the two waiting devices, not the one that is reporting");
+        assert_eq!(seen.lock().unwrap().len(), 2);
+        assert_eq!(core.migration_probe_due(&p.id, "me", half_hour).await.unwrap(), 0, "they were just probed");
+        assert_eq!(seen.lock().unwrap().len(), 2, "and nothing was sent");
+        assert_eq!(core.migration_probe_due(&p.id, "me", chrono::Duration::milliseconds(-1)).await.unwrap(), 2, "after the interval they are due again");
+        let saved = core.migration_load(&p.id).await.unwrap().unwrap();
+        assert!(saved.devices.iter().all(|d| d.stage == Stage::Healthy), "a probe changes nothing about the stage");
+
+        // Unreachable devices: a note on the timeline, and no retry until the interval has passed.
+        let (core, mut p) = waiting_project(2, 0).await;
+        p.rest_scripts.clear();
+        core.migration_save(&mut p).await.unwrap();
+        assert_eq!(core.migration_probe_due(&p.id, "me", half_hour).await.unwrap(), 2);
+        let saved = core.migration_load(&p.id).await.unwrap().unwrap();
+        let last = saved.devices[0].events.last().unwrap();
+        assert!(last.kind == "note" && last.detail.starts_with("Automatic Probe failed") && last.detail.contains("hasn't been uploaded"), "{last:?}");
+        assert_eq!(core.migration_probe_due(&p.id, "me", half_hour).await.unwrap(), 0, "not on every pass");
+        assert_eq!(core.migration_probe_due(&p.id, "me", chrono::Duration::milliseconds(-1)).await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_tracker_probes_only_a_few_at_a_time_leaves_a_device_that_just_became_healthy_and_does_nothing_when_not_linked() {
+        use super::super::trackview::AUTO_PROBE_BATCH;
+        let seen = Arc::new(Mutex::new(vec![]));
+        let (core, mut p) = waiting_project(AUTO_PROBE_BATCH + 2, 0).await;
+        // The last one became healthy a moment ago: its agent is still provisioning.
+        let last = p.devices.len() - 1;
+        p.devices[last].entered_stage_at = stamp(chrono::Utc::now());
+        core.migration_save(&mut p).await.unwrap();
+        core.set_rest_transport(rest_world(BLOCKED_STATUS_LINE, true, seen.clone()));
+        let every = chrono::Duration::minutes(30);
+        assert_eq!(core.migration_probe_due(&p.id, "me", every).await.unwrap(), AUTO_PROBE_BATCH, "a few per pass");
+        assert_eq!(core.migration_probe_due(&p.id, "me", every).await.unwrap(), 1, "the rest on the next pass; the newest healthy one still waits");
+        assert_eq!(core.migration_probe_due(&p.id, "me", every).await.unwrap(), 0);
+
+        let (core, mut p) = waiting_project(2, 0).await;
+        p.dest_ecoverse = DestEcoverse::NotLinked;
+        core.migration_save(&mut p).await.unwrap();
+        assert_eq!(core.migration_probe_due(&p.id, "me", every).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
     async fn a_bulk_probe_has_nothing_to_do_when_the_destination_is_not_linked_to_ecoverse() {
         let (core, mut p) = waiting_project(2, 0).await;
         p.dest_ecoverse = DestEcoverse::NotLinked;

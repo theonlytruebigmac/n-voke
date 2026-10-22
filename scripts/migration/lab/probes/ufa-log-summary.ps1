@@ -40,7 +40,7 @@ $wantNetwork = $Network.IsPresent
 function Get-UfaSyncState([string]$LogPath, [datetime]$Since, [string]$ComponentLogPath = '', [datetime]$NowUtc = [datetime]::UtcNow) {
     if (-not (Test-Path -LiteralPath $LogPath)) { return [pscustomobject]@{ State = 'unknown'; FailedAt = $null; RejectedSince = $null; FaultSince = $null; FaultLastAt = $null } }
     $stamp = [regex]'^\[(\d{4}-\d\d-\d\dT[\d:.]+[+-]\d\d:\d\d)\]'
-    $failedAt = $null; $failingSince = $null; $jwtFailedAt = $null; $authOkAt = $null; $syncedAt = $null; $rejectedAt = $null; $rejectedSince = $null; $deniedCount = 0; $deniedSince = $null; $deniedAt = $null
+    $failedAt = $null; $failingSince = $null; $jwtFailedAt = $null; $authOkAt = $null; $syncedAt = $null; $rejectedAt = $null; $rejectedSince = $null; $deniedCount = 0; $deniedSince = $null; $deniedAt = $null; $recordFoundAt = $null
     foreach ($line in @(Get-Content -LiteralPath $LogPath -Tail 20000 -ErrorAction SilentlyContinue)) {
         $m = $stamp.Match($line)
         if (-not $m.Success) { continue }
@@ -51,26 +51,40 @@ function Get-UfaSyncState([string]$LogPath, [datetime]$Since, [string]$Component
         elseif ($line -match 'auth::fetchJWTWithRetries error occurred when fetching jwt: unexpected status code: 400 .*The SSL certificate error') { $rejectedAt = $at; if (-not $rejectedSince) { $rejectedSince = $at } }
         elseif ($line -match 'auth::requestOauthToken Oauth token response received\. Status: 200') { $authOkAt = $at; $rejectedSince = $null; $failingSince = $null }
         elseif ($line -match 'ERROR \(\d+\): components::doRequestWithRetry received invalid status: ''403''') { $deniedCount++; $deniedAt = $at; if (-not $deniedSince) { $deniedSince = $at } }
+        elseif ($line -match 'configservice::updateDeviceConfig device GOAT NRI was found') { $recordFoundAt = $at }
         elseif ($line -match 'components::Download Successfully downloaded') {
             $deniedCount = 0; $deniedSince = $null
             if ($line -match 'generic-asset-interrogator') { $syncedAt = $at }
         }
     }
     # The components' own log: each flush of their data starts by asking for the device's identity and, without one, stops.
-    $noDeviceCount = 0; $noDeviceSince = $null; $noDeviceAt = $null
+    # And the proof that data leaves the device: the batch of inventory (DeviceAsset) the messaging layer logs as sent.
+    $noDeviceTimes = New-Object Collections.Generic.List[datetime]; $inventorySentAt = $null; $componentLogRead = $false
     if ($ComponentLogPath -and (Test-Path -LiteralPath $ComponentLogPath)) {
+        $componentLogRead = $true
         $windowStart = $NowUtc.AddMinutes(-30)
         foreach ($line in @(Get-Content -LiteralPath $ComponentLogPath -Tail 5000 -ErrorAction SilentlyContinue)) {
-            if ($line -notmatch 'ERROR \(\d+\): messaging::refreshDeviceInfo failed to get goat NRI') { continue }
+            $sentInventory = $line -match 'processMessages .*sending \d+ messages for typeURL: \S+DeviceAsset\s*$'
+            if (-not $sentInventory -and $line -notmatch 'ERROR \(\d+\): messaging::refreshDeviceInfo failed to get goat NRI') { continue }
             $m = $stamp.Match($line)
             if (-not $m.Success) { continue }
             $at = [datetimeoffset]::Parse($m.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture).UtcDateTime
-            if ($at -lt $Since -or $at -lt $windowStart) { continue }
-            $noDeviceCount++; $noDeviceAt = $at; if (-not $noDeviceSince) { $noDeviceSince = $at }
+            if ($at -lt $Since) { continue }
+            if ($sentInventory) { $inventorySentAt = $at; continue }
+            if ($at -ge $windowStart) { $noDeviceTimes.Add($at) }
         }
     }
+    # An error from before the record arrived says nothing about now.
+    $noDeviceNow = @($noDeviceTimes | Where-Object { -not $recordFoundAt -or $_ -gt $recordFoundAt })
+    $noDeviceCount = $noDeviceNow.Count
+    $noDeviceSince = if ($noDeviceCount) { $noDeviceNow[0] } else { $null }
+    $noDeviceAt = if ($noDeviceCount) { $noDeviceNow[$noDeviceCount - 1] } else { $null }
+    # With the components' log to read, "synced" is proof: the device record arrived or the inventory was sent. Without it,
+    # the inventory component having been downloaded is all there is to go on.
+    $proofAt = if ($recordFoundAt -and $inventorySentAt) { if ($recordFoundAt -gt $inventorySentAt) { $recordFoundAt } else { $inventorySentAt } } elseif ($recordFoundAt) { $recordFoundAt } else { $inventorySentAt }
+    $isSynced = if ($componentLogRead) { $proofAt -and (-not $failedAt -or $proofAt -gt $failedAt) } else { $syncedAt -and (-not $failedAt -or $syncedAt -gt $failedAt) }
     $state = if ($noDeviceCount -ge 2) { 'nodevice' }
-             elseif ($syncedAt -and (-not $failedAt -or $syncedAt -gt $failedAt)) { 'synced' }
+             elseif ($isSynced) { 'synced' }
              elseif ($failedAt -and $authOkAt -and $authOkAt -gt $failedAt) { 'stalled' }
              elseif ($rejectedAt -and (-not $authOkAt -or $authOkAt -lt $rejectedAt)) { 'rejected' }
              elseif ($deniedCount -ge 5) { 'denied' }
@@ -688,13 +702,13 @@ $out.Add($bar)
 Add-Wrapped $headline 12 '  RESULT   '
 Add-Wrapped $next 12 '  NEXT     '
 $out.Add(('  STATE: {0}' -f $sync.State) + $(switch ($sync.State) {
-    'synced' { ' (the inventory component arrived; the installer would call the data flowing)' }
+    'synced' { ' (data is flowing: the device record arrived or the inventory was sent)' }
     'nodevice' { ' (logs in and its components run, but the cloud has no device record for it, so none of its data can be sent)' }
     'rejected' { ' (the cloud refuses the agent''s login)' }
     'denied' { ' (the component CDN answers the agent with 403)' }
     'blocked' { ' (the cloud does not answer the agent''s login)' }
     'stalled' { ' (login works again, nothing delivered)' }
-    'waiting' { ' (no fault, no inventory component yet)' }
+    'waiting' { ' (no fault, and no proof yet that data is leaving the device)' }
     default { ' (no log to read)' } }))
 if ($sync.FaultSince) { $out.Add(('         failing since {0}, last failure {1} (device time)' -f (Format-Clock $sync.FaultSince), $(if ($sync.FaultLastAt) { Format-Clock $sync.FaultLastAt } else { '-' }))) }
 $out.Add('')

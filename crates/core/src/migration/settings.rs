@@ -26,6 +26,9 @@ pub struct MigrationSettings {
     pub healthy_checkin_minutes: u32,
     /// A source whose check-in is older than this has gone quiet.
     pub agent_quiet_minutes: u32,
+    /// How often a device waiting for Ecoverse's data is probed on its own (0 turns it off). Each probe is a script
+    /// task on the device, so it shows in N-central's Job Status.
+    pub auto_probe_minutes: u32,
     /// What a new project starts with.
     pub defaults: ProjectOptions,
 }
@@ -40,6 +43,7 @@ impl Default for MigrationSettings {
             ecoverse_not_moved_minutes: 75,
             healthy_checkin_minutes: 10,
             agent_quiet_minutes: 10,
+            auto_probe_minutes: 30,
             defaults: ProjectOptions::default(),
         }
     }
@@ -58,7 +62,13 @@ impl MigrationSettings {
         within("Ecoverse not moved", self.ecoverse_not_moved_minutes, 15, 2880, "minutes")?;
         within("A device checking in", self.healthy_checkin_minutes, 2, 120, "minutes")?;
         within("A source gone quiet", self.agent_quiet_minutes, 2, 120, "minutes")?;
+        within("The automatic Probe interval (0 turns it off)", self.auto_probe_minutes, 0, 240, "minutes")?;
         validate_options(&self.defaults)
+    }
+
+    /// The time between automatic Probes of one device, or none when it is off.
+    pub fn auto_probe_every(&self) -> Option<Duration> {
+        (self.auto_probe_minutes > 0).then(|| Duration::minutes(i64::from(self.auto_probe_minutes.max(super::trackview::AUTO_PROBE_MIN_MINUTES))))
     }
 
     pub fn thresholds(&self) -> Thresholds {
@@ -117,6 +127,16 @@ mod tests {
         assert!(with(&|s| s.lost_minutes = 10).unwrap_err().contains("Lost must be between 30"));
         assert!(with(&|s| s.defaults.wave_size = 0).unwrap_err().contains("wave size"));
         assert!(with(&|s| s.not_picked_up_minutes = 60).is_ok());
+        assert!(with(&|s| s.auto_probe_minutes = 500).unwrap_err().contains("0 and 240 minutes"));
+        assert!(with(&|s| s.auto_probe_minutes = 0).is_ok(), "0 turns it off");
+    }
+
+    #[test]
+    fn the_automatic_probe_runs_every_so_often_never_faster_than_the_floor_and_not_at_all_when_off() {
+        let every = |minutes: u32| MigrationSettings { auto_probe_minutes: minutes, ..Default::default() }.auto_probe_every();
+        assert_eq!(every(30), Some(Duration::minutes(30)));
+        assert_eq!(every(1), Some(Duration::minutes(5)), "a minute would hammer the servers");
+        assert_eq!(every(0), None);
     }
 
     #[test]

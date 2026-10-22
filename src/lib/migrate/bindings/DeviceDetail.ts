@@ -17,6 +17,10 @@ launchUnsure: boolean, ecoverse: EcoState | null,
  */
 ecoverseNote: string | null, waitingForEcoverse: boolean, 
 /**
+ * Still waiting after two hours (see `Project::ecoverse_overdue`).
+ */
+ecoverseOverdue: boolean, 
+/**
  * What the device's own record says about its Ecoverse agent, from the last Probe. Only for a project whose
  * destination is linked to Ecoverse; none when the device hasn't been probed.
  */

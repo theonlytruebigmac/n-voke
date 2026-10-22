@@ -10,6 +10,7 @@ const base: MigrationSettings = {
   ecoverseNotMovedMinutes: 75,
   healthyCheckinMinutes: 10,
   agentQuietMinutes: 10,
+  autoProbeMinutes: 30,
   defaults: { reviewDays: 7, cleanMode: "full", taskRepeatMinutes: 15, taskExpiryDays: 7, waveSize: 25, retireSourceRecords: false, delivery: "ecoverseFirst" },
 };
 

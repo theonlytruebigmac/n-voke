@@ -426,10 +426,27 @@ Describe 'Get-UfaSyncState' {
             $r.FaultLastAt.ToString('HH:mm') | Should -Be '14:02'
         }
         It 'needs two errors in the last 30 minutes, so one stray error or an old run of them is not a fault' {
-            (Get-StateWith $synced $nri[0] '2026-10-22T14:05:00Z').State | Should -Be 'synced'
-            (Get-StateWith $synced $nri '2026-10-22T14:40:00Z').State | Should -Be 'synced'
-            (Get-StateWith $synced $nri '2026-10-22T14:25:00Z').State | Should -Be 'synced' -Because 'only the 14:02 error is within 30 minutes of 14:25'
+            # Nothing proves data is flowing here, so it is not "synced" either: the download of the inventory component alone proves nothing.
+            (Get-StateWith $synced $nri[0] '2026-10-22T14:05:00Z').State | Should -Be 'waiting'
+            (Get-StateWith $synced $nri '2026-10-22T14:40:00Z').State | Should -Be 'waiting'
+            (Get-StateWith $synced $nri '2026-10-22T14:25:00Z').State | Should -Be 'waiting' -Because 'only the 14:02 error is within 30 minutes of 14:25'
             (Get-StateWith $synced $nri '2026-10-22T14:20:00Z').State | Should -Be 'nodevice' -Because '13:52 and 14:02 are within 30 minutes of 14:20'
+        }
+        It 'does not call the download of the inventory component data flowing when the components'' log can be read' {
+            (Get-StateWith $synced @('[2026-10-22T09:50:00.000-04:00] INFO (1): scheduler::Run job completed') '2026-10-22T14:05:00Z').State | Should -Be 'waiting'
+        }
+        It 'says synced when the device record arrived, and when the inventory was sent' {
+            $found = '[2026-10-22T09:58:00.000-04:00] INFO (9): configservice::updateDeviceConfig device GOAT NRI was found in config response [ nable:goat::node:abc ].'
+            $sent = '[2026-10-22T09:59:00.000-04:00] INFO (45): messaging::processMessages (configGUID=abc) sending 3 messages for typeURL: type.googleapis.com/Msp.Fusion.DeviceAsset'
+            (Get-StateWith @($synced + $found) @('[2026-10-22T09:50:00.000-04:00] INFO (1): scheduler::Run job completed') '2026-10-22T14:05:00Z').State | Should -Be 'synced'
+            (Get-StateWith $synced @($sent) '2026-10-22T14:05:00Z').State | Should -Be 'synced'
+            (Get-StateWith $synced @('[2026-10-22T09:59:00.000-04:00] INFO (45): messaging::processMessages (configGUID=abc) sending 3 messages for typeURL: type.googleapis.com/Msp.Fusion.Metric') '2026-10-22T14:05:00Z').State | Should -Be 'waiting' -Because 'only the inventory counts'
+        }
+        It 'ignores the errors from before the record arrived, so a device is not called faulty for 30 minutes after it got its record' {
+            $found = '[2026-10-22T09:58:00.000-04:00] INFO (9): configservice::updateDeviceConfig device GOAT NRI was found in config response [ nable:goat::node:abc ].'
+            # 13:42, 13:52 before the record (13:58 UTC); 14:02 after it.
+            (Get-StateWith @($synced + $found) $nri '2026-10-22T14:05:00Z').State | Should -Be 'synced'
+            (Get-StateWith $synced $nri '2026-10-22T14:05:00Z').State | Should -Be 'nodevice'
         }
         It 'ignores errors from before the install' {
             (Get-StateWith $synced $nri '2026-10-22T14:05:00Z' '2026-10-22T14:00:00Z').State | Should -Not -Be 'nodevice'
@@ -442,6 +459,20 @@ Describe 'Get-UfaSyncState' {
             $sync = Get-StateWith $synced $nri '2026-10-22T14:05:00Z'
             Test-UfaRepairDue $sync ([datetime]'2026-10-22T20:00:00Z') $false 30 | Should -BeFalse
             Test-UfaBlockedRestartDue $sync 0 ([datetime]'2026-10-22T14:05:00Z') 30 | Should -BeFalse
+        }
+        It 'is read by the launcher''s Status the same way once the record has arrived, so a Probe does not call it a fault either' {
+            $found = '[2026-10-22T09:58:00.000-04:00] INFO (9): configservice::updateDeviceConfig device GOAT NRI was found in config response [ nable:goat::node:abc ].'
+            $dir = Join-Path ([IO.Path]::GetTempPath()) ('nvoke-live-' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $dir | Out-Null
+            try {
+                Set-Content -Path (Join-Path $dir 'component.log') -Value $nri -Encoding UTF8
+                $now = [datetime]::Parse('2026-10-22T14:05:00Z', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal)
+                (Get-UfaNoDeviceLive (Join-Path $dir 'component.log') $now).active | Should -BeTrue
+                Set-Content -Path (Join-Path $dir 'msp-agent-core.log') -Value $found -Encoding UTF8
+                $live = Get-UfaNoDeviceLive (Join-Path $dir 'component.log') $now
+                $live.active | Should -BeFalse -Because 'only the 14:02 error is after the record'
+                $live.recordFoundAt | Should -Not -BeNullOrEmpty
+            } finally { Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue }
         }
         It 'is read by the launcher''s Status by the same rule, so a Probe agrees with the watcher' {
             $cases = @(
