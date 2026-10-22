@@ -163,7 +163,8 @@ function Test-TlsHost([string]$HostName, [int]$TimeoutMs = 8000) {
         $result.Tcp = 'ok'
         $ssl = New-Object Net.Security.SslStream($client.GetStream(), $false)
         $ssl.ReadTimeout = $TimeoutMs; $ssl.WriteTimeout = $TimeoutMs
-        $ssl.AuthenticateAsClient($HostName)
+        # .NET Framework (Windows PowerShell 5.1) does not offer TLS 1.2 by default, which every one of these hosts requires.
+        $ssl.AuthenticateAsClient($HostName, $null, [Security.Authentication.SslProtocols]::Tls12, $false)
         $cert = New-Object Security.Cryptography.X509Certificates.X509Certificate2($ssl.RemoteCertificate)
         $result.Tls = 'ok {0}; cert {1}; issuer {2}; expires {3:yyyy-MM-dd}' -f $ssl.SslProtocol, $cert.Subject, $cert.Issuer, $cert.NotAfter
     }

@@ -26,3 +26,5 @@ dist-ssr
 # Logs collected from lab devices (nvoke-sup-*, sup-*): job.json in them holds a registration token
 nvoke-sup-*/
 sup-*/
+# Zips made by scripts/migration/lab/probes/collect-logs.ps1
+nvoke-logs-*.zip
