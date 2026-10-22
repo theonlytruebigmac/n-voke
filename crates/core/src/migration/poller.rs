@@ -190,7 +190,14 @@ impl Core {
                     let detail = &details[0];
                     let finished = matches!(detail.status.to_ascii_lowercase().as_str(), "success" | "failed");
                     let output = match (&detail.output_file_name, finished) {
-                        (Some(file), true) => self.ncentral_task_output(&project.source_server_id, file).await.ok(),
+                        (Some(file), true) => match self.ncentral_task_output(&project.source_server_id, file).await {
+                            Ok(output) => Some(output),
+                            // Not swallowed: a launch that succeeded but whose output can't be read otherwise looks like nothing at all.
+                            Err(e) => {
+                                report.errors.push(format!("{}: the launch task finished, but its output could not be read: {e}", device.name));
+                                None
+                            }
+                        },
                         _ => None,
                     };
                     outcomes.insert(i, launch_outcome_from_rest(&detail.status, detail.message.as_deref().unwrap_or(""), output.as_ref()));
@@ -236,6 +243,9 @@ impl Core {
 
             // Where it is now.
             let looks_for_dest = match device.stage {
+                // A REST-launched device is looked for too: if its launch result is never readable, its appearance on the
+                // destination is the only way to learn that it ran (see `alive_on_destination`).
+                Stage::Launched | Stage::NotPickedUp => device.path == Some(DeliveryPath::Rest) && !project.is_reinstall(),
                 Stage::Staged | Stage::StuckStaged => !project.is_reinstall(),
                 Stage::AgentRemoved | Stage::Lost | Stage::Registered => true,
                 // A healthy device still waiting for Ecoverse's data is looked for too: if its record is gone (the agent was
@@ -811,6 +821,64 @@ mod tests {
         core.migration_poll_at(&mut p, &Thresholds::default(), now()).await;
         let claimed: Vec<Option<&str>> = p.devices.iter().map(|d| d.dest_device_id.as_deref()).collect();
         assert_eq!(claimed, [Some("5001"), None], "the second one doesn't take the same record");
+    }
+
+    #[tokio::test]
+    async fn a_launched_device_whose_task_never_reports_still_follows_the_device_to_the_destination() {
+        let world = Arc::new(Mutex::new(World::default()));
+        let (core, mut p) = setup(&[planned("9001", DeliveryPath::Rest, None)], false).await;
+        core.set_rest_transport(rest_fake(&world));
+        p.devices[0].identity = Some(DeviceIdentity { serial: Some("VMW-1".into()), hostname: Some("PC-9001".into()), macs: vec!["aabbccddee01".into()], smbios_uuid: None });
+        p.dest_baseline.insert("111".into(), vec!["4001".into()]);
+        launch(&mut p, 0, 15, "5550");
+        // The task never reports (as when the old agent is removed before it can), but the device is on the destination, checking in.
+        {
+            let mut w = world.lock().unwrap();
+            w.task = Some(("Pending".into(), None));
+            w.dest_list = vec![json!({ "deviceId": 5001, "longName": "PC-9001" })];
+            w.identities.insert("5001".into(), ("vmw-1".into(), "PC-9001".into(), "AA-BB-CC-DD-EE-01".into()));
+            w.checkin.insert("dst.example.com/5001".into(), 3);
+        }
+        let report = core.migration_poll_at(&mut p, &Thresholds::default(), now()).await;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(stages(&p), [Stage::Healthy]);
+        assert_eq!(p.devices[0].dest_device_id.as_deref(), Some("5001"));
+        let whys: Vec<&str> = p.devices[0].events.iter().filter(|e| e.kind == "stage").map(|e| e.detail.as_str()).collect();
+        assert!(whys.iter().any(|w| w.contains("could not be read") && w.contains("on the destination")), "{whys:?}");
+    }
+
+    #[tokio::test]
+    async fn an_old_record_of_the_device_on_the_destination_does_not_make_a_launched_device_look_moved() {
+        let world = Arc::new(Mutex::new(World::default()));
+        let (core, mut p) = setup(&[planned("9001", DeliveryPath::Rest, None)], false).await;
+        core.set_rest_transport(rest_fake(&world));
+        p.devices[0].identity = Some(DeviceIdentity { serial: Some("VMW-1".into()), hostname: Some("PC-9001".into()), macs: vec!["aabbccddee01".into()], smbios_uuid: None });
+        p.dest_baseline.insert("111".into(), vec!["5001".into()]);
+        launch(&mut p, 0, 15, "5550");
+        {
+            let mut w = world.lock().unwrap();
+            w.task = Some(("Pending".into(), None));
+            w.dest_list = vec![json!({ "deviceId": 5001, "longName": "PC-9001" })];
+            w.identities.insert("5001".into(), ("vmw-1".into(), "PC-9001".into(), "AA-BB-CC-DD-EE-01".into()));
+            // The record from an earlier move: last seen three days ago.
+            w.checkin.insert("dst.example.com/5001".into(), 3 * 24 * 60);
+        }
+        let report = core.migration_poll_at(&mut p, &Thresholds::default(), now()).await;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(stages(&p), [Stage::Launched]);
+    }
+
+    #[tokio::test]
+    async fn a_launch_task_that_finished_but_whose_output_cannot_be_read_says_so_instead_of_looking_like_nothing() {
+        let world = Arc::new(Mutex::new(World::default()));
+        let (core, mut p) = setup(&[planned("9001", DeliveryPath::Rest, None)], false).await;
+        core.set_rest_transport(rest_fake(&world));
+        launch(&mut p, 0, 15, "5550");
+        world.lock().unwrap().task = Some(("Success".into(), Some(b"this is not a zip file".to_vec())));
+        let report = core.migration_poll_at(&mut p, &Thresholds::default(), now()).await;
+        assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+        assert!(report.errors[0].contains("PC-9001") && report.errors[0].contains("output could not be read"), "{}", report.errors[0]);
+        assert_eq!(stages(&p), [Stage::Launched], "nothing is guessed from an output nobody could read");
     }
 
     /// A device already matched to destination record 5001, whose agent was then uninstalled and reinstalled by hand: N-central
