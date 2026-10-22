@@ -704,12 +704,15 @@ Describe 'the lab log summary probe (ufa-log-summary.ps1)' {
             '[2026-10-21T11:00:10.000-04:00] ERROR (184): auth::requestOauthToken unable to get jwt: Post "https://auth.example.invalid/oauth2/token": ' + $timeout
             '[2026-10-21T11:00:10.001-04:00] ERROR (184): auth::fetchJWTWithRetries error occurred when fetching jwt: Post "https://auth.example.invalid/oauth2/token": ' + $timeout
         )
-        function Invoke-Probe([string[]]$Lines) {
-            $log = Join-Path ([IO.Path]::GetTempPath()) ('nvoke-probe-' + [guid]::NewGuid().ToString('N') + '.log')
+        function Invoke-Probe([string[]]$Lines, [string[]]$ProbeArguments = @(), [string[]]$ComponentLines = $null) {
+            $dir = Join-Path ([IO.Path]::GetTempPath()) ('nvoke-probe-' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $dir | Out-Null
+            $log = Join-Path $dir 'msp-agent-core.log'
             try {
                 Set-Content -Path $log -Value $Lines -Encoding UTF8
-                (& $hostPath -NoProfile -ExecutionPolicy Bypass -File $probe -LogPath $log 2>&1 | Out-String)
-            } finally { Remove-Item $log -Force -ErrorAction SilentlyContinue }
+                if ($null -ne $ComponentLines) { Set-Content -Path (Join-Path $dir 'component.log') -Value $ComponentLines -Encoding UTF8 }
+                (& $hostPath -NoProfile -ExecutionPolicy Bypass -File $probe -LogPath $log -AsOfUtc '2026-10-21T15:30:00Z' @ProbeArguments 2>&1 | Out-String)
+            } finally { Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue }
         }
     }
 
@@ -724,13 +727,55 @@ Describe 'the lab log summary probe (ufa-log-summary.ps1)' {
         [System.Management.Automation.Language.Parser]::ParseFile($probe, [ref]$null, [ref]$errors) | Out-Null
         @($errors).Count | Should -Be 0
         $text = Invoke-Probe $blockedLog
-        $text | Should -Match 'STATE: blocked \('
+        $text | Should -Match 'STATE: blocked'
         $text | Should -Match 'failing since \d\d:\d\d:\d\d, last failure \d\d:\d\d:\d\d'
-        $text | Should -Match 'timeouts: 1'
+        $text | Should -Match 'RESULT\s+PROBLEM - Login'
+        $text | Should -Match 'timeouts 1'
     }
 
-    It 'says synced once the inventory component arrived after the failure' {
+    It 'says synced once the inventory component arrived after the failure, and finds no fault' {
         $synced = "[2026-10-21T12:00:00.000-04:00] INFO (21): components::Download Successfully downloaded 'cdn.example.invalid/components/generic-asset-interrogator/windows/v0.18.2/x.exe' to 'C:\x'"
-        (Invoke-Probe ($blockedLog + $synced)) | Should -Match 'STATE: synced \('
+        $text = Invoke-Probe ($blockedLog + $synced)
+        $text | Should -Match 'STATE: synced'
+        $text | Should -Match 'RESULT\s+NO FAULT FOUND'
+    }
+
+    It 'says nodevice, ahead of synced, when the components cannot get a device record, and says a restart does not help' {
+        $synced = "[2026-10-21T11:00:00.000-04:00] INFO (21): components::Download Successfully downloaded 'cdn.example.invalid/components/generic-asset-interrogator/windows/v0.18.2/x.exe' to 'C:\x'"
+        $nri = @('[2026-10-21T11:10:00.000-04:00] ERROR (42): messaging::refreshDeviceInfo failed to get goat NRI', '[2026-10-21T11:20:00.000-04:00] ERROR (42): messaging::refreshDeviceInfo failed to get goat NRI')
+        $text = Invoke-Probe @($synced) -ComponentLines $nri
+        $text | Should -Match 'STATE: nodevice'
+        $text | Should -Match '\[FAIL\] Device record'
+        $text | Should -Match '\[FAIL\] Data sent'
+        $text | Should -Match 'RESULT\s+PROBLEM - Device record'
+        $text | Should -Match 'not fixed by a restart or the repair'
+    }
+
+    It 'keeps a failing component download visible even when another fault is the headline' {
+        $deny = '[2026-10-21T11:00:00.000-04:00] ERROR (47): components::doRequestWithRetry received invalid status: ''403'''
+        $nri = @('[2026-10-21T11:10:00.000-04:00] ERROR (42): messaging::refreshDeviceInfo failed to get goat NRI', '[2026-10-21T11:20:00.000-04:00] ERROR (42): messaging::refreshDeviceInfo failed to get goat NRI')
+        $text = Invoke-Probe (@($deny) * 6) -ComponentLines $nri
+        $text | Should -Match 'STATE: nodevice'
+        $text | Should -Match '\[FAIL\] Components\s+downloads are being REFUSED'
+        $text | Should -Match 'ALSO FAILING: Components'
+    }
+
+    It 'reads a folder from collect-logs.ps1 as it is laid out in the zip, taking the time of the collection from system.txt' {
+        $root = Join-Path ([IO.Path]::GetTempPath()) ('nvoke-collected-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path (Join-Path $root 'msp-agent/logs') -Force | Out-Null
+        try {
+            Set-Content -Path (Join-Path $root 'msp-agent/logs/msp-agent-core.log') -Value @('[2026-10-21T11:00:00.000-04:00] INFO (31): coreprocessors::AgentIsProvisioned current product provisioning state: [ 0 ] [ NotStarted ]', '[2026-10-21T11:04:00.000-04:00] INFO (9): coreprocessors::AgentIsProvisioned current product provisioning state: [ 3 ] [ Success ]') -Encoding UTF8
+            Set-Content -Path (Join-Path $root 'system.txt') -Value @('==== Collection', 'Collected at: 2026-10-21 11:30:00 -04:00 (UTC 2026-10-21 15:30:00)', 'Computer: SUP-9999    Run as: x', '') -Encoding UTF8
+            $text = (& $hostPath -NoProfile -File $probe -Collected $root 2>&1 | Out-String)
+            $text | Should -Match 'Ecoverse agent check - SUP-9999'
+            $text | Should -Match '\(from collected logs\)'
+            $text | Should -Match 'Provisioned\s+Success at 11:04:00, 4 min after the agent started'
+        } finally { Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'still reports, rather than stopping, when there is no log at all' {
+        $text = (& $hostPath -NoProfile -File $probe -LogPath (Join-Path ([IO.Path]::GetTempPath()) 'nvoke-no-such-dir/msp-agent-core.log') 2>&1 | Out-String)
+        $text | Should -Match 'RESULT\s+PROBLEM - Provisioned: there is no core log to read'
+        $text | Should -Match 'STATE: unknown'
     }
 }
