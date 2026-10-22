@@ -220,6 +220,7 @@ function Get-InstallerEventFact {
         $text = Get-SystemSection 'Events: MsiInstaller'
         if (-not $text) { return $null }
         foreach ($m in [regex]::Matches($text, '(?m)^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\s+(\d+)\s+(.*)$')) {
+            if ($m.Groups[3].Value -notmatch 'MSP Core Agent') { continue }
             $events.Add([pscustomobject]@{ At = Convert-LocalToUtc ([datetime]::Parse($m.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture)); Id = [int]$m.Groups[2].Value; Message = $m.Groups[3].Value })
         }
         return $events.ToArray()
@@ -245,7 +246,7 @@ function Get-ClockFact {
     try {
         $out = @(w32tm /query /status 2>&1) -join "`n"
         $source = [regex]::Match($out, '(?m)^Source:\s*(.+)$')
-        if (-not $source.Success) { return $null }
+        if (-not $source.Success) { $script:ClockNote = ($out -split "\r?\n" | Where-Object { $_.Trim() } | Select-Object -First 1); return $null }
         [pscustomobject]@{ Source = $source.Groups[1].Value.Trim(); Synced = ($out -notmatch 'not synchronized') }
     }
     catch { $null }
@@ -411,11 +412,17 @@ elseif ($core.Count) { Add-Check 'Login' 'info' 'no login attempt in the log yet
 else { Add-Check 'Login' 'skip' 'no core log' }
 
 # 6. Device record
+$recordGraceMinutes = 90
+$sinceProvisioned = if ($prov.ContainsKey('3')) { $nowUtc - $prov['3'] } elseif ($install) { $nowUtc - $install } else { [timespan]::Zero }
+$recordInGrace = $sinceProvisioned.TotalMinutes -lt $recordGraceMinutes
 $recordDetail = @("Config replies without a device record: $($noConfig.Count) (no device configuration), $($noGoat.Count) (no GOAT NRI)")
 if ($nri.Count) { $recordDetail += ('Components failing to get it: {0} times, first {1}, last {2}' -f $nri.Count, (Format-Clock $nri[0].At), (Format-Clock $nri[$nri.Count - 1].At)) }
 if ($goatOther.Count) { $recordDetail += "Other lines that mention GOAT: $($goatOther.Count), the first: $($goatOther[0])" }
-if ($sync.State -eq 'nodevice') {
-    Add-Check 'Device record' 'fail' ('the cloud sends this agent no device record (no GOAT NRI); since {0}, latest {1}' -f (Format-Clock $sync.FaultSince), (Format-Clock $sync.FaultLastAt)) $recordDetail
+if ($sync.State -eq 'nodevice' -and $recordInGrace) {
+    Add-Check 'Device record' 'warn' ('not received yet: the components have failed to get it since {0}; normal for the first {1} minutes after provisioning ({2} so far)' -f (Format-Clock $sync.FaultSince), $recordGraceMinutes, (Format-Duration $sinceProvisioned)) ($recordDetail + 'Ecoverse creates the device record some time after the agent registers. If it has not arrived by the end of that window it is a fault: run this check again then.')
+}
+elseif ($sync.State -eq 'nodevice') {
+    Add-Check 'Device record' 'fail' ('the cloud sends this agent no device record (no GOAT NRI); since {0}, latest {1}; provisioned {2} ago' -f (Format-Clock $sync.FaultSince), (Format-Clock $sync.FaultLastAt), (Format-Duration $sinceProvisioned)) $recordDetail
 }
 elseif ($noGoat.Count -and -not $nri.Count) { Add-Check 'Device record' 'warn' 'the cloud said once that it has no device record for this agent; no component has failed on it yet' $recordDetail }
 elseif ($core.Count) { Add-Check 'Device record' 'ok' ('no component is failing to get one{0}' -f $(if ($nri.Count) { " (it did earlier: $($nri.Count) errors, the last $(Format-Age $nri[$nri.Count - 1].At))" } else { '' })) $recordDetail }
@@ -459,7 +466,8 @@ else { Add-Check 'Inventory collected' 'info' 'the inventory component is not on
 # 9. Data leaves the device
 $sendDetail = @()
 if ($flushes.Count) { $sendDetail += ('Components asked to send their data {0} times, the last {1}' -f $flushes.Count, (Format-Age $flushes[$flushes.Count - 1].At)) }
-if ($sync.State -eq 'nodevice') { Add-Check 'Data sent' 'fail' 'cannot send anything: every flush stops at "failed to get goat NRI" and closes the connection without sending' ($sendDetail + 'A restart or the repair does not help (tried on three lab devices). It is fixed in the Ecoverse tenant.') }
+if ($sync.State -eq 'nodevice' -and $recordInGrace) { Add-Check 'Data sent' 'info' 'waiting for the device record: until it arrives every flush stops at "failed to get goat NRI" without sending' $sendDetail }
+elseif ($sync.State -eq 'nodevice') { Add-Check 'Data sent' 'fail' 'cannot send anything: every flush stops at "failed to get goat NRI" and closes the connection without sending' ($sendDetail + 'A restart or the repair does not help (tried on three lab devices). It is fixed in the Ecoverse tenant.') }
 elseif ($sync.State -in 'rejected', 'blocked', 'denied') { Add-Check 'Data sent' 'skip' 'cannot send until the fault above is fixed' }
 elseif ($core.Count) { Add-Check 'Data sent' 'info' 'no sending error found. This script cannot see Ecoverse: confirm the data arrived in N-voke (Track: Ecoverse data received)' $sendDetail }
 else { Add-Check 'Data sent' 'skip' 'no logs' }
@@ -479,15 +487,36 @@ if ($exec.Count) {
 else { Add-Check 'Script channel' 'info' 'the script component is not on the device yet' }
 
 # 11. Windows Agent maintenance of the Ecoverse agent
+$waUninstalls = @($ufaMaint | Where-Object { $_.Text -match 'Component status update\. Status: Uninstalling' } | ForEach-Object {
+        $at = $_.At
+        [pscustomobject]@{ At = $at; MissingService = [bool](@($ufaMaint | Where-Object { $_.At -le $at -and $_.At -ge $at.AddSeconds(-5) -and $_.Text -match 'service \[ MspAgent \] not exists' }).Count) }
+    })
+$nvokeCleanups = New-Object Collections.Generic.List[datetime]
+foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $src.Nvoke 'logs') -File -Filter 'install-*.log' -ErrorAction SilentlyContinue)) {
+    foreach ($line in (Read-LogLine $f.FullName)) {
+        if ($line -match '^(\d{4}-\d\d-\d\dT[\d:.]+[+-]\d\d:\d\d)\s+cleanup-(ufa-uninstall|uninstall|ufa-wait)') { $nvokeCleanups.Add([datetimeoffset]::Parse($Matches[1], [Globalization.CultureInfo]::InvariantCulture).UtcDateTime) }
+    }
+}
+# Who removed the MSP Core Agent: the Windows Agent's own hourly maintenance, the N-voke cleanup of a move, or neither.
+function Get-RemovalCause([datetime]$At) {
+    $wa = @($waUninstalls | Where-Object { [math]::Abs(($_.At - $At).TotalSeconds) -lt 90 } | Select-Object -First 1)
+    if ($wa.Count) { return $(if ($wa[0].MissingService) { 'by the Windows Agent (its hourly check found no MspAgent service)' } else { 'by the Windows Agent' }) }
+    if (@($nvokeCleanups | Where-Object { [math]::Abs(($_ - $At).TotalSeconds) -lt 180 }).Count) { return 'by the N-voke cleanup (the move)' }
+    if ($ufaMaint.Count -and $At -lt $ufaMaint[0].At) { return 'cause is not in the logs (the Windows Agent log starts later: a move replaces the Windows Agent and its log)' }
+    'cause is not in the logs'
+}
 if ($ufaMaint.Count) {
     $updates = @($ufaMaint | Where-Object { $_.Text -match 'Component status update\. Status: (\w+)(?:, Error Code: (-?\d+))?' } | ForEach-Object { [pscustomobject]@{ At = $_.At; Status = $Matches[1]; Code = $Matches[2] } })
     $suspended = @($ufaMaint | Where-Object { $_.Text -match 'Install configurations are not present' })
     $bad = @($updates | Where-Object { $_.Code -and $_.Code -ne '0' })
     $detail = @()
     if ($updates.Count) { $detail += 'Recent: ' + (@($updates | Select-Object -Last 6 | ForEach-Object { '{0} {1}{2}' -f (Format-Clock $_.At), $_.Status, $(if ($_.Code -and $_.Code -ne '0') { " (error $($_.Code))" } else { '' }) }) -join '; ') }
-    $recentSuspended = @($suspended | Where-Object { $_.At -ge $hourAgo })
+    # Every deployment starts with this line until the server's configuration arrives seconds later: only a run that ends there is a problem.
+    $lastSuspended = if ($suspended.Count) { $suspended[$suspended.Count - 1].At } else { $null }
+    $progressed = $lastSuspended -and @($ufaMaint | Where-Object { $_.At -gt $lastSuspended -and $_.Text -match 'Starting to install|Detected installed agent|Install command line' }).Count
+    $stuckSuspended = $lastSuspended -and $lastSuspended -ge $hourAgo -and -not $progressed
     if ($bad.Count) { Add-Check 'Windows Agent deploys it' 'fail' ('{0} install or removal attempt(s) ended in an error code; the last at {1}' -f $bad.Count, (Format-Clock $bad[$bad.Count - 1].At)) $detail }
-    elseif ($recentSuspended.Count) { Add-Check 'Windows Agent deploys it' 'warn' 'the Windows Agent has no install configuration for the Ecoverse agent ("Install configurations are not present")' ($detail + 'It cannot deploy the agent until the server sends it one: check that the destination N-central has the Ecoverse agent enabled for this customer.') }
+    elseif ($stuckSuspended) { Add-Check 'Windows Agent deploys it' 'warn' 'the Windows Agent has no install configuration for the Ecoverse agent ("Install configurations are not present") and has not received one since' ($detail + 'It cannot deploy the agent until the server sends it one: check that the destination N-central has the Ecoverse agent enabled for this customer.') }
     elseif ($updates.Count) { Add-Check 'Windows Agent deploys it' 'ok' ('{0} install/removal step(s), all with error code 0; the last {1} {2}' -f $updates.Count, $updates[$updates.Count - 1].Status, (Format-Age $updates[$updates.Count - 1].At)) $detail }
     else { Add-Check 'Windows Agent deploys it' 'info' 'the Windows Agent log has nothing about deploying the agent' }
 }
@@ -508,6 +537,19 @@ if ($msiEvents) {
 }
 else { Add-Check 'Windows Installer' 'skip' 'could not read the Windows Installer events' }
 
+# 12b. How often the Ecoverse agent was taken off and put back, and by whom. Every redeploy provisions a brand-new agent.
+if ($msiEvents) {
+    $removals = @($msiEvents | Where-Object { $_.Id -eq 11724 -and $_.Message -match 'MSP Core Agent' -and $_.At -ge $nowUtc.AddHours(-24) })
+    $causes = @($removals | ForEach-Object { [pscustomobject]@{ At = $_.At; Cause = (Get-RemovalCause $_.At) } })
+    $byAgent = @($causes | Where-Object { $_.Cause -like 'by the Windows Agent*' })
+    $detail = @($causes | ForEach-Object { '{0} removed {1}' -f (Format-Clock $_.At), $_.Cause })
+    if ($byAgent.Count -ge 2) {
+        Add-Check 'Redeploys' 'warn' ('the Windows Agent took the Ecoverse agent off and put it back {0} times in 24 hours' -f $byAgent.Count) ($detail + 'Its hourly check removes the agent when it finds no MspAgent service, and the redeploy provisions a brand-new agent, which starts the wait for its device record over (20 to 90 minutes). Look at what removes the service before the check runs.')
+    }
+    elseif ($causes.Count) { Add-Check 'Redeploys' 'ok' ('{0} removal(s) in 24 hours, {1}' -f $causes.Count, $(if (@($causes | Where-Object { $_.Cause -like 'by the N-voke*' }).Count -eq $causes.Count) { 'all by the N-voke cleanup of a move' } else { 'see the list' })) $detail }
+    else { Add-Check 'Redeploys' 'ok' 'the Ecoverse agent was not removed or reinstalled in the last 24 hours' }
+}
+
 # 13. N-voke installer (its own record, against what the log says now)
 if ($installer) {
     $said = if ($installer.ufa -and $installer.ufa.sync) { [string]$installer.ufa.sync } else { $null }
@@ -526,7 +568,7 @@ else { Add-Check 'N-voke installer' 'skip' 'no status.json (not a device moved b
 
 # 14. Clock and network
 if ($clock) { Add-Check 'Clock' $(if ($clock.Synced) { 'ok' } else { 'info' }) ('{0}{1}' -f $clock.Source, $(if ($clock.Synced) { '' } else { ' (not synchronized with a time server; the time was right when checked, but it can drift)' })) }
-else { Add-Check 'Clock' 'skip' 'could not read the time source' }
+else { Add-Check 'Clock' 'skip' $(if ($script:ClockNote) { "could not read the time source ($script:ClockNote)" } else { 'could not read the time source' }) }
 if ($net) {
     $bad = @($net | Where-Object { -not $_.Ok } | Select-Object -ExpandProperty Host -Unique)
     $detail = @($net | Group-Object Host | ForEach-Object { '{0}: {1} of {2} connected, {3}-{4} ms' -f $_.Name, @($_.Group | Where-Object Ok).Count, $_.Count, ($_.Group | Measure-Object Ms -Minimum).Minimum, ($_.Group | Measure-Object Ms -Maximum).Maximum })
@@ -594,6 +636,13 @@ if ($fails.Count) {
     if ($otherFails | Where-Object { $_.Name -eq 'Components' }) { $next += ' ALSO, for the components: ' + $advice['denied'] }
 }
 elseif ($sync.State -eq 'waiting' -or ($sync.State -eq 'stalled')) { $headline = 'IN PROGRESS - the agent is set up and no fault was found yet, but its inventory component has not arrived'; $next = $advice[$sync.State] }
+elseif ($sync.State -eq 'nodevice' -and $recordInGrace) {
+    $deadline = if ($prov.ContainsKey('3')) { $prov['3'] } else { $install }
+    $headline = 'IN PROGRESS - the agent is set up and logging in, and waiting for its device record (normal for the first {0} minutes after provisioning; {1} so far)' -f $recordGraceMinutes, (Format-Duration $sinceProvisioned)
+    $others = @($warns | Where-Object { $_.Name -notin 'Device record', 'N-voke installer' })
+    if ($others.Count) { $headline += ' Also look at: ' + (($others | ForEach-Object { $_.Name }) -join ', ') + '.' }
+    $next = 'Run this check again in 30 minutes. If the device record has still not arrived by {0}, it is a fault. {1}' -f (Format-Clock $deadline.AddMinutes($recordGraceMinutes)), $advice['nodevice']
+}
 elseif ($warns.Count) { $headline = 'NO FAULT FOUND, with {0} thing(s) to look at: {1}' -f $warns.Count, (($warns | ForEach-Object { $_.Name }) -join ', '); $next = 'The data cannot be confirmed from the device: check Track in N-voke.' }
 else { $headline = 'NO FAULT FOUND ON THE DEVICE'; $next = 'The data cannot be confirmed from the device: check Track in N-voke (Ecoverse data received).' }
 
@@ -672,7 +721,7 @@ if ($noGoat.Count) { Add-TimelineItem $noGoat[0] 'device record' 'the cloud sent
 if ($nri.Count) { Add-TimelineItem $nri[0].At 'device record' 'a component first failed to get the device record'; if ($nri.Count -gt 1) { Add-TimelineItem $nri[$nri.Count - 1].At 'device record' "the same failure again (latest of $($nri.Count))" } }
 if ($interRows.Count) { Add-TimelineItem $interRows[0].At 'inventory' 'the inventory component first ran' }
 foreach ($u in $ufaMaint) { if ($u.Text -match 'Component status update\. Status: (\w+)(?:, Error Code: (-?\d+))?') { Add-TimelineItem $u.At 'windows agent' ('Ecoverse agent {0}{1}' -f $Matches[1].ToLower(), $(if ($Matches[2] -and $Matches[2] -ne '0') { " (error $($Matches[2]))" } else { '' })) } }
-foreach ($e in @($msiEvents)) { if ($e.Id -in 11707, 11724, 11725, 11721, 11722 -and ($Full -or $e.At -ge $nowUtc.AddHours(-12))) { Add-TimelineItem $e.At 'installer' $(switch ($e.Id) { 11707 { 'MSP Core Agent installed' } 11724 { 'MSP Core Agent removed' } 11725 { 'MSP Core Agent removal FAILED' } 11721 { 'MSP Core Agent: error 1721 (its program could not be run)' } 11722 { 'MSP Core Agent: error 1722 (a step did not finish)' } }) } }
+foreach ($e in @($msiEvents)) { if ($e.Id -in 11707, 11724, 11725, 11721, 11722 -and ($Full -or $e.At -ge $nowUtc.AddHours(-12))) { Add-TimelineItem $e.At 'installer' $(switch ($e.Id) { 11707 { 'MSP Core Agent installed' } 11724 { 'MSP Core Agent removed ' + (Get-RemovalCause $e.At) } 11725 { 'MSP Core Agent removal FAILED' } 11721 { 'MSP Core Agent: error 1721 (its program could not be run)' } 11722 { 'MSP Core Agent: error 1722 (a step did not finish)' } }) } }
 if ($installer) { foreach ($h in @($installer.history)) { if ($h.event -in 'ufa-repair', 'ufa-sync-restart', 'ufa-repair-restart', 'healthy', 'ufa-registration-broken') { Add-TimelineItem ([datetime]::Parse($h.at, [Globalization.CultureInfo]::InvariantCulture, $utcStyle)) 'n-voke' ('{0}: {1}' -f $h.event, $h.detail) } } }
 $items = @($timeline | Sort-Object At | Group-Object { '{0:yyyyMMddHHmm}|{1}|{2}' -f $_.At, $_.Source, $_.Text } | ForEach-Object { $_.Group[0] } | Sort-Object At)
 $limit = if ($Full) { 200 } else { 28 }
@@ -684,7 +733,7 @@ if ($items.Count) {
 if ($unexpectedList.Count) {
     $out.Add(''); $out.Add('  UNEXPECTED ERRORS (not known noise, not explained above)'); $out.Add('  ' + ('-' * ($width - 2)))
     foreach ($e in ($unexpectedList | Select-Object -First $(if ($Full) { 60 } else { 12 }))) {
-        Add-Wrapped $e.Shape 8 ('    x{0,-4} {1}-{2}  [{3}] ' -f $e.Count, (Format-Clock $e.First), (Format-Clock $e.Last), $e.Where)
+        Add-Wrapped ('[{0}] {1}' -f $e.Where, $e.Shape) 0 ('    x{0,-4} {1}-{2}  ' -f $e.Count, (Format-Clock $e.First), (Format-Clock $e.Last))
     }
     if ($unexpectedList.Count -gt 12 -and -not $Full) { $out.Add("    ... and $($unexpectedList.Count - 12) more (-Full)") }
 }

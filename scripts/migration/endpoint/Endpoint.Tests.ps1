@@ -740,10 +740,11 @@ Describe 'the lab log summary probe (ufa-log-summary.ps1)' {
         $text | Should -Match 'RESULT\s+NO FAULT FOUND'
     }
 
-    It 'says nodevice, ahead of synced, when the components cannot get a device record, and says a restart does not help' {
+    It 'says nodevice, ahead of synced, when the components still cannot get a device record long after provisioning, and says a restart does not help' {
+        $started = '[2026-10-21T07:00:00.000-04:00] INFO (31): main::run Msp Agent Service starting: PID = 1'
         $synced = "[2026-10-21T11:00:00.000-04:00] INFO (21): components::Download Successfully downloaded 'cdn.example.invalid/components/generic-asset-interrogator/windows/v0.18.2/x.exe' to 'C:\x'"
         $nri = @('[2026-10-21T11:10:00.000-04:00] ERROR (42): messaging::refreshDeviceInfo failed to get goat NRI', '[2026-10-21T11:20:00.000-04:00] ERROR (42): messaging::refreshDeviceInfo failed to get goat NRI')
-        $text = Invoke-Probe @($synced) -ComponentLines $nri
+        $text = Invoke-Probe @($started, $synced) -ComponentLines $nri
         $text | Should -Match 'STATE: nodevice'
         $text | Should -Match '\[FAIL\] Device record'
         $text | Should -Match '\[FAIL\] Data sent'
@@ -751,10 +752,23 @@ Describe 'the lab log summary probe (ufa-log-summary.ps1)' {
         $text | Should -Match 'not fixed by a restart or the repair'
     }
 
+    It 'calls the same thing in progress, not a fault, within 90 minutes of provisioning (a device just set up)' {
+        $provisioned = '[2026-10-21T11:00:00.000-04:00] INFO (9): coreprocessors::AgentIsProvisioned current product provisioning state: [ 3 ] [ Success ]'
+        $synced = "[2026-10-21T11:05:00.000-04:00] INFO (21): components::Download Successfully downloaded 'cdn.example.invalid/components/generic-asset-interrogator/windows/v0.18.2/x.exe' to 'C:\x'"
+        $nri = @('[2026-10-21T11:10:00.000-04:00] ERROR (42): messaging::refreshDeviceInfo failed to get goat NRI', '[2026-10-21T11:20:00.000-04:00] ERROR (42): messaging::refreshDeviceInfo failed to get goat NRI')
+        $text = Invoke-Probe @($provisioned, $synced) -ComponentLines $nri
+        $text | Should -Match 'STATE: nodevice'
+        $text | Should -Match '\[WARN\] Device record\s+not received yet'
+        $text | Should -Not -Match '\[FAIL\]'
+        $text | Should -Match 'RESULT\s+IN PROGRESS'
+        $text | Should -Match 'Run this check again in 30 minutes'
+    }
+
     It 'keeps a failing component download visible even when another fault is the headline' {
+        $started = '[2026-10-21T07:00:00.000-04:00] INFO (31): main::run Msp Agent Service starting: PID = 1'
         $deny = '[2026-10-21T11:00:00.000-04:00] ERROR (47): components::doRequestWithRetry received invalid status: ''403'''
         $nri = @('[2026-10-21T11:10:00.000-04:00] ERROR (42): messaging::refreshDeviceInfo failed to get goat NRI', '[2026-10-21T11:20:00.000-04:00] ERROR (42): messaging::refreshDeviceInfo failed to get goat NRI')
-        $text = Invoke-Probe (@($deny) * 6) -ComponentLines $nri
+        $text = Invoke-Probe (@($started) + (@($deny) * 6)) -ComponentLines $nri
         $text | Should -Match 'STATE: nodevice'
         $text | Should -Match '\[FAIL\] Components\s+downloads are being REFUSED'
         $text | Should -Match 'ALSO FAILING: Components'
