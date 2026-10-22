@@ -123,7 +123,13 @@ impl Core {
                     (DestEcoverse::SameTenant, None) => "The endpoint script isn't published in Ecoverse.".to_string(),
                     _ => String::new(),
                 };
-                if let Some((server_id, script, org_ids)) = tenant {
+                // Ecoverse can't run a script on an agent that hasn't had its data yet: the task would sit queued while the Windows
+                // Agent, which is checking in, could run it at once. So N-central goes first for such a device, if it can be used.
+                let ecoverse_not_ready = project.waiting_for_ecoverse(device) && project.rest_scripts.contains_key(&project.dest_server_id);
+                if ecoverse_not_ready && tenant.is_some() {
+                    why_not_ecoverse = "Ecoverse can't run scripts on it until its data arrives, so N-central is used.".into();
+                }
+                if let Some((server_id, script, org_ids)) = tenant.filter(|_| !ecoverse_not_ready) {
                     match self.with_ecoverse(&server_id, self.eco_devices(org_ids)).await {
                         Ok(assets) => match index_by_ncentral_id(&assets, &dest_host).remove(&dest_id) {
                             Some(asset) if asset.connected => return Ok(Route::Ecoverse { asset_id: asset.asset_id, script_id: script, server_id }),
@@ -391,9 +397,16 @@ mod tests {
         // The destination's tenant has no script of its own yet, so the device is reached through N-central.
         assert!(matches!(core.migration_route(&p, &p.devices[0]).await.unwrap(), Route::Rest { .. }));
 
-        // With it, the source tenant's script is not used for a device that is now in the other tenant.
+        // With it, the source tenant's script is not used for a device that is now in the other tenant. A device whose Ecoverse
+        // agent is reporting is reached there; one still waiting for its data goes through N-central instead (a queued Ecoverse
+        // task would never run).
         p.dest_ecoverse_script_id = Some("dest-script".into());
+        assert!(matches!(core.migration_route(&p, &p.devices[0]).await.unwrap(), Route::Rest { .. }), "waiting for Ecoverse data");
+        p.devices[0].ecoverse = Some(EcoState::Reporting);
         assert_eq!(core.migration_route(&p, &p.devices[0]).await.unwrap(), Route::Ecoverse { asset_id: "asset-new".into(), script_id: "dest-script".into(), server_id: p.dest_server_id.clone() });
+        p.devices[0].ecoverse = None;
+        p.rest_scripts.clear();
+        assert!(matches!(core.migration_route(&p, &p.devices[0]).await.unwrap(), Route::Ecoverse { .. }), "without N-central's script, Ecoverse is still tried");
     }
 
     fn orgs_fake(core: &Core, orgs: &'static [(&'static str, &'static str)]) {
