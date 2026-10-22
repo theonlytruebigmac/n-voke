@@ -147,9 +147,11 @@ function Test-MsiBusy {
 #   nodevice the login works and the components were downloaded, but the cloud's reply for this agent has no device record
 #            (no "GOAT NRI"), so every attempt to send data fails: the component log shows "failed to get goat NRI" at
 #            least twice in the last 30 minutes. This outranks synced: the inventory component downloads fine and
-#            collects, it just can't send. Seen in the lab on devices moved into one N-central's Ecoverse tenant, still
-#            so after the one-time repair put a fresh agent on the device. Neither a restart nor the repair helps (the
-#            fix is in the Ecoverse tenant), so neither is tried
+#            collects, it just can't send. Normal at first: on healthy lab devices the record arrived 86 to 94 minutes
+#            after provisioning (the agent asks for it at provisioning and at its hourly update check). Still missing
+#            after 4 hours on devices moved into one N-central's Ecoverse tenant, and the one-time repair changed
+#            nothing there. A restart would make the agent ask at once (it only helps if the record exists), but none
+#            is tried: the watcher only reports it
 #   unknown  no log to read
 function Get-UfaSyncState([string]$LogPath, [datetime]$Since, [string]$ComponentLogPath = '', [datetime]$NowUtc = [datetime]::UtcNow) {
     if (-not (Test-Path -LiteralPath $LogPath)) { return [pscustomobject]@{ State = 'unknown'; FailedAt = $null; RejectedSince = $null; FaultSince = $null; FaultLastAt = $null } }
@@ -630,14 +632,14 @@ try {
                         'rejected' { 'the cloud rejects the Ecoverse agent login (400 SSL certificate error); a restart does not fix this' }
                         'denied' { 'the component CDN refuses the Ecoverse agent downloads (403); a restart does not fix this' }
                         'blocked' { 'the Ecoverse auth service does not answer the agent; it often clears by itself, so it is watched first' }
-                        'nodevice' { 'the Ecoverse agent logs in but the cloud has no device record for it (no GOAT NRI), so its data cannot be sent; a restart or repair does not fix this, it needs fixing in the Ecoverse tenant' }
+                        'nodevice' { 'the Ecoverse agent logs in but the cloud has not given it a device record yet (no GOAT NRI), so its data cannot be sent; normal for about the first 90 minutes after provisioning; after that it needs fixing in the Ecoverse tenant' }
                         default { $sync.State }
                     }
                     Add-StatusHistory $status 'awaiting-ufa' ('MspAgent data sync: {0}; {1:N0} min since install' -f $why, $waitedSync)
                     Save-Status $status
                     exit 0
                 }
-                $status.warning = if ($sync.State -eq 'nodevice') { "MspAgent logs in but the cloud has no device record for it (no GOAT NRI), so its data cannot be sent ($([math]::Round($waitedSync)) min after the install)" }
+                $status.warning = if ($sync.State -eq 'nodevice') { "MspAgent logs in but the cloud still has no device record for it (no GOAT NRI), so its data cannot be sent ($([math]::Round($waitedSync)) min after the install)" }
                                   else { "MspAgent had not synced its data $([math]::Round($waitedSync)) min after the install (state: $($sync.State))" }
             }
         }

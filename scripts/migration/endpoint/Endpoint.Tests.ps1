@@ -740,7 +740,7 @@ Describe 'the lab log summary probe (ufa-log-summary.ps1)' {
         $text | Should -Match 'RESULT\s+NO FAULT FOUND'
     }
 
-    It 'says nodevice, ahead of synced, when the components still cannot get a device record long after provisioning, and says a restart does not help' {
+    It 'says nodevice, ahead of synced, when the components still cannot get a device record long after provisioning, and says a restart makes the agent ask again' {
         $started = '[2026-10-21T07:00:00.000-04:00] INFO (31): main::run Msp Agent Service starting: PID = 1'
         $synced = "[2026-10-21T11:00:00.000-04:00] INFO (21): components::Download Successfully downloaded 'cdn.example.invalid/components/generic-asset-interrogator/windows/v0.18.2/x.exe' to 'C:\x'"
         $nri = @('[2026-10-21T11:10:00.000-04:00] ERROR (42): messaging::refreshDeviceInfo failed to get goat NRI', '[2026-10-21T11:20:00.000-04:00] ERROR (42): messaging::refreshDeviceInfo failed to get goat NRI')
@@ -749,7 +749,8 @@ Describe 'the lab log summary probe (ufa-log-summary.ps1)' {
         $text | Should -Match '\[FAIL\] Device record'
         $text | Should -Match '\[FAIL\] Data sent'
         $text | Should -Match 'RESULT\s+PROBLEM - Device record'
-        $text | Should -Match 'not fixed by a restart or the repair'
+        $text | Should -Match 'restarting the MspAgent service makes it ask now'
+        $text | Should -Match 'healthy\s+devices got it after 86 to 94 minutes'
     }
 
     It 'calls the same thing in progress, not a fault, within 90 minutes of provisioning (a device just set up)' {
@@ -772,6 +773,22 @@ Describe 'the lab log summary probe (ufa-log-summary.ps1)' {
         $text | Should -Match 'STATE: nodevice'
         $text | Should -Match '\[FAIL\] Components\s+downloads are being REFUSED'
         $text | Should -Match 'ALSO FAILING: Components'
+    }
+
+    It 'shows the device record arriving and the inventory leaving the device, the signs of a healthy agent' {
+        $log = @(
+            '[2026-10-21T08:00:00.000-04:00] INFO (9): coreprocessors::AgentIsProvisioned current product provisioning state: [ 3 ] [ Success ]',
+            '[2026-10-21T08:00:01.000-04:00] INFO (9): configservice::updateDeviceConfig no device GOAT NRI was found in config response. Removing from config.',
+            '[2026-10-21T09:34:00.000-04:00] INFO (9): configservice::updateDeviceConfig device GOAT NRI was found in config response [ nable:goat::node:abc ].')
+        $components = @(
+            '[2026-10-21T08:10:00.000-04:00] ERROR (42): messaging::refreshDeviceInfo failed to get goat NRI',
+            '[2026-10-21T09:35:00.000-04:00] INFO (45): messaging::processMessages (configGUID=abc) sending 3 messages for typeURL: type.googleapis.com/Msp.Fusion.DeviceAsset',
+            '[2026-10-21T09:36:00.000-04:00] ERROR (45): messaging::processMessages (configGUID=abc) failed to send 9 messages for typeURL: type.googleapis.com/Msp.Fusion.Metric: limit breached')
+        $text = Invoke-Probe $log -ComponentLines $components
+        $text | Should -Match '\[ ok \] Device record\s+received at 09:34:00, 1\.6 h after provisioning'
+        $text | Should -Match '\[ ok \] Data sent\s+the inventory \(DeviceAsset\) left the device 1 time'
+        $text | Should -Match '1 batch\(es\) were refused and re-queued'
+        $text | Should -Match 'the inventory \(DeviceAsset\) was sent for the first time'
     }
 
     It 'reads a folder from collect-logs.ps1 as it is laid out in the zip, taking the time of the collection from system.txt' {

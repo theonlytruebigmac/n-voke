@@ -299,6 +299,7 @@ $serviceStarts = New-Object Collections.Generic.List[datetime]
 $noConfig = New-Object Collections.Generic.List[datetime]
 $noGoat = New-Object Collections.Generic.List[datetime]
 $goatOther = New-Object Collections.Generic.List[string]
+$goatFound = New-Object Collections.Generic.List[datetime]
 $downloads = New-Object Collections.Generic.List[object]
 $denied = 0
 $deniedLast = $null
@@ -315,6 +316,7 @@ foreach ($r in $core) {
     elseif ($t -match 'main::run Msp Agent Service starting') { $serviceStarts.Add($r.At) }
     elseif ($t -match 'updateDeviceConfig no device configuration found') { $noConfig.Add($r.At) }
     elseif ($t -match 'updateDeviceConfig no device GOAT NRI was found') { $noGoat.Add($r.At) }
+    elseif ($t -match 'updateDeviceConfig device GOAT NRI was found') { $goatFound.Add($r.At) }
     elseif ($t -match '(?i)goat' -and $t -notmatch 'goatNri element not found') { $goatOther.Add($t) }
     elseif ($t -match 'components::Download Successfully downloaded .*components/([\w-]+)/') { $downloads.Add([pscustomobject]@{ At = $r.At; Name = $Matches[1] }) }
     elseif ($t -match 'doRequestWithRetry received invalid status: ''403''') { $denied++; $deniedLast = $r.At }
@@ -324,6 +326,10 @@ foreach ($r in $core) {
 }
 $nri = @($comp | Where-Object { $_.Text -match 'refreshDeviceInfo failed to get goat NRI' })
 $flushes = @($comp | Where-Object { $_.Text -match 'processMessage .*flush requested by component' })
+# Proof that data leaves the device: the messaging layer logs each batch it sends, by message type. DeviceAsset is the inventory.
+$sent = @($comp | Where-Object { $_.Text -match 'processMessages .*sending \d+ messages for typeURL: \S+\.(\w+)$' } | ForEach-Object { [pscustomobject]@{ At = $_.At; Type = $Matches[1] } })
+$sentFailed = @($comp | Where-Object { $_.Text -match 'processMessages .*failed to send \d+ messages for typeURL: \S+\.(\w+): (.*)$' } | ForEach-Object { [pscustomobject]@{ At = $_.At; Type = $Matches[1]; Why = $Matches[2] } })
+$inventorySent = @($sent | Where-Object { $_.Type -eq 'DeviceAsset' })
 $reacquired = @($comp | Where-Object { $_.Text -match 'failed integrity check, re-acquiring' }).Count
 
 $services = Get-ServiceFact
@@ -412,17 +418,23 @@ elseif ($core.Count) { Add-Check 'Login' 'info' 'no login attempt in the log yet
 else { Add-Check 'Login' 'skip' 'no core log' }
 
 # 6. Device record
-$recordGraceMinutes = 90
+$recordGraceMinutes = 120
 $sinceProvisioned = if ($prov.ContainsKey('3')) { $nowUtc - $prov['3'] } elseif ($install) { $nowUtc - $install } else { [timespan]::Zero }
 $recordInGrace = $sinceProvisioned.TotalMinutes -lt $recordGraceMinutes
 $recordDetail = @("Config replies without a device record: $($noConfig.Count) (no device configuration), $($noGoat.Count) (no GOAT NRI)")
 if ($nri.Count) { $recordDetail += ('Components failing to get it: {0} times, first {1}, last {2}' -f $nri.Count, (Format-Clock $nri[0].At), (Format-Clock $nri[$nri.Count - 1].At)) }
+if ($goatFound.Count) { $recordDetail += ('Config replies WITH a device record: {0}, the first at {1}' -f $goatFound.Count, (Format-Clock $goatFound[0])) }
 if ($goatOther.Count) { $recordDetail += "Other lines that mention GOAT: $($goatOther.Count), the first: $($goatOther[0])" }
+$recordDetail += 'The agent asks for its device record at provisioning and then at its hourly update check, so it can learn of a record up to an hour after it exists. Restarting the MspAgent service makes it ask at once.'
 if ($sync.State -eq 'nodevice' -and $recordInGrace) {
-    Add-Check 'Device record' 'warn' ('not received yet: the components have failed to get it since {0}; normal for the first {1} minutes after provisioning ({2} so far)' -f (Format-Clock $sync.FaultSince), $recordGraceMinutes, (Format-Duration $sinceProvisioned)) ($recordDetail + 'Ecoverse creates the device record some time after the agent registers. If it has not arrived by the end of that window it is a fault: run this check again then.')
+    Add-Check 'Device record' 'warn' ('not received yet: the components have failed to get it since {0}; normal for the first {1} minutes after provisioning ({2} so far)' -f (Format-Clock $sync.FaultSince), $recordGraceMinutes, (Format-Duration $sinceProvisioned)) ($recordDetail + 'Seen on three healthy lab devices: the record arrived 86 to 94 minutes after provisioning. If it has not arrived by the end of that window it is a fault: run this check again then.')
 }
 elseif ($sync.State -eq 'nodevice') {
     Add-Check 'Device record' 'fail' ('the cloud sends this agent no device record (no GOAT NRI); since {0}, latest {1}; provisioned {2} ago' -f (Format-Clock $sync.FaultSince), (Format-Clock $sync.FaultLastAt), (Format-Duration $sinceProvisioned)) $recordDetail
+}
+elseif ($goatFound.Count) {
+    $arrived = $goatFound[0]
+    Add-Check 'Device record' 'ok' ('received at {0}{1}{2}' -f (Format-Clock $arrived), $(if ($prov.ContainsKey('3')) { ', {0} after provisioning' -f (Format-Duration ($arrived - $prov['3'])) } else { '' }), $(if ($nri.Count) { "; the components failed to get it $($nri.Count) times before that" } else { '' })) $recordDetail
 }
 elseif ($noGoat.Count -and -not $nri.Count) { Add-Check 'Device record' 'warn' 'the cloud said once that it has no device record for this agent; no component has failed on it yet' $recordDetail }
 elseif ($core.Count) { Add-Check 'Device record' 'ok' ('no component is failing to get one{0}' -f $(if ($nri.Count) { " (it did earlier: $($nri.Count) errors, the last $(Format-Age $nri[$nri.Count - 1].At))" } else { '' })) $recordDetail }
@@ -467,9 +479,15 @@ else { Add-Check 'Inventory collected' 'info' 'the inventory component is not on
 $sendDetail = @()
 if ($flushes.Count) { $sendDetail += ('Components asked to send their data {0} times, the last {1}' -f $flushes.Count, (Format-Age $flushes[$flushes.Count - 1].At)) }
 if ($sync.State -eq 'nodevice' -and $recordInGrace) { Add-Check 'Data sent' 'info' 'waiting for the device record: until it arrives every flush stops at "failed to get goat NRI" without sending' $sendDetail }
-elseif ($sync.State -eq 'nodevice') { Add-Check 'Data sent' 'fail' 'cannot send anything: every flush stops at "failed to get goat NRI" and closes the connection without sending' ($sendDetail + 'A restart or the repair does not help (tried on three lab devices). It is fixed in the Ecoverse tenant.') }
+elseif ($sync.State -eq 'nodevice') { Add-Check 'Data sent' 'fail' 'cannot send anything: every flush stops at "failed to get goat NRI" and closes the connection without sending' ($sendDetail + 'A restart helps only if the device record already exists in the cloud (it makes the agent ask now instead of hourly). The one-time repair changed nothing on the devices that waited 4 hours (sedemo). If a restart does not bring the record, it is fixed in the Ecoverse tenant.') }
 elseif ($sync.State -in 'rejected', 'blocked', 'denied') { Add-Check 'Data sent' 'skip' 'cannot send until the fault above is fixed' }
-elseif ($core.Count) { Add-Check 'Data sent' 'info' 'no sending error found. This script cannot see Ecoverse: confirm the data arrived in N-voke (Track: Ecoverse data received)' $sendDetail }
+elseif ($inventorySent.Count) {
+    $detail = $sendDetail + @('Sent by type: ' + (@($sent | Group-Object Type | Sort-Object Count -Descending | Select-Object -First 8 | ForEach-Object { '{0} x{1}' -f $_.Name, $_.Count }) -join ', '))
+    if ($sentFailed.Count) { $detail += @($sentFailed | Group-Object Type, Why | ForEach-Object { 'A batch was refused: {0} x{1} ({2}); the agent re-queues it' -f $_.Group[0].Type, $_.Count, $_.Group[0].Why }) }
+    Add-Check 'Data sent' 'ok' ('the inventory (DeviceAsset) left the device {0} time(s), the last {1} ({2}){3}' -f $inventorySent.Count, (Format-Clock $inventorySent[$inventorySent.Count - 1].At), (Format-Age $inventorySent[$inventorySent.Count - 1].At), $(if ($sentFailed.Count) { "; $($sentFailed.Count) batch(es) were refused and re-queued" } else { '' })) $detail
+}
+elseif ($sent.Count) { Add-Check 'Data sent' 'info' ('{0} batch(es) were sent, the last {1}, but none of them is the inventory (DeviceAsset) yet' -f $sent.Count, (Format-Age $sent[$sent.Count - 1].At)) $sendDetail }
+elseif ($core.Count) { Add-Check 'Data sent' 'info' 'no sending error found, and no batch was logged as sent either. This script cannot see Ecoverse: confirm the data arrived in N-voke (Track: Ecoverse data received)' $sendDetail }
 else { Add-Check 'Data sent' 'skip' 'no logs' }
 
 # 10. Script channel (what N-voke's Probe and Status use)
@@ -619,7 +637,7 @@ Add-Check 'Unexpected errors' $(if ($unexpectedList.Count) { 'warn' } else { 'ok
 
 # ---- the verdict ---------------------------------------------------------------------------------------------------
 $advice = @{
-    nodevice = 'This is not fixed by a restart or the repair, and the installer tries neither. It has to be fixed in the destination''s Ecoverse tenant: the customer or site this device registered under must exist there and be linked to N-central, and other devices there should show data. Then report it to N-able with the logs (collect-logs.ps1).'
+    nodevice = 'The agent asks for its device record at provisioning and then hourly, so a record that exists can go unnoticed for up to an hour: restarting the MspAgent service makes it ask now. If a restart does not bring the record, or it is still missing after about 2 hours (healthy devices got it after 86 to 94 minutes), it has to be fixed in the destination''s Ecoverse tenant: the customer or site this device registered under must exist there and be linked to N-central, and other devices there should show data. Then report it to N-able with the logs (collect-logs.ps1). The one-time repair changed nothing on the devices that waited 4 hours.'
     rejected = 'A restart does not help. The installer repairs once after 30 minutes. If it is still refused after that, check TLS inspection, proxy and firewall on this device''s network path, and report it to N-able.'
     blocked  = 'The login service does not answer this device. It often clears by itself; if it lasts, the installer restarts MspAgent after 30 minutes and repairs once after 60. Check that the device can reach the auth host on port 443 with no TLS inspection (add -Network).'
     denied   = 'The component CDN refuses the downloads (403). A restart does not help; the installer repairs once after 30 minutes.'
@@ -718,6 +736,8 @@ $lastResult = $null
 foreach ($o in $oauth) { if ($o.Result -ne $lastResult) { Add-TimelineItem $o.At 'login' $(switch ($o.Result) { '200' { 'login accepted' } 'ssl400' { 'login REJECTED (400 SSL certificate error)' } 'timeout' { 'login timed out' } 'reset' { 'login connection reset' } default { "login status $($o.Result)" } }); $lastResult = $o.Result } }
 foreach ($g in @($downloads | Group-Object { $_.At.ToString('yyyy-MM-dd HH:mm') })) { Add-TimelineItem $g.Group[0].At 'components' ('downloaded {0} component file(s): {1}' -f $g.Count, ((@($g.Group | Select-Object -ExpandProperty Name -Unique) | Select-Object -First 4) -join ', ')) }
 if ($noGoat.Count) { Add-TimelineItem $noGoat[0] 'device record' 'the cloud sent no device record (no GOAT NRI)' }
+if ($goatFound.Count) { Add-TimelineItem $goatFound[0] 'device record' 'the cloud sent the device record (GOAT NRI found in the config reply)' }
+if ($inventorySent.Count) { Add-TimelineItem $inventorySent[0].At 'data sent' 'the inventory (DeviceAsset) was sent for the first time' }
 if ($nri.Count) { Add-TimelineItem $nri[0].At 'device record' 'a component first failed to get the device record'; if ($nri.Count -gt 1) { Add-TimelineItem $nri[$nri.Count - 1].At 'device record' "the same failure again (latest of $($nri.Count))" } }
 if ($interRows.Count) { Add-TimelineItem $interRows[0].At 'inventory' 'the inventory component first ran' }
 foreach ($u in $ufaMaint) { if ($u.Text -match 'Component status update\. Status: (\w+)(?:, Error Code: (-?\d+))?') { Add-TimelineItem $u.At 'windows agent' ('Ecoverse agent {0}{1}' -f $Matches[1].ToLower(), $(if ($Matches[2] -and $Matches[2] -ne '0') { " (error $($Matches[2]))" } else { '' })) } }
