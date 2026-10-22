@@ -144,8 +144,14 @@ function Test-MsiBusy {
 #   denied   the login works but the component CDN answers the agent's downloads with 403 (five or more, none succeeded
 #            since): nothing can be delivered. A restart changed nothing in the lab; the repair fixed it
 #   waiting  no fault and no inventory component yet (normal for a while)
+#   nodevice the login works and the components were downloaded, but the cloud's reply for this agent has no device record
+#            (no "GOAT NRI"), so every attempt to send data fails: the component log shows "failed to get goat NRI" at
+#            least twice in the last 30 minutes. This outranks synced: the inventory component downloads fine and
+#            collects, it just can't send. Seen in the lab on devices moved into one N-central's Ecoverse tenant, still
+#            so after the one-time repair put a fresh agent on the device. Neither a restart nor the repair helps (the
+#            fix is in the Ecoverse tenant), so neither is tried
 #   unknown  no log to read
-function Get-UfaSyncState([string]$LogPath, [datetime]$Since) {
+function Get-UfaSyncState([string]$LogPath, [datetime]$Since, [string]$ComponentLogPath = '', [datetime]$NowUtc = [datetime]::UtcNow) {
     if (-not (Test-Path -LiteralPath $LogPath)) { return [pscustomobject]@{ State = 'unknown'; FailedAt = $null; RejectedSince = $null; FaultSince = $null; FaultLastAt = $null } }
     $stamp = [regex]'^\[(\d{4}-\d\d-\d\dT[\d:.]+[+-]\d\d:\d\d)\]'
     $failedAt = $null; $failingSince = $null; $jwtFailedAt = $null; $authOkAt = $null; $syncedAt = $null; $rejectedAt = $null; $rejectedSince = $null; $deniedCount = 0; $deniedSince = $null; $deniedAt = $null
@@ -164,16 +170,30 @@ function Get-UfaSyncState([string]$LogPath, [datetime]$Since) {
             if ($line -match 'generic-asset-interrogator') { $syncedAt = $at }
         }
     }
-    $state = if ($syncedAt -and (-not $failedAt -or $syncedAt -gt $failedAt)) { 'synced' }
+    # The components' own log: each flush of their data starts by asking for the device's identity and, without one, stops.
+    $noDeviceCount = 0; $noDeviceSince = $null; $noDeviceAt = $null
+    if ($ComponentLogPath -and (Test-Path -LiteralPath $ComponentLogPath)) {
+        $windowStart = $NowUtc.AddMinutes(-30)
+        foreach ($line in @(Get-Content -LiteralPath $ComponentLogPath -Tail 5000 -ErrorAction SilentlyContinue)) {
+            if ($line -notmatch 'ERROR \(\d+\): messaging::refreshDeviceInfo failed to get goat NRI') { continue }
+            $m = $stamp.Match($line)
+            if (-not $m.Success) { continue }
+            $at = [datetimeoffset]::Parse($m.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture).UtcDateTime
+            if ($at -lt $Since -or $at -lt $windowStart) { continue }
+            $noDeviceCount++; $noDeviceAt = $at; if (-not $noDeviceSince) { $noDeviceSince = $at }
+        }
+    }
+    $state = if ($noDeviceCount -ge 2) { 'nodevice' }
+             elseif ($syncedAt -and (-not $failedAt -or $syncedAt -gt $failedAt)) { 'synced' }
              elseif ($failedAt -and $authOkAt -and $authOkAt -gt $failedAt) { 'stalled' }
              elseif ($rejectedAt -and (-not $authOkAt -or $authOkAt -lt $rejectedAt)) { 'rejected' }
              elseif ($deniedCount -ge 5) { 'denied' }
              elseif ($failedAt) { 'blocked' }
              else { 'waiting' }
-    $faultSince = if ($state -eq 'rejected') { $rejectedSince } elseif ($state -eq 'denied') { $deniedSince } elseif ($state -eq 'blocked') { $failingSince } else { $null }
+    $faultSince = if ($state -eq 'rejected') { $rejectedSince } elseif ($state -eq 'denied') { $deniedSince } elseif ($state -eq 'blocked') { $failingSince } elseif ($state -eq 'nodevice') { $noDeviceSince } else { $null }
     # A blocked agent logs a failed login about every 10 minutes but a failed configuration fetch only about hourly.
     $blockedLastAt = if ($jwtFailedAt -and $jwtFailedAt -gt $failedAt) { $jwtFailedAt } else { $failedAt }
-    $faultLastAt = if ($state -eq 'rejected') { $rejectedAt } elseif ($state -eq 'denied') { $deniedAt } elseif ($state -eq 'blocked') { $blockedLastAt } else { $null }
+    $faultLastAt = if ($state -eq 'rejected') { $rejectedAt } elseif ($state -eq 'denied') { $deniedAt } elseif ($state -eq 'blocked') { $blockedLastAt } elseif ($state -eq 'nodevice') { $noDeviceAt } else { $null }
     [pscustomobject]@{ State = $state; FailedAt = $failedAt; RejectedSince = $rejectedSince; FaultSince = $faultSince; FaultLastAt = $faultLastAt }
 }
 
@@ -572,7 +592,8 @@ try {
         # if its log shows the configuration fetch timing out (see Get-UfaSyncState). Bounded: a few restarts, a grace period.
         if ($job.expectUfa -eq 'true' -and $ufaService -and $ufaProvisioned) {
             $coreLog = [Environment]::GetFolderPath('ProgramFilesX86') + '\Msp Agent\logs\msp-agent-core.log'
-            $sync = Get-UfaSyncState $coreLog $since
+            $componentLog = [Environment]::GetFolderPath('ProgramFilesX86') + '\Msp Agent\logs\component.log'
+            $sync = Get-UfaSyncState $coreLog $since $componentLog
             $status.ufa.sync = $sync.State
             $nowUtc = (Get-Date).ToUniversalTime()
             $restarts = [int]$status.ufaSyncRestarts
@@ -601,7 +622,7 @@ try {
                 $waitedSync = ((Get-Date).ToUniversalTime() - $since).TotalMinutes
                 # Once a fault has been seen the watcher keeps going for longer: blocked often clears by itself, and a
                 # state it turns into (stalled, rejected, denied) needs its own restart or repair clock to run out.
-                if ($sync.State -in 'blocked', 'stalled', 'rejected', 'denied' -and -not $status.ufaFaultSeenAt) { $status.ufaFaultSeenAt = (Get-Date).ToUniversalTime().ToString('o') }
+                if ($sync.State -in 'blocked', 'stalled', 'rejected', 'denied', 'nodevice' -and -not $status.ufaFaultSeenAt) { $status.ufaFaultSeenAt = (Get-Date).ToUniversalTime().ToString('o') }
                 $grace = if ($status.ufaFaultSeenAt) { $UfaBlockedWatchMinutes } else { $UfaSyncGraceMinutes }
                 if ($waitedSync -lt $grace) {
                     $status.stage = 'awaiting-ufa'
@@ -609,13 +630,15 @@ try {
                         'rejected' { 'the cloud rejects the Ecoverse agent login (400 SSL certificate error); a restart does not fix this' }
                         'denied' { 'the component CDN refuses the Ecoverse agent downloads (403); a restart does not fix this' }
                         'blocked' { 'the Ecoverse auth service does not answer the agent; it often clears by itself, so it is watched first' }
+                        'nodevice' { 'the Ecoverse agent logs in but the cloud has no device record for it (no GOAT NRI), so its data cannot be sent; a restart or repair does not fix this, it needs fixing in the Ecoverse tenant' }
                         default { $sync.State }
                     }
                     Add-StatusHistory $status 'awaiting-ufa' ('MspAgent data sync: {0}; {1:N0} min since install' -f $why, $waitedSync)
                     Save-Status $status
                     exit 0
                 }
-                $status.warning = "MspAgent had not synced its data $([math]::Round($waitedSync)) min after the install (state: $($sync.State))"
+                $status.warning = if ($sync.State -eq 'nodevice') { "MspAgent logs in but the cloud has no device record for it (no GOAT NRI), so its data cannot be sent ($([math]::Round($waitedSync)) min after the install)" }
+                                  else { "MspAgent had not synced its data $([math]::Round($waitedSync)) min after the install (state: $($sync.State))" }
             }
         }
 

@@ -179,7 +179,7 @@ Describe 'Get-OneLine' {
 
 Describe 'Get-StatusSummary' {
     BeforeAll {
-        . ([scriptblock]::Create((Get-FunctionText $built @('Get-StatusSummary'))))
+        . ([scriptblock]::Create((Get-FunctionText $built @('Get-StatusSummary', 'Get-UfaNoDeviceLive'))))
         $Root = Join-Path ([IO.Path]::GetTempPath()) ('nvoke-test-' + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $Root | Out-Null
     }
@@ -198,6 +198,13 @@ Describe 'Get-StatusSummary' {
         @($parsed.history).Count | Should -Be 30
         $parsed.history[0].detail | Should -Be 'd16'
         $parsed.history[29].detail | Should -Be 'd45'
+    }
+    It 'adds what the components log says about the device record right now, whatever the saved status says' {
+        @{ schema = 1; stage = 'healthy'; ufa = @{ sync = 'synced' }; history = @(@{ at = 't1'; event = 'e'; detail = 'd' }) } | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $Root 'status.json')
+        $parsed = Get-StatusSummary | ConvertFrom-Json
+        $parsed.ufa.sync | Should -Be 'synced'
+        $parsed.ufaLive.active | Should -BeFalse
+        $parsed.ufaLive.errors | Should -Be 0
     }
 }
 
@@ -342,6 +349,7 @@ Describe 'Hide-RegistrationToken' {
 Describe 'Get-UfaSyncState' {
     BeforeAll {
         . ([scriptblock]::Create((Get-FunctionText (Join-Path $here 'installAgent.ps1') @('Get-UfaSyncState', 'Test-UfaRepairDue', 'Test-UfaBlockedRestartDue', 'Test-UfaRedeployRestartDue', 'Test-UfaRegistrationBroken', 'Test-UfaBrokenConfirmed', 'Get-UfaRemovalSummary', 'Get-UfaFolderActivity'))))
+        . ([scriptblock]::Create((Get-FunctionText $built @('Get-UfaNoDeviceLive'))))
         $auth = 'https://auth.example.invalid/oauth2/token'
         $timeout = "context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
         $lines = @{
@@ -391,6 +399,68 @@ Describe 'Get-UfaSyncState' {
     }
     It 'says synced when the component arrived and nothing failed' {
         (Get-State @($lines.Noise, $lines.Synced)).State | Should -Be 'synced'
+    }
+    Context 'a device the cloud has no record of (no GOAT NRI)' {
+        BeforeAll {
+            # 09:42, 09:52 and 10:02 at -04:00 are 13:42, 13:52 and 14:02 UTC.
+            $nri = @(
+                '[2026-10-22T09:42:47.164-04:00] ERROR (42): messaging::refreshDeviceInfo failed to get goat NRI',
+                '[2026-10-22T09:52:47.163-04:00] ERROR (42): messaging::refreshDeviceInfo failed to get goat NRI',
+                '[2026-10-22T10:02:47.165-04:00] ERROR (42): messaging::refreshDeviceInfo failed to get goat NRI')
+            $synced = @($lines.AuthOk, $lines.Synced)
+            function Get-StateWith($CoreLines, $ComponentLines, [string]$Now, [string]$SinceUtc = '2020-01-01T00:00:00Z') {
+                $coreFile = Join-Path ([IO.Path]::GetTempPath()) ('nvoke-core-' + [guid]::NewGuid().ToString('N') + '.log')
+                $componentFile = Join-Path ([IO.Path]::GetTempPath()) ('nvoke-comp-' + [guid]::NewGuid().ToString('N') + '.log')
+                try {
+                    Set-Content -Path $coreFile -Value $CoreLines -Encoding UTF8
+                    if ($null -ne $ComponentLines) { Set-Content -Path $componentFile -Value $ComponentLines -Encoding UTF8 }
+                    $utc = [Globalization.DateTimeStyles]::AdjustToUniversal
+                    Get-UfaSyncState $coreFile ([datetime]::Parse($SinceUtc, [Globalization.CultureInfo]::InvariantCulture, $utc)) $componentFile ([datetime]::Parse($Now, [Globalization.CultureInfo]::InvariantCulture, $utc))
+                } finally { Remove-Item $coreFile, $componentFile -Force -ErrorAction SilentlyContinue }
+            }
+        }
+        It 'outranks synced: the inventory component downloads and runs, but nothing it collects can be sent' {
+            $r = Get-StateWith $synced $nri '2026-10-22T14:05:00Z'
+            $r.State | Should -Be 'nodevice'
+            $r.FaultSince.ToString('HH:mm') | Should -Be '13:42'
+            $r.FaultLastAt.ToString('HH:mm') | Should -Be '14:02'
+        }
+        It 'needs two errors in the last 30 minutes, so one stray error or an old run of them is not a fault' {
+            (Get-StateWith $synced $nri[0] '2026-10-22T14:05:00Z').State | Should -Be 'synced'
+            (Get-StateWith $synced $nri '2026-10-22T14:40:00Z').State | Should -Be 'synced'
+            (Get-StateWith $synced $nri '2026-10-22T14:25:00Z').State | Should -Be 'synced' -Because 'only the 14:02 error is within 30 minutes of 14:25'
+            (Get-StateWith $synced $nri '2026-10-22T14:20:00Z').State | Should -Be 'nodevice' -Because '13:52 and 14:02 are within 30 minutes of 14:20'
+        }
+        It 'ignores errors from before the install' {
+            (Get-StateWith $synced $nri '2026-10-22T14:05:00Z' '2026-10-22T14:00:00Z').State | Should -Not -Be 'nodevice'
+            (Get-StateWith $synced $nri '2026-10-22T14:05:00Z' '2026-10-22T13:00:00Z').State | Should -Be 'nodevice'
+        }
+        It 'reads as before when there is no component log' {
+            (Get-StateWith $synced $null '2026-10-22T14:05:00Z').State | Should -Be 'synced'
+        }
+        It 'asks for no restart and no repair, which were tried on such devices and changed nothing' {
+            $sync = Get-StateWith $synced $nri '2026-10-22T14:05:00Z'
+            Test-UfaRepairDue $sync ([datetime]'2026-10-22T20:00:00Z') $false 30 | Should -BeFalse
+            Test-UfaBlockedRestartDue $sync 0 ([datetime]'2026-10-22T14:05:00Z') 30 | Should -BeFalse
+        }
+        It 'is read by the launcher''s Status by the same rule, so a Probe agrees with the watcher' {
+            $cases = @(
+                @{ Lines = $nri; Now = '2026-10-22T14:05:00Z' },
+                @{ Lines = $nri[0]; Now = '2026-10-22T14:05:00Z' },
+                @{ Lines = $nri; Now = '2026-10-22T14:40:00Z' },
+                @{ Lines = $nri; Now = '2026-10-22T14:25:00Z' },
+                @{ Lines = $nri; Now = '2026-10-22T14:20:00Z' })
+            foreach ($case in $cases) {
+                $comp = Join-Path ([IO.Path]::GetTempPath()) ('nvoke-comp-' + [guid]::NewGuid().ToString('N') + '.log')
+                try {
+                    Set-Content -Path $comp -Value $case.Lines -Encoding UTF8
+                    $now = [datetime]::Parse($case.Now, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal)
+                    $live = Get-UfaNoDeviceLive $comp $now
+                    $installer = (Get-StateWith $synced $case.Lines $case.Now).State -eq 'nodevice'
+                    $live.active | Should -Be $installer -Because "$($case.Now) with $(@($case.Lines).Count) error(s)"
+                } finally { Remove-Item $comp -Force -ErrorAction SilentlyContinue }
+            }
+        }
     }
     It 'says waiting when there is no fault and no component yet' {
         (Get-State @($lines.Noise)).State | Should -Be 'waiting'

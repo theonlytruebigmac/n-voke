@@ -129,6 +129,11 @@ export const UFA_WORDS: Record<UfaState, EcoWords> = {
     tone: "err",
     long: "The agent can log in, but the cloud refuses its component downloads (403). A restart doesn't help. The installer does a one-time repair after 30 minutes.",
   },
+  noDeviceRecord: {
+    short: "No device record in Ecoverse",
+    tone: "err",
+    long: "The Ecoverse agent logs in and its components run, but the cloud has no device record for this agent (the components log \"failed to get goat NRI\"), so nothing they collect can be sent and Ecoverse shows the device with no data. A restart or the repair doesn't help, and the installer tries neither. It has to be fixed on the Ecoverse side: check that the customer or site the device registered under exists in the destination's Ecoverse tenant and is linked to N-central, and that other devices there show data. If they look right, send N-able the agent's logs (collect-logs.ps1 gathers them).",
+  },
   broken: {
     short: "Registered but broken",
     tone: "err",

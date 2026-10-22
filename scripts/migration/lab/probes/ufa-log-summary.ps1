@@ -8,18 +8,23 @@
     or on a copied log:
         powershell -NoProfile -File ufa-log-summary.ps1 -LogPath C:\temp\msp-agent-core.log
     Add -OutFile C:\temp\summary.txt to save the output as well.
+    The components' log (component.log, next to the core log, or -ComponentLogPath) is read too: errors in it say whether
+    the data can be sent. Its errors count only if they are from the last 30 minutes; for a copied log, say what time
+    the copy was taken with -AsOfUtc 2026-10-22T18:05:00Z.
     Times are shown as written in the log (the device's local time).
 #>
 param(
     [string]$LogPath = ([Environment]::GetFolderPath('ProgramFilesX86') + '\Msp Agent\logs\msp-agent-core.log'),
-    [string]$OutFile
+    [string]$ComponentLogPath = (Join-Path (Split-Path $LogPath -Parent) 'component.log'),
+    [string]$OutFile,
+    [string]$AsOfUtc
 )
 $ErrorActionPreference = 'Stop'
 if (-not (Test-Path -LiteralPath $LogPath)) { Write-Output "No log at $LogPath"; exit 1 }
 
 # BEGIN shared with endpoint/installAgent.ps1. This is a verbatim copy of its Get-UfaSyncState, so the STATE below is the
 # one the installer's watcher acts on. Endpoint.Tests.ps1 fails if the two copies differ: change it there, then copy it here.
-function Get-UfaSyncState([string]$LogPath, [datetime]$Since) {
+function Get-UfaSyncState([string]$LogPath, [datetime]$Since, [string]$ComponentLogPath = '', [datetime]$NowUtc = [datetime]::UtcNow) {
     if (-not (Test-Path -LiteralPath $LogPath)) { return [pscustomobject]@{ State = 'unknown'; FailedAt = $null; RejectedSince = $null; FaultSince = $null; FaultLastAt = $null } }
     $stamp = [regex]'^\[(\d{4}-\d\d-\d\dT[\d:.]+[+-]\d\d:\d\d)\]'
     $failedAt = $null; $failingSince = $null; $jwtFailedAt = $null; $authOkAt = $null; $syncedAt = $null; $rejectedAt = $null; $rejectedSince = $null; $deniedCount = 0; $deniedSince = $null; $deniedAt = $null
@@ -38,16 +43,30 @@ function Get-UfaSyncState([string]$LogPath, [datetime]$Since) {
             if ($line -match 'generic-asset-interrogator') { $syncedAt = $at }
         }
     }
-    $state = if ($syncedAt -and (-not $failedAt -or $syncedAt -gt $failedAt)) { 'synced' }
+    # The components' own log: each flush of their data starts by asking for the device's identity and, without one, stops.
+    $noDeviceCount = 0; $noDeviceSince = $null; $noDeviceAt = $null
+    if ($ComponentLogPath -and (Test-Path -LiteralPath $ComponentLogPath)) {
+        $windowStart = $NowUtc.AddMinutes(-30)
+        foreach ($line in @(Get-Content -LiteralPath $ComponentLogPath -Tail 5000 -ErrorAction SilentlyContinue)) {
+            if ($line -notmatch 'ERROR \(\d+\): messaging::refreshDeviceInfo failed to get goat NRI') { continue }
+            $m = $stamp.Match($line)
+            if (-not $m.Success) { continue }
+            $at = [datetimeoffset]::Parse($m.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture).UtcDateTime
+            if ($at -lt $Since -or $at -lt $windowStart) { continue }
+            $noDeviceCount++; $noDeviceAt = $at; if (-not $noDeviceSince) { $noDeviceSince = $at }
+        }
+    }
+    $state = if ($noDeviceCount -ge 2) { 'nodevice' }
+             elseif ($syncedAt -and (-not $failedAt -or $syncedAt -gt $failedAt)) { 'synced' }
              elseif ($failedAt -and $authOkAt -and $authOkAt -gt $failedAt) { 'stalled' }
              elseif ($rejectedAt -and (-not $authOkAt -or $authOkAt -lt $rejectedAt)) { 'rejected' }
              elseif ($deniedCount -ge 5) { 'denied' }
              elseif ($failedAt) { 'blocked' }
              else { 'waiting' }
-    $faultSince = if ($state -eq 'rejected') { $rejectedSince } elseif ($state -eq 'denied') { $deniedSince } elseif ($state -eq 'blocked') { $failingSince } else { $null }
+    $faultSince = if ($state -eq 'rejected') { $rejectedSince } elseif ($state -eq 'denied') { $deniedSince } elseif ($state -eq 'blocked') { $failingSince } elseif ($state -eq 'nodevice') { $noDeviceSince } else { $null }
     # A blocked agent logs a failed login about every 10 minutes but a failed configuration fetch only about hourly.
     $blockedLastAt = if ($jwtFailedAt -and $jwtFailedAt -gt $failedAt) { $jwtFailedAt } else { $failedAt }
-    $faultLastAt = if ($state -eq 'rejected') { $rejectedAt } elseif ($state -eq 'denied') { $deniedAt } elseif ($state -eq 'blocked') { $blockedLastAt } else { $null }
+    $faultLastAt = if ($state -eq 'rejected') { $rejectedAt } elseif ($state -eq 'denied') { $deniedAt } elseif ($state -eq 'blocked') { $blockedLastAt } elseif ($state -eq 'nodevice') { $noDeviceAt } else { $null }
     [pscustomobject]@{ State = $state; FailedAt = $failedAt; RejectedSince = $rejectedSince; FaultSince = $faultSince; FaultLastAt = $faultLastAt }
 }
 # END shared
@@ -106,9 +125,19 @@ foreach ($line in [IO.File]::ReadLines($LogPath)) {
 }
 
 # The state is the installer's own (Get-UfaSyncState above); the words say what it means and what the installer does.
-$sync = Get-UfaSyncState $LogPath ([datetime]::MinValue)
+$nowUtc = if ($AsOfUtc) { [datetime]::Parse($AsOfUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal) } else { [datetime]::UtcNow }
+$sync = Get-UfaSyncState $LogPath ([datetime]::MinValue) $ComponentLogPath $nowUtc
+$noNri = New-Object System.Collections.Generic.List[object]
+if (Test-Path -LiteralPath $ComponentLogPath) {
+    foreach ($line in [IO.File]::ReadLines($ComponentLogPath)) {
+        if ($line -match 'ERROR \(\d+\): messaging::refreshDeviceInfo failed to get goat NRI' -and $stamp.IsMatch($line)) {
+            $noNri.Add([datetimeoffset]::Parse($stamp.Match($line).Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture))
+        }
+    }
+}
 $meaning = @{
     synced  = 'the inventory component arrived: the data is flowing'
+    nodevice = 'the agent logs in and its components run, but the cloud has no device record for it (no GOAT NRI), so none of its data can be sent; a restart or the repair does not help and the installer tries neither; it has to be fixed in the Ecoverse tenant'
     stalled = 'login works again, nothing delivered: a service restart fetches it now; the installer restarts MspAgent for this, at most twice'
     rejected = 'the cloud refuses the agent''s login; a restart does not help; the installer repairs once after 30 minutes'
     denied  = 'the component CDN answers the agent with 403 and nothing has downloaded since; a plain curl to the CDN works; the installer repairs once after 30 minutes'
@@ -124,6 +153,10 @@ $out.Add("Computer: $env:COMPUTERNAME    Now: $((Get-Date).ToString('yyyy-MM-dd 
 $out.Add('')
 $out.Add("STATE: $state")
 if ($sync.FaultSince) { $out.Add(('  failing since {0}, last failure {1} (device time)' -f $sync.FaultSince.ToLocalTime().ToString('HH:mm:ss'), $(if ($sync.FaultLastAt) { $sync.FaultLastAt.ToLocalTime().ToString('HH:mm:ss') } else { '-' }))) }
+$out.Add('')
+$out.Add('Device identity (the components send nothing without it):')
+$nriCore = 0; foreach ($line in [IO.File]::ReadLines($LogPath)) { if ($line -match 'configservice::updateDeviceConfig no device GOAT NRI was found') { $nriCore++ } }
+$out.Add(('  config replies with no device record (core log): {0}   "failed to get goat NRI" errors (component log): {1}{2}' -f $nriCore, $noNri.Count, $(if ($noNri.Count) { '   first {0}   last {1}' -f (Short $noNri[0]), (Short $noNri[$noNri.Count - 1]) } else { '' })))
 $out.Add('')
 $out.Add('Login-token results (counts):')
 $out.Add(('  accepted (200): {0}   400 SSL certificate error: {1}   timeouts: {2}   connection resets: {3}' -f $counts.ok200, $counts.ssl400, $counts.timeout, $counts.reset))

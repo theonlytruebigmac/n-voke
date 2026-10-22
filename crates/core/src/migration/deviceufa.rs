@@ -35,6 +35,9 @@ pub enum UfaState {
     Rejected,
     /// The login works but the component downloads are refused (403).
     Denied,
+    /// The login works and the components run, but the cloud has no device record for the agent (no "GOAT NRI"), so
+    /// nothing the components collect can be sent. A restart or the repair doesn't help: it is fixed in the Ecoverse tenant.
+    NoDeviceRecord,
     /// Registered on the device but its program is gone and it has no service: the Windows Agent can only try to remove it
     /// and never installs a new one. Needs a person.
     Broken,
@@ -96,10 +99,14 @@ fn text(value: &Value, key: &str) -> Option<String> {
 fn from_status(probed_at: &str, status: &Value) -> Option<DeviceUfa> {
     let ufa = status.get("ufa")?.as_object()?;
     let flag = |key: &str| ufa.get(key).and_then(Value::as_bool).unwrap_or(false);
+    // The launcher's Status reads the components' log when it runs, so this is as old as the Probe, not the installer's last run.
+    let no_device_now = status.get("ufaLive").and_then(|live| live.get("active")).and_then(Value::as_bool).unwrap_or(false);
     let state = if flag("brokenRegistration") {
         UfaState::Broken
     } else {
         match ufa.get("sync").and_then(Value::as_str) {
+            Some("nodevice") => UfaState::NoDeviceRecord,
+            Some("synced" | "stalled" | "waiting") if no_device_now => UfaState::NoDeviceRecord,
             Some("synced") => UfaState::Synced,
             Some("stalled") => UfaState::Stalled,
             Some("blocked") => UfaState::Blocked,
@@ -109,6 +116,7 @@ fn from_status(probed_at: &str, status: &Value) -> Option<DeviceUfa> {
             Some(_) => UfaState::Unknown,
             None if !flag("present") => UfaState::NotInstalled,
             None if !flag("provisioned") => UfaState::NotProvisioned,
+            None if no_device_now => UfaState::NoDeviceRecord,
             None => UfaState::Waiting,
         }
     };
@@ -161,12 +169,32 @@ mod tests {
             ("blocked", UfaState::Blocked),
             ("rejected", UfaState::Rejected),
             ("denied", UfaState::Denied),
+            ("nodevice", UfaState::NoDeviceRecord),
             ("waiting", UfaState::Waiting),
             ("unknown", UfaState::Unknown),
             ("something new", UfaState::Unknown),
         ] {
             assert_eq!(state_of(&format!(r#"{{"present":true,"running":true,"provisioned":true,"sync":"{word}"}}"#)), expected, "{word}");
         }
+    }
+
+    #[test]
+    fn what_the_components_log_right_now_overrides_a_saved_verdict_that_the_data_is_flowing() {
+        let state = |live: &str, ufa: &str| {
+            let status = format!(r#"{{"stage":"healthy","ufa":{ufa},"ufaLive":{live}}}"#);
+            device_ufa(&[probe("2026-10-22T14:05:00Z", &status)]).unwrap().state
+        };
+        let installed = r#"{"present":true,"running":true,"provisioned":true,"sync":"synced"}"#;
+        assert_eq!(state(r#"{"errors":3,"lastAt":"2026-10-22T14:02:47Z","active":true}"#, installed), UfaState::NoDeviceRecord);
+        assert_eq!(state(r#"{"errors":0,"lastAt":null,"active":false}"#, installed), UfaState::Synced);
+        // Without the installer's word either (a device that never got one), the live reading still counts.
+        let no_word = r#"{"present":true,"running":true,"provisioned":true}"#;
+        assert_eq!(state(r#"{"errors":2,"lastAt":"2026-10-22T14:02:47Z","active":true}"#, no_word), UfaState::NoDeviceRecord);
+        // A login that is refused or a registration that is broken is the more basic fault, and keeps its own word.
+        let rejected = r#"{"present":true,"running":true,"provisioned":true,"sync":"rejected"}"#;
+        assert_eq!(state(r#"{"errors":2,"lastAt":"2026-10-22T14:02:47Z","active":true}"#, rejected), UfaState::Rejected);
+        let broken = r#"{"present":true,"running":false,"provisioned":true,"brokenRegistration":true}"#;
+        assert_eq!(state(r#"{"errors":2,"lastAt":"2026-10-22T14:02:47Z","active":true}"#, broken), UfaState::Broken);
     }
 
     #[test]

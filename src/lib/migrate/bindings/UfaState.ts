@@ -3,4 +3,4 @@
 /**
  * The Ecoverse agent's state on the device, as the installer's watcher classifies it from the agent's own log.
  */
-export type UfaState = "notInstalled" | "notProvisioned" | "waiting" | "synced" | "stalled" | "blocked" | "rejected" | "denied" | "broken" | "unknown";
+export type UfaState = "notInstalled" | "notProvisioned" | "waiting" | "synced" | "stalled" | "blocked" | "rejected" | "denied" | "noDeviceRecord" | "broken" | "unknown";

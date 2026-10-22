@@ -97,6 +97,15 @@ describe("the Ecoverse agent on the device", () => {
     expect(ufaWords(ufa("synced")).tone).toBe("ok");
   });
 
+  it("says an agent with no device record can't be helped by a restart or the repair, and where it is fixed", () => {
+    const words = ufaWords(ufa("noDeviceRecord"));
+    expect(words.short).toBe("No device record in Ecoverse");
+    expect(words.tone).toBe("err");
+    expect(words.long).toContain("doesn't help");
+    expect(words.long).toContain("Ecoverse side");
+    expect(words.long).toContain("collect-logs.ps1");
+  });
+
   it("reads a missing agent after the repair as being put back, with what its folder shows", () => {
     expect(ufaWords(ufa("notInstalled")).short).toBe("Not installed yet");
     const repaired = { repairedAt: "2026-10-21T16:10:00Z" };
