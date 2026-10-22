@@ -25,6 +25,7 @@
     registration, credential or the provisioning GUID is withheld whole. The zip is still worth a glance before it is sent:
     it holds the computer name, IP addresses and Windows user names that appear in the logs.
 
+    Add -SkipNetwork to leave out the DNS/TCP/TLS tests of the hosts (they take about a minute, a few if a host does not answer).
     Each file is capped at -MaxFileMB (the end of a longer file is kept).
 #>
 [CmdletBinding()]
@@ -33,6 +34,7 @@ param(
     [int]$Days = 3,
     [int]$MaxFileMB = 4,
     [string[]]$ExtraHost = @(),
+    [switch]$SkipNetwork,
     [string]$MspAgentDir = ([Environment]::GetFolderPath('ProgramFilesX86') + '\Msp Agent'),
     [string]$MspDataDir = ([Environment]::GetFolderPath('CommonApplicationData') + '\MspAgent'),
     [string]$WindowsAgentDir = ([Environment]::GetFolderPath('ProgramFilesX86') + '\N-able Technologies\Windows Agent'),
@@ -132,6 +134,7 @@ foreach ($f in (Get-LogFile (Join-Path $NvokeDir 'logs'))) { Copy-MaskedLog $f (
 # ---- facts ---------------------------------------------------------------------------------------------------------
 $sys = New-Object Text.StringBuilder
 function Add-Section([string]$Title, [scriptblock]$Body) {
+    Write-Output "  $Title"
     $text = try { (& $Body | Out-String -Width 250).TrimEnd() } catch { 'FAILED: ' + $_.Exception.Message }
     if (-not $text) { $text = '(nothing)' }
     $masked = ($text -split "\r?\n" | ForEach-Object { Hide-Secret $_ $false }) -join "`r`n"
@@ -244,8 +247,10 @@ Add-Section 'Events: services and crashes (last 7 days, Msp / N-able only)' {
 }
 $hosts = @('auth.us-west-2.prd.cdo.system-monitor.com', 'configs.us-west-2.prd.cdo.system-monitor.com', 'provisioning.config.us-west-2.prd.cdo.system-monitor.com',
     'ingest.us-west-2.prd.cdo.system-monitor.com', 'cdn-component.fusion.prd.cdo.system-monitor.com', 'cdn-notary.pub.prd.cdo.system-monitor.com') + @($ExtraHost | Where-Object { $_ })
-Write-Output "Testing the route to $($hosts.Count) hosts (3 tries each)..."
+$skipNetwork = $SkipNetwork.IsPresent
+Write-Output "Testing the route to $($hosts.Count) hosts (3 tries each; usually about a minute, up to a few if a host does not answer). -SkipNetwork leaves this out."
 Add-Section 'Network: DNS, TCP 443 and TLS handshake without a client certificate (3 tries, 2 s apart)' {
+    if ($skipNetwork) { 'Skipped (-SkipNetwork).'; return }
     'A handshake that is reset or closed by an agent host (auth, ingest) is expected here: those hosts want the agent''s client certificate. A DNS or TCP failure, a long delay or an unexpected certificate issuer (a proxy or firewall in the middle) is the finding.'
     ''
     foreach ($name in $hosts) {
