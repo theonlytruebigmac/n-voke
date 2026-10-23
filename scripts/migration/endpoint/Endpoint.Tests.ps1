@@ -742,7 +742,7 @@ Describe 'the lab log summary probe (ufa-log-summary.ps1)' {
             try {
                 Set-Content -Path $log -Value $Lines -Encoding UTF8
                 if ($null -ne $ComponentLines) { Set-Content -Path (Join-Path $dir 'component.log') -Value $ComponentLines -Encoding UTF8 }
-                (& $hostPath -NoProfile -ExecutionPolicy Bypass -File $probe -LogPath $log -AsOfUtc '2026-10-21T15:30:00Z' @ProbeArguments 2>&1 | Out-String)
+                (& $hostPath -NoProfile -ExecutionPolicy Bypass -File $probe -LogPath $log -NoSystem -AsOfUtc '2026-10-21T15:30:00Z' @ProbeArguments 2>&1 | Out-String)
             } finally { Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue }
         }
     }
@@ -836,7 +836,7 @@ Describe 'the lab log summary probe (ufa-log-summary.ps1)' {
     }
 
     It 'still reports, rather than stopping, when there is no log at all' {
-        $text = (& $hostPath -NoProfile -File $probe -LogPath (Join-Path ([IO.Path]::GetTempPath()) 'nvoke-no-such-dir/msp-agent-core.log') 2>&1 | Out-String)
+        $text = (& $hostPath -NoProfile -File $probe -NoSystem -LogPath (Join-Path ([IO.Path]::GetTempPath()) 'nvoke-no-such-dir/msp-agent-core.log') 2>&1 | Out-String)
         $text | Should -Match 'RESULT\s+PROBLEM - Provisioned: there is no core log to read'
         $text | Should -Match 'STATE: unknown'
     }

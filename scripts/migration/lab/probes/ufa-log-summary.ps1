@@ -11,7 +11,8 @@
         powershell -NoProfile -File ufa-log-summary.ps1 -Collected C:\temp\nvoke-logs-SUP-2190-20261022-140311.zip
     The time of the collection is read from the zip, so "30 minutes ago" means 30 minutes before it was taken.
     For a lone copy of the core log: -LogPath C:\temp\msp-agent-core.log (and -AsOfUtc 2026-10-22T18:05:00Z, the time the
-    copy was taken, since only errors from the last 30 minutes count for the "no device record" state).
+    copy was taken, since only errors from the last 30 minutes count for the "no device record" state). Add -NoSystem to
+    leave out this machine's own services, registry and event log, which say nothing about a log that came from elsewhere.
 
     The report: RESULT and what to do first; then one line per stage, from the Windows Agent to the data leaving the
     device ([ ok ] fine, [WARN] look, [FAIL] broken, [info] for your information, [ -- ] could not be checked); then the
@@ -30,10 +31,12 @@ param(
     [string]$OutFile,
     [string]$AsOfUtc,
     [switch]$Network,
-    [switch]$Full
+    [switch]$Full,
+    [switch]$NoSystem
 )
 $ErrorActionPreference = 'Continue'
 $wantNetwork = $Network.IsPresent
+$skipSystem = $NoSystem.IsPresent
 
 # BEGIN shared with endpoint/installAgent.ps1. This is a verbatim copy of its Get-UfaSyncState, so the STATE below is the
 # one the installer's watcher acts on. Endpoint.Tests.ps1 fails if the two copies differ: change it there, then copy it here.
@@ -346,12 +349,15 @@ $sentFailed = @($comp | Where-Object { $_.Text -match 'processMessages .*failed 
 $inventorySent = @($sent | Where-Object { $_.Type -eq 'DeviceAsset' })
 $reacquired = @($comp | Where-Object { $_.Text -match 'failed integrity check, re-acquiring' }).Count
 
-$services = Get-ServiceFact
-$products = Get-ProductFact
-$registration = Get-RegistrationFact
-$msiEvents = Get-InstallerEventFact
-$clock = Get-ClockFact
-$net = Get-NetworkFact
+$services = $null; $products = $null; $registration = $null; $msiEvents = $null; $clock = $null; $net = $null
+if (-not $skipSystem) {
+    $services = Get-ServiceFact
+    $products = Get-ProductFact
+    $registration = Get-RegistrationFact
+    $msiEvents = Get-InstallerEventFact
+    $clock = Get-ClockFact
+    $net = Get-NetworkFact
+}
 
 # Windows Agent log: the maintenance that deploys the Ecoverse agent. Its times are the device's local time, with no offset.
 $ufaMaint = New-Object Collections.Generic.List[object]
