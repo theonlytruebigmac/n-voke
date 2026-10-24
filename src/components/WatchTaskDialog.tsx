@@ -2,7 +2,7 @@ import { useState } from "react";
 import { assetIdFromTaskId, getAssetName, getTask } from "../lib/api";
 import { jobStore, newTask } from "../lib/jobs";
 import { applySnapshot } from "../lib/taskState";
-import { Button, ErrorNote, Field, Modal, inputClass } from "./ui";
+import { Button, Field, Modal, inputClass } from "./ui";
 
 /** Adds an existing task (e.g. one started from the PowerShell script) as a job. */
 export function WatchTaskDialog({ onClose, onAdded }: { onClose: () => void; onAdded: (jobId: string) => void }) {
@@ -46,7 +46,7 @@ export function WatchTaskDialog({ onClose, onAdded }: { onClose: () => void; onA
   return (
     <Modal
       title="Watch a task"
-      description="Follow a run started elsewhere, such as from the PowerShell script."
+      description="Follow a run started somewhere else, like the PowerShell script."
       onClose={onClose}
       footer={
         <>
@@ -66,10 +66,20 @@ export function WatchTaskDialog({ onClose, onAdded }: { onClose: () => void; onA
           void watch();
         }}
       >
-        <Field label="Task ID">
-          <input className={`${inputClass} font-mono`} value={taskId} onChange={(e) => setTaskId(e.target.value)} placeholder="MDFhMTRhZjMt…" autoFocus spellCheck={false} />
+        <Field label="Task ID" error={error}>
+          <input
+            className={`${inputClass} font-mono ${error ? "border-err" : ""}`}
+            value={taskId}
+            onChange={(e) => {
+              setTaskId(e.target.value);
+              setError(null);
+            }}
+            placeholder="MDFhMTRhZjMt…"
+            aria-invalid={!!error}
+            autoFocus
+            spellCheck={false}
+          />
         </Field>
-        {error && <ErrorNote>{error}</ErrorNote>}
         <button type="submit" hidden />
       </form>
     </Modal>

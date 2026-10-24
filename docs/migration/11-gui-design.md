@@ -311,7 +311,7 @@ The home of a running project. Top to bottom: a stage strip, the attention list,
 - **Stage strip**: the 16 stages grouped for reading (Planned, Launched, Staged, Moving, On the new server, Healthy, Done, Needs you). Clicking a segment filters the table.
 - **Needs you**: one card per attention device with the sentence for its state ([Words](#words)) and the actions that apply ([Actions](#actions)). *Known delays* are not listed here until they pass their thresholds.
 - **Device table**: one row per device; a click opens the **device sheet**.
-- The header shows the tracker state (*Tracking · last read 12 s ago*, *Paused*, *Read-only: open in another window*), **Probe waiting (N)** (shown while devices are waiting for Ecoverse's data: probes them, longest-waiting first, 20 per click, and summarises the states their Ecoverse agents report) and **Poll now**.
+- The header shows the tracker state (*Tracking · last read 12 s ago*, *Paused*, *Read-only: open in another window*), **Probe waiting (N)** (shown while devices are waiting for Ecoverse's data: probes them, longest-waiting first, 20 per click, and summarises the states their Ecoverse agents report), **Poll now**, and a notice when Healthy devices are *Ecoverse data overdue* (still waiting 2 hours after they were Healthy). The tracker also probes waiting devices by itself: a device Healthy for 10 minutes, a few per pass, each again only after *Probe waiting devices every* minutes (migration settings, default 30, 0 = off, at least 5). A failed automatic probe is a note on the device's timeline.
 
 **Device sheet** (`Sheet`, wide):
 
@@ -395,12 +395,13 @@ One sentence per stage, shown in the table (short form) and the device sheet (lo
 
 | Situation | Line |
 |---|---|
-| Destination linked, asset not yet connected | *Ecoverse agent still setting up (installed {n} min ago). This commonly takes 20 to 60 minutes and doesn't block the move.* |
+| Destination linked, asset not yet connected | *Ecoverse agent still setting up (installed {n} min ago). This commonly takes about 10 minutes, and its data about an hour and a half after that; it doesn't block the move.* |
 | Asset connected, no data yet | *Ecoverse is waiting for the agent's data. Scripts run once it arrives.* |
 | Healthy, and the destination's Ecoverse has **no asset data** yet | The table reads **Checking in** (not Healthy), with *Waiting for Ecoverse data* under it, and the sheet says: *Registered with Ecoverse and shown there, but no asset data has arrived yet. Until it does the device isn't fully working: its name, serial number and addresses are unknown and scripts can't run on it.* **Healthy** is shown only once Ecoverse is receiving the device's data (a host name, serial number or address). The stage in the core is still Healthy; the page tells the two apart with `waitingForEcoverse`. Waiting devices are counted under *Waiting for Ecoverse* on the strip, don't count toward progress, and are left out of the bulk cleanup |
 | Login rejected / components denied (from `status.json`, after a Probe) | *Login rejected* or *Downloads refused*, in the **Ecoverse agent on the device** section of the sheet: *The cloud rejects the agent's login (400 SSL certificate error). A restart doesn't help. The installer does a one-time repair after 30 minutes. If it is still refused after that, check TLS inspection, proxy and firewall on the device's network path, and report it to N-able.* |
 | Blocked (from `status.json`, after a Probe) | *Can't reach the Ecoverse login service*: *The Ecoverse login service isn't answering the agent. This often clears by itself, so the installer watches it first. If it lasts, the installer restarts the agent after 30 minutes and does a one-time repair after 60 minutes if that didn't help.* |
 | Stalled, redeploying, sending data (from `status.json`, after a Probe) | *Needs a restart* (the installer restarts it, at most twice), *Being redeployed* (after the repair, with how many files the agent's folder has received since), *Sending data* |
+| Registered but broken (from `status.json`, after a Probe) | *Registered but broken*: *The Ecoverse agent is registered on the device, but its program is missing and it has no service. The Windows Agent can then only try to remove it, which needs that program, and never installs a new one. The installer can't fix this ...* plus *Windows Installer logged N failed removals, the last with MSI error 1721.* |
 | Destination not linked | *Not in Ecoverse until the destination is linked. This is expected.* |
 
 ## Actions

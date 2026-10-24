@@ -102,11 +102,40 @@ function Remove-TreeSafely([string]$Path) {
     Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
 }
 
+# The Ecoverse agent's components log this error when the cloud gave the agent no device identity (no "GOAT NRI"): they
+# can't send their data. The installer's verdict in status.json is as old as its last run, so Status reads the log now.
+# The rule is the one in Get-UfaSyncState (installAgent.ps1): two or more in the last 30 minutes, not counting any from
+# before the core log says the device record arrived.
+function Get-UfaNoDeviceLive([string]$ComponentLogPath = ([Environment]::GetFolderPath('ProgramFilesX86') + '\Msp Agent\logs\component.log'), [datetime]$NowUtc = [datetime]::UtcNow, [string]$CoreLogPath = (Join-Path (Split-Path $ComponentLogPath -Parent) 'msp-agent-core.log')) {
+    $count = 0; $last = $null; $recordFoundAt = $null
+    $stamp = [regex]'^\[(\d{4}-\d\d-\d\dT[\d:.]+[+-]\d\d:\d\d)\]'
+    if (Test-Path -LiteralPath $CoreLogPath) {
+        foreach ($line in @(Get-Content -LiteralPath $CoreLogPath -Tail 20000 -ErrorAction SilentlyContinue)) {
+            if ($line -notmatch 'configservice::updateDeviceConfig device GOAT NRI was found') { continue }
+            $m = $stamp.Match($line)
+            if ($m.Success) { $recordFoundAt = [datetimeoffset]::Parse($m.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture).UtcDateTime }
+        }
+    }
+    if (Test-Path -LiteralPath $ComponentLogPath) {
+        $windowStart = $NowUtc.AddMinutes(-30)
+        foreach ($line in @(Get-Content -LiteralPath $ComponentLogPath -Tail 5000 -ErrorAction SilentlyContinue)) {
+            if ($line -notmatch 'ERROR \(\d+\): messaging::refreshDeviceInfo failed to get goat NRI') { continue }
+            $m = $stamp.Match($line)
+            if (-not $m.Success) { continue }
+            $at = [datetimeoffset]::Parse($m.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture).UtcDateTime
+            if ($at -lt $windowStart -or ($recordFoundAt -and $at -le $recordFoundAt)) { continue }
+            $count++; $last = $at
+        }
+    }
+    [ordered]@{ errors = $count; lastAt = $(if ($last) { $last.ToString('o') } else { $null }); active = ($count -ge 2); recordFoundAt = $(if ($recordFoundAt) { $recordFoundAt.ToString('o') } else { $null }) }
+}
+
 function Get-StatusSummary {
     $statusPath = Join-Path $Root 'status.json'
     if (-not (Test-Path $statusPath)) { return '-' }
     $s = Get-Content $statusPath -Raw | ConvertFrom-Json
     $s.history = @($s.history | Select-Object -Last 30)
+    $s | Add-Member -NotePropertyName ufaLive -NotePropertyValue (Get-UfaNoDeviceLive) -Force
     return ($s | ConvertTo-Json -Depth 5 -Compress)
 }
 

@@ -18,6 +18,8 @@ const ufa = (over: Partial<DeviceUfa> = {}): DeviceUfa => ({
   probedAt: new Date(Date.now() - 12 * 60_000).toISOString(),
   restarts: 0,
   repairedAt: null,
+  removalFailures: null,
+  removalError: null,
   faultSeenAt: null,
   redeployFiles: null,
   warning: null,
@@ -43,6 +45,7 @@ const detail = (deviceUfa: DeviceUfa | null): DeviceDetail => ({
   ecoverse: "waitingForData",
   ecoverseNote: null,
   waitingForEcoverse: true,
+  ecoverseOverdue: false,
   deviceUfa,
   candidates: [],
   actions: ["probe"],
@@ -61,6 +64,14 @@ const show = (d: DeviceDetail) => {
 afterEach(cleanup);
 
 describe("DeviceSheet: the Ecoverse agent on the device", () => {
+  it("says a device that has waited more than two hours is overdue, and not before", () => {
+    show({ ...detail(null), ecoverseOverdue: true });
+    expect(screen.getByText(/waited more than 2 hours for Ecoverse's data/)).toBeTruthy();
+    cleanup();
+    show(detail(null));
+    expect(screen.queryByText(/waited more than 2 hours/)).toBeNull();
+  });
+
   it("shows nothing about the agent until the device has been probed", () => {
     show(detail(null));
     expect(screen.queryByText("Ecoverse agent on the device")).toBeNull();
@@ -100,6 +111,23 @@ describe("DeviceSheet: the Ecoverse agent on the device", () => {
     show(detail(ufa({ state: "notInstalled", repairedAt: "2026-10-21T16:10:00Z", redeployFiles: 4 })));
     expect(screen.getByText("Being redeployed")).toBeTruthy();
     expect(screen.getByText(/4 files written to its folder since the last restart/)).toBeTruthy();
+  });
+
+  it("tells the operator a registered agent whose program is gone is broken, with the removal failures and the step that found it", () => {
+    show(
+      detail(
+        ufa({
+          state: "broken",
+          removalFailures: 5,
+          removalError: 1721,
+          steps: [{ at: "2026-10-21T21:58:00Z", event: "ufa-registration-broken", detail: "MSP Core Agent 3.47.0 is registered but msp-agent-core.exe is missing" }],
+        }),
+      ),
+    );
+    expect(screen.getByText("Registered but broken")).toBeTruthy();
+    expect(screen.getByText(/never installs a new one/)).toBeTruthy();
+    expect(screen.getByText(/Windows Installer logged 5 failed removals, the last with MSI error 1721\./)).toBeTruthy();
+    expect(screen.getByText("Found the Ecoverse agent registered with its program missing")).toBeTruthy();
   });
 
   it("says singular for one restart, and shows a synced agent as sending data", () => {

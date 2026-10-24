@@ -16,6 +16,14 @@ restarts: number,
  */
 repairedAt: string | null, 
 /**
+ * For a broken registration: how many removals Windows Installer logged as failed since the install.
+ */
+removalFailures: number | null, 
+/**
+ * For a broken registration: the last MSI error code of those (1721 the program could not be run, 1722 it failed).
+ */
+removalError: number | null, 
+/**
  * When the watcher first saw a fault, if it did.
  */
 faultSeenAt: string | null, 

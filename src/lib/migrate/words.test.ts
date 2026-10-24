@@ -80,7 +80,7 @@ describe("a healthy device and Ecoverse", () => {
 });
 
 describe("the Ecoverse agent on the device", () => {
-  const ufa = (state: Parameters<typeof ufaWords>[0]["state"], extra: { repairedAt?: string | null; redeployFiles?: number | null } = {}) => ({ state, repairedAt: null, redeployFiles: null, ...extra });
+  const ufa = (state: Parameters<typeof ufaWords>[0]["state"], extra: { repairedAt?: string | null; redeployFiles?: number | null; removalFailures?: number | null; removalError?: number | null } = {}) => ({ state, repairedAt: null, redeployFiles: null, removalFailures: null, removalError: null, ...extra });
 
   it("has words for every state the installer can report", () => {
     for (const [state, words] of Object.entries(UFA_WORDS)) {
@@ -97,6 +97,16 @@ describe("the Ecoverse agent on the device", () => {
     expect(ufaWords(ufa("synced")).tone).toBe("ok");
   });
 
+  it("says an agent with no device record yet is normal for the first hour and a half, that a restart makes it ask at once, and where a lasting fault is fixed", () => {
+    const words = ufaWords(ufa("noDeviceRecord"));
+    expect(words.short).toBe("Waiting for a device record");
+    expect(words.tone).toBe("warn");
+    expect(words.long).toContain("86 to 94 minutes");
+    expect(words.long).toContain("Restarting the agent");
+    expect(words.long).toContain("Ecoverse side");
+    expect(words.long).toContain("collect-logs.ps1");
+  });
+
   it("reads a missing agent after the repair as being put back, with what its folder shows", () => {
     expect(ufaWords(ufa("notInstalled")).short).toBe("Not installed yet");
     const repaired = { repairedAt: "2026-10-21T16:10:00Z" };
@@ -111,6 +121,20 @@ describe("the Ecoverse agent on the device", () => {
     expect(ufaStepTitle("ufa-sync-restart")).toBe("Restarted the Ecoverse agent");
     expect(ufaStepTitle("ufa-repair")).toContain("Repaired");
     expect(ufaStepTitle("ufa-repair-restart")).toContain("again");
+    expect(ufaStepTitle("ufa-registration-broken")).toContain("program missing");
     expect(ufaStepTitle("something-new")).toBe("something-new");
+  });
+
+  it("says a registered agent whose program is gone can't be fixed by the installer, and what Windows Installer logged", () => {
+    const plain = ufaWords(ufa("broken"));
+    expect(plain.short).toBe("Registered but broken");
+    expect(plain.tone).toBe("err");
+    expect(plain.long).toContain("never installs a new one");
+    expect(plain.long).toContain("The installer can't fix this");
+    expect(plain.long).not.toContain("Windows Installer logged");
+    const logged = ufaWords(ufa("broken", { removalFailures: 5, removalError: 1721 }));
+    expect(logged.long).toContain("Windows Installer logged 5 failed removals, the last with MSI error 1721.");
+    expect(ufaWords(ufa("broken", { removalFailures: 1 })).long).toContain("1 failed removal.");
+    expect(ufaWords(ufa("notInstalled", { removalFailures: 5, removalError: 1721 })).short).toBe("Not installed yet");
   });
 });

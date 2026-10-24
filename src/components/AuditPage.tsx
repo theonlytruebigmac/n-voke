@@ -2,21 +2,8 @@ import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { ChevronRight, Copy, MoreHorizontal, ScrollText, Search } from "lucide-react";
 import { getAuditLog, type AuditEntry } from "../lib/api";
 import { copyText, formatDateTime } from "../lib/format";
-import { EmptyState, ErrorNote, IconButton, Menu, MenuContent, MenuItem, MenuTrigger, PageHeader, Segmented, Status, Table, inputClass } from "./ui";
-
-const ACTION_LABELS: Record<string, string> = {
-  "script.run": "Script run",
-  "tag.create": "Tag created",
-  "tag.update": "Tag updated",
-  "tag.delete": "Tag deleted",
-  "tag.assign": "Devices tagged",
-  "tag.unassign": "Devices untagged",
-  "settings.api_key": "API key",
-  "settings.endpoint": "Endpoint",
-  "settings.history": "History setting",
-  "data.clear": "Local data cleared",
-  mutation: "API change",
-};
+import { AuditDetail, actionLabel } from "./audit/AuditDetail";
+import { Card, EmptyState, ErrorNote, IconButton, Menu, MenuContent, MenuItem, MenuTrigger, PageBody, PageHeader, Segmented, Status, Table, inputClass } from "./ui";
 
 type Filter = "all" | "errors";
 
@@ -69,9 +56,9 @@ export function AuditPage() {
         meta="Changes made from this computer"
         actions={
           <>
-            <div className="relative w-56">
+            <div className="relative w-64 max-w-full">
               <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-faint" />
-              <input className={`${inputClass} pl-8`} placeholder="Search" value={term} onChange={(e) => setTerm(e.target.value)} />
+              <input className={`${inputClass} h-9 pl-8`} placeholder="Search" aria-label="Search the log" value={term} onChange={(e) => setTerm(e.target.value)} />
             </div>
             <Segmented<Filter>
               value={filter}
@@ -83,7 +70,7 @@ export function AuditPage() {
             />
             <Menu>
               <MenuTrigger asChild>
-                <IconButton label="More">
+                <IconButton label="More" className="size-9 border border-border-strong">
                   <MoreHorizontal />
                 </IconButton>
               </MenuTrigger>
@@ -98,18 +85,16 @@ export function AuditPage() {
         }
       />
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        {error && (
-          <div className="p-5">
-            <ErrorNote>{error}</ErrorNote>
-          </div>
-        )}
+      <PageBody className="space-y-4">
+        {error && <ErrorNote>{error}</ErrorNote>}
         {loaded && entries.length === 0 && !error ? (
-          <EmptyState icon={<ScrollText />} title="Nothing logged yet">
-            Script runs, tag changes and settings changes are recorded here.
-          </EmptyState>
+          <Card>
+            <EmptyState icon={<ScrollText />} title="Nothing logged yet">
+              Script runs, tag changes and settings changes are recorded here.
+            </EmptyState>
+          </Card>
         ) : (
-          <div className="mx-auto max-w-5xl px-6 py-5">
+          <div>
             <Table
               head={
                 <>
@@ -117,13 +102,13 @@ export function AuditPage() {
                   <th className="w-40">Time</th>
                   <th>Event</th>
                   <th className="w-28">Result</th>
-                  <th className="w-28">User</th>
+                  <th className="w-40">User</th>
                 </>
               }
             >
               {shown.map(({ e, i, key }) => (
                 <Fragment key={`${key}-${i}`}>
-                  <tr onClick={() => setOpen(open === key ? null : key)} className="cursor-default hover:bg-surface-2/60">
+                  <tr onClick={() => setOpen(open === key ? null : key)} aria-expanded={open === key} className={`cursor-default hover:bg-surface-2/60 ${open === key ? "bg-surface-2/60" : ""}`}>
                     <td className="text-faint">
                       <ChevronRight className={`size-3.5 transition-transform ${open === key ? "rotate-90" : ""}`} />
                     </td>
@@ -133,19 +118,20 @@ export function AuditPage() {
                       </time>
                     </td>
                     <td className="max-w-0">
-                      <div className="truncate" title={ACTION_LABELS[e.action] ?? e.action}>
+                      <div className="truncate" title={e.summary}>
+                        <span className="mr-2 text-xs text-faint">{actionLabel(e.action)}</span>
                         {e.summary}
                       </div>
                       {e.error && <div className="truncate text-xs text-err">{e.error}</div>}
                     </td>
                     <td>{e.outcome === "ok" ? <Status tone="ok" label="OK" /> : <Status tone="err" label="Error" />}</td>
-                    <td className="truncate text-muted">{e.user}</td>
+                    <td className="max-w-0 truncate text-muted" title={e.user}>{e.user}</td>
                   </tr>
                   {open === key && (
                     <tr>
                       <td />
                       <td colSpan={4} className="pb-3">
-                        <pre className="max-h-72 overflow-auto rounded-md bg-surface-2 p-3 font-mono text-xs leading-relaxed">{JSON.stringify(e, null, 2)}</pre>
+                        <AuditDetail entry={e} />
                       </td>
                     </tr>
                   )}
@@ -155,7 +141,7 @@ export function AuditPage() {
             {shown.length === 0 && entries.length > 0 && <p className="py-6 text-center text-sm text-faint">No matching entries</p>}
           </div>
         )}
-      </div>
+      </PageBody>
     </>
   );
 }

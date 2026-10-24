@@ -528,7 +528,7 @@ mod tests {
     fn excluded_devices_and_excluded_units_are_left_out_without_blockers() {
         let mut w = world();
         w.excluded.insert("1".into());
-        crate::migration::mapping::apply_overrides(&mut w.mapping, &HashMap::from([("11".to_string(), crate::migration::mapping::Override::Exclude)]));
+        crate::migration::mapping::apply_overrides(&mut w.mapping, &HashMap::from([("11".to_string(), crate::migration::mapping::Override::Exclude)]), &[]);
         let planned = run(&w, &[device("1", "10", None, Some(2)), device("2", "10", Some("11"), Some(2))]);
         assert!(planned.iter().all(|d| d.excluded && d.blockers.is_empty() && !d.is_ready()));
         assert_eq!(summarize(&planned).excluded, 2);

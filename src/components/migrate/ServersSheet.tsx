@@ -1,11 +1,22 @@
 import { useState } from "react";
-import { Plus } from "lucide-react";
+import type { ReactNode } from "react";
+import { MoreHorizontal, Plus, Trash2 } from "lucide-react";
 import type { EcoCredential, ServerView } from "../../lib/migrate/bindings";
 import { useServerActions, useServers } from "../../lib/migrate/queries";
-import { Button, ErrorNote, Field, Modal, Sheet, Status, inputClass } from "../ui";
+import { Button, Dot, ErrorNote, Field, IconButton, Menu, MenuContent, MenuItem, MenuTrigger, Modal, Sheet, inputClass, type Tone } from "../ui";
+
+/** A short state word on a server card: a dot and the word, on a tinted pill. */
+function Chip({ tone, children }: { tone: Tone; children: ReactNode }) {
+  return (
+    <span className="inline-flex h-6 items-center gap-1.5 rounded-full border border-border bg-bg px-2.5 text-xs whitespace-nowrap text-muted">
+      <Dot tone={tone} />
+      {children}
+    </span>
+  );
+}
 
 const ECO_CHOICES: { value: EcoCredential; title: string; text: string }[] = [
-  { value: "appKey", title: "The app's Ecoverse key", text: "The key in Settings. Use it when this server is in the same Ecoverse tenant." },
+  { value: "appKey", title: "The app's Ecoverse key", text: "The Ecoverse token in Settings › Ecoverse. Use it when this server is in the same Ecoverse tenant." },
   { value: "own", title: "A token for this server", text: "Its own Ecoverse token, for a server in another tenant. Kept in the keychain." },
   { value: "none", title: "Don't use Ecoverse", text: "Reach its devices through N-central only." },
 ];
@@ -28,8 +39,20 @@ interface Form {
 
 const emptyForm: Form = { id: null, label: "", host: "", jwt: "", eco: "appKey", ecoToken: "", hasEcoToken: false };
 
-/** Add, edit, test and remove the N-central servers (screen C in docs/migration/11-gui-design.md). */
+/** The servers in a side panel, for opening from the middle of something else (the New project dialog). */
 export function ServersSheet({ onClose }: { onClose: () => void }) {
+  return (
+    <Sheet title="N-central servers" subtitle="JWTs and Ecoverse tokens are kept in the system keychain" onClose={onClose}>
+      <ServersPanel />
+    </Sheet>
+  );
+}
+
+/**
+ * Add, edit, test and remove the N-central servers (screen C in docs/migration/11-gui-design.md), on its own: in
+ * Settings, or inside ServersSheet.
+ */
+export function ServersPanel() {
   const servers = useServers();
   const actions = useServerActions();
   const [form, setForm] = useState<Form | null>(null);
@@ -76,7 +99,7 @@ export function ServersSheet({ onClose }: { onClose: () => void }) {
   const list = servers.data ?? [];
 
   return (
-    <Sheet title="N-central servers" subtitle="JWTs and Ecoverse tokens are kept in the system keychain" onClose={onClose}>
+    <>
       <div className="space-y-4">
         {servers.isError && <ErrorNote>{String(servers.error)}</ErrorNote>}
 
@@ -84,56 +107,75 @@ export function ServersSheet({ onClose }: { onClose: () => void }) {
           <p className="text-sm text-muted">No servers yet. Add the source and the destination server to start a migration.</p>
         )}
 
-        <ul className="divide-y divide-border rounded-lg border border-border">
-          {list.map((s) => {
-            const t = tests[s.id];
-            return (
-              <li key={s.id} className="space-y-1.5 px-3 py-2.5">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="truncate text-sm font-medium">{s.label}</div>
-                    {s.label !== s.host && <div className="truncate text-xs text-muted">{s.host}</div>}
+        {list.length > 0 && (
+          <ul className="space-y-2">
+            {list.map((s) => {
+              const t = tests[s.id];
+              const ecoMissing = s.ecoverse === "own" && !s.hasEcoverseToken;
+              return (
+                <li key={s.id} className="space-y-2.5 rounded-xl border border-border bg-surface px-4 py-3">
+                  <div className="flex items-start gap-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate font-semibold" title={s.label}>
+                        {s.label}
+                      </div>
+                      {s.label !== s.host && (
+                        <div className="truncate text-xs text-faint" title={s.host}>
+                          {s.host}
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      <Button size="sm" onClick={() => test(s)} busy={t?.kind === "testing"} disabled={!s.hasJwt}>
+                        Test
+                      </Button>
+                      <Button
+                        size="sm"
+                        onClick={() => {
+                          setFormError(null);
+                          setForm({ id: s.id, label: s.label, host: s.host, jwt: "", eco: s.ecoverse, ecoToken: "", hasEcoToken: s.hasEcoverseToken });
+                        }}
+                      >
+                        Edit
+                      </Button>
+                      <Menu>
+                        <MenuTrigger asChild>
+                          <IconButton label={`More for ${s.label}`}>
+                            <MoreHorizontal />
+                          </IconButton>
+                        </MenuTrigger>
+                        <MenuContent>
+                          <MenuItem
+                            danger
+                            onSelect={() => {
+                              setRemoveError(null);
+                              setRemoving(s);
+                            }}
+                          >
+                            <Trash2 />
+                            Remove server…
+                          </MenuItem>
+                        </MenuContent>
+                      </Menu>
+                    </div>
                   </div>
-                  <div className="flex shrink-0 items-center gap-1.5">
-                    <Status tone={s.hasJwt ? "ok" : "err"} label={s.hasJwt ? "JWT saved" : "No JWT"} />
-                    <Status tone={s.ecoverse === "own" && !s.hasEcoverseToken ? "err" : "ok"} label={ecoSummary(s)} />
-                    <Button size="sm" onClick={() => test(s)} busy={t?.kind === "testing"} disabled={!s.hasJwt}>
-                      Test
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => {
-                        setFormError(null);
-                        setForm({ id: s.id, label: s.label, host: s.host, jwt: "", eco: s.ecoverse, ecoToken: "", hasEcoToken: s.hasEcoverseToken });
-                      }}
-                    >
-                      Edit
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="danger"
-                      onClick={() => {
-                        setRemoveError(null);
-                        setRemoving(s);
-                      }}
-                    >
-                      Remove
-                    </Button>
+                  <div className="flex flex-wrap gap-1.5">
+                    <Chip tone={s.hasJwt ? "ok" : "err"}>{s.hasJwt ? "JWT saved" : "No JWT"}</Chip>
+                    <Chip tone={ecoMissing ? "err" : s.ecoverse === "none" ? "muted" : "ok"}>{ecoSummary(s)}</Chip>
                   </div>
-                </div>
-                {t && t.kind !== "testing" && (
-                  <p className={`text-xs break-words ${t.kind === "ok" ? "text-ok" : "text-err"}`}>{t.kind === "ok" ? `✓ ${t.text}` : t.text}</p>
-                )}
-              </li>
-            );
-          })}
-        </ul>
+                  {t && t.kind !== "testing" && (
+                    <p className={`text-xs wrap-break-word ${t.kind === "ok" ? "text-ok" : "text-err"}`}>{t.kind === "ok" ? `✓ ${t.text}` : t.text}</p>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
 
         {form ? (
-          <div className="space-y-3 rounded-lg border border-border p-4">
+          <div className="space-y-3 rounded-xl border border-accent/40 bg-surface p-4">
             <h3 className="text-sm font-semibold">{form.id ? "Edit server" : "Add a server"}</h3>
-            <Field label="Name" hint="Shown in lists. Defaults to the host name.">
+            <Field label="Name" hint="Shown in lists. Defaults to the host name. Use a different name per service organization when they share a host.">
               <input className={inputClass} value={form.label} onChange={(e) => setForm({ ...form, label: e.target.value })} placeholder="Old server" />
             </Field>
             <Field label="Host" hint="The server's address, for example old.example.com. HTTPS only, no port or path.">
@@ -153,7 +195,7 @@ export function ServersSheet({ onClose }: { onClose: () => void }) {
             <fieldset className="space-y-2">
               <legend className="text-xs font-medium text-muted">Ecoverse key for this server's devices</legend>
               {ECO_CHOICES.map((o) => (
-                <label key={o.value} className="flex cursor-pointer items-start gap-2.5 rounded-md border border-border px-3 py-2 has-[:checked]:border-accent has-[:checked]:bg-accent-soft">
+                <label key={o.value} className="flex cursor-pointer items-start gap-2.5 rounded-xl border border-border px-3.5 py-2.5 has-[:checked]:border-accent has-[:checked]:bg-accent-soft">
                   <input type="radio" name="eco" className="mt-1" checked={form.eco === o.value} onChange={() => setForm({ ...form, eco: o.value })} />
                   <span className="text-sm">
                     <span className="font-medium">{o.title}</span>
@@ -229,6 +271,6 @@ export function ServersSheet({ onClose }: { onClose: () => void }) {
           {removeError && <ErrorNote>{removeError}</ErrorNote>}
         </Modal>
       )}
-    </Sheet>
+    </>
   );
 }

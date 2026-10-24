@@ -35,6 +35,7 @@ $UfaBlockedSettleMinutes = 20
 $UfaRepairAfterMinutes = 30
 $UfaRepairWaitMinutes = 90
 $UfaRepairRestartAfterMinutes = 10
+$UfaBrokenConfirmMinutes = 10
 $UfaRepairMaxFinalRestarts = 2
 
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
@@ -131,7 +132,10 @@ function Test-MsiBusy {
 # Reads the Ecoverse agent's core log for the one fault seen in the lab: its configuration fetch timed out while
 # fetching a login token, so the inventory components were never delivered and the asset stays CONNECTED with no
 # data. The agent retries that fetch only hourly; restarting MspAgent retries it at once. Only lines after $Since count.
-#   synced   the inventory component (generic-asset-interrogator) was downloaded
+#   synced   data is flowing. With the components' log to read (the installer passes it): the device record arrived (the
+#            core log says "device GOAT NRI was found in config response") or the inventory (DeviceAsset) was logged as
+#            sent. Without it: the inventory component (generic-asset-interrogator) was downloaded. The download alone
+#            proved nothing: it happens minutes after provisioning, long before the data can leave the device
 #   stalled  a configuration fetch failed on a timeout, the cloud answers again, and nothing was delivered since: restart
 #   blocked  a fetch failed and the cloud still doesn't answer. It often clears by itself (the lab saw it), so it is
 #            watched first. Only if it lasts, one MspAgent restart is tried, and after that gets time to prove itself
@@ -143,11 +147,19 @@ function Test-MsiBusy {
 #   denied   the login works but the component CDN answers the agent's downloads with 403 (five or more, none succeeded
 #            since): nothing can be delivered. A restart changed nothing in the lab; the repair fixed it
 #   waiting  no fault and no inventory component yet (normal for a while)
+#   nodevice the login works and the components were downloaded, but the cloud's reply for this agent has no device record
+#            (no "GOAT NRI"), so every attempt to send data fails: the component log shows "failed to get goat NRI" at
+#            least twice in the last 30 minutes. This outranks synced: the inventory component downloads fine and
+#            collects, it just can't send. Normal at first: on healthy lab devices the record arrived 86 to 94 minutes
+#            after provisioning (the agent asks for it at provisioning and at its hourly update check). Still missing
+#            after 4 hours on devices moved into one N-central's Ecoverse tenant, and the one-time repair changed
+#            nothing there. A restart would make the agent ask at once (it only helps if the record exists), but none
+#            is tried: the watcher only reports it
 #   unknown  no log to read
-function Get-UfaSyncState([string]$LogPath, [datetime]$Since) {
+function Get-UfaSyncState([string]$LogPath, [datetime]$Since, [string]$ComponentLogPath = '', [datetime]$NowUtc = [datetime]::UtcNow) {
     if (-not (Test-Path -LiteralPath $LogPath)) { return [pscustomobject]@{ State = 'unknown'; FailedAt = $null; RejectedSince = $null; FaultSince = $null; FaultLastAt = $null } }
     $stamp = [regex]'^\[(\d{4}-\d\d-\d\dT[\d:.]+[+-]\d\d:\d\d)\]'
-    $failedAt = $null; $failingSince = $null; $jwtFailedAt = $null; $authOkAt = $null; $syncedAt = $null; $rejectedAt = $null; $rejectedSince = $null; $deniedCount = 0; $deniedSince = $null; $deniedAt = $null
+    $failedAt = $null; $failingSince = $null; $jwtFailedAt = $null; $authOkAt = $null; $syncedAt = $null; $rejectedAt = $null; $rejectedSince = $null; $deniedCount = 0; $deniedSince = $null; $deniedAt = $null; $recordFoundAt = $null
     foreach ($line in @(Get-Content -LiteralPath $LogPath -Tail 20000 -ErrorAction SilentlyContinue)) {
         $m = $stamp.Match($line)
         if (-not $m.Success) { continue }
@@ -158,21 +170,49 @@ function Get-UfaSyncState([string]$LogPath, [datetime]$Since) {
         elseif ($line -match 'auth::fetchJWTWithRetries error occurred when fetching jwt: unexpected status code: 400 .*The SSL certificate error') { $rejectedAt = $at; if (-not $rejectedSince) { $rejectedSince = $at } }
         elseif ($line -match 'auth::requestOauthToken Oauth token response received\. Status: 200') { $authOkAt = $at; $rejectedSince = $null; $failingSince = $null }
         elseif ($line -match 'ERROR \(\d+\): components::doRequestWithRetry received invalid status: ''403''') { $deniedCount++; $deniedAt = $at; if (-not $deniedSince) { $deniedSince = $at } }
+        elseif ($line -match 'configservice::updateDeviceConfig device GOAT NRI was found') { $recordFoundAt = $at }
         elseif ($line -match 'components::Download Successfully downloaded') {
             $deniedCount = 0; $deniedSince = $null
             if ($line -match 'generic-asset-interrogator') { $syncedAt = $at }
         }
     }
-    $state = if ($syncedAt -and (-not $failedAt -or $syncedAt -gt $failedAt)) { 'synced' }
+    # The components' own log: each flush of their data starts by asking for the device's identity and, without one, stops.
+    # And the proof that data leaves the device: the batch of inventory (DeviceAsset) the messaging layer logs as sent.
+    $noDeviceTimes = New-Object Collections.Generic.List[datetime]; $inventorySentAt = $null; $componentLogRead = $false
+    if ($ComponentLogPath -and (Test-Path -LiteralPath $ComponentLogPath)) {
+        $componentLogRead = $true
+        $windowStart = $NowUtc.AddMinutes(-30)
+        foreach ($line in @(Get-Content -LiteralPath $ComponentLogPath -Tail 5000 -ErrorAction SilentlyContinue)) {
+            $sentInventory = $line -match 'processMessages .*sending \d+ messages for typeURL: \S+DeviceAsset\s*$'
+            if (-not $sentInventory -and $line -notmatch 'ERROR \(\d+\): messaging::refreshDeviceInfo failed to get goat NRI') { continue }
+            $m = $stamp.Match($line)
+            if (-not $m.Success) { continue }
+            $at = [datetimeoffset]::Parse($m.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture).UtcDateTime
+            if ($at -lt $Since) { continue }
+            if ($sentInventory) { $inventorySentAt = $at; continue }
+            if ($at -ge $windowStart) { $noDeviceTimes.Add($at) }
+        }
+    }
+    # An error from before the record arrived says nothing about now.
+    $noDeviceNow = @($noDeviceTimes | Where-Object { -not $recordFoundAt -or $_ -gt $recordFoundAt })
+    $noDeviceCount = $noDeviceNow.Count
+    $noDeviceSince = if ($noDeviceCount) { $noDeviceNow[0] } else { $null }
+    $noDeviceAt = if ($noDeviceCount) { $noDeviceNow[$noDeviceCount - 1] } else { $null }
+    # With the components' log to read, "synced" is proof: the device record arrived or the inventory was sent. Without it,
+    # the inventory component having been downloaded is all there is to go on.
+    $proofAt = if ($recordFoundAt -and $inventorySentAt) { if ($recordFoundAt -gt $inventorySentAt) { $recordFoundAt } else { $inventorySentAt } } elseif ($recordFoundAt) { $recordFoundAt } else { $inventorySentAt }
+    $isSynced = if ($componentLogRead) { $proofAt -and (-not $failedAt -or $proofAt -gt $failedAt) } else { $syncedAt -and (-not $failedAt -or $syncedAt -gt $failedAt) }
+    $state = if ($noDeviceCount -ge 2) { 'nodevice' }
+             elseif ($isSynced) { 'synced' }
              elseif ($failedAt -and $authOkAt -and $authOkAt -gt $failedAt) { 'stalled' }
              elseif ($rejectedAt -and (-not $authOkAt -or $authOkAt -lt $rejectedAt)) { 'rejected' }
              elseif ($deniedCount -ge 5) { 'denied' }
              elseif ($failedAt) { 'blocked' }
              else { 'waiting' }
-    $faultSince = if ($state -eq 'rejected') { $rejectedSince } elseif ($state -eq 'denied') { $deniedSince } elseif ($state -eq 'blocked') { $failingSince } else { $null }
+    $faultSince = if ($state -eq 'rejected') { $rejectedSince } elseif ($state -eq 'denied') { $deniedSince } elseif ($state -eq 'blocked') { $failingSince } elseif ($state -eq 'nodevice') { $noDeviceSince } else { $null }
     # A blocked agent logs a failed login about every 10 minutes but a failed configuration fetch only about hourly.
     $blockedLastAt = if ($jwtFailedAt -and $jwtFailedAt -gt $failedAt) { $jwtFailedAt } else { $failedAt }
-    $faultLastAt = if ($state -eq 'rejected') { $rejectedAt } elseif ($state -eq 'denied') { $deniedAt } elseif ($state -eq 'blocked') { $blockedLastAt } else { $null }
+    $faultLastAt = if ($state -eq 'rejected') { $rejectedAt } elseif ($state -eq 'denied') { $deniedAt } elseif ($state -eq 'blocked') { $blockedLastAt } elseif ($state -eq 'nodevice') { $noDeviceAt } else { $null }
     [pscustomobject]@{ State = $state; FailedAt = $failedAt; RejectedSince = $rejectedSince; FaultSince = $faultSince; FaultLastAt = $faultLastAt }
 }
 
@@ -241,6 +281,54 @@ function Test-UfaRedeployRestartDue([bool]$UfaPresent, [datetime]$LastActionUtc,
     return (($NowUtc - $LastActionUtc).TotalMinutes -ge $AfterMinutes)
 }
 
+# The state SUP-2190 ended up in (lab, 2026-10-21): the Ecoverse agent (the MSP Core Agent MSI) is registered, its program
+# msp-agent-core.exe is gone and there is no MspAgent service. The Windows Agent then only tries to remove it, and that removal
+# runs the exe, so it fails (MSI error 1721) and nothing new is ever installed. Reported, never repaired by the installer.
+function Test-UfaRegistrationBroken([bool]$Registered, [bool]$ExePresent, [bool]$ServiceExists) {
+    return ($Registered -and -not $ExePresent -and -not $ServiceExists)
+}
+
+# Seen on two runs at least ConfirmMinutes apart, so a removal or install that is merely in progress isn't reported.
+function Test-UfaBrokenConfirmed([bool]$Broken, $FirstSeenUtc, [datetime]$NowUtc, [int]$ConfirmMinutes) {
+    if (-not $Broken -or -not $FirstSeenUtc) { return $false }
+    return (($NowUtc - $FirstSeenUtc).TotalMinutes -ge $ConfirmMinutes)
+}
+
+# What Windows Installer logged for the Ecoverse agent's product: 11725 removal failed (with 11721 or 11722 carrying the MSI
+# error: 1721 the program could not be run, 1722 it ran and failed), 11724 removal completed. Events are objects with Id and TimeCreated.
+function Get-UfaRemovalSummary($Events) {
+    $failed = @($Events | Where-Object { $_.Id -eq 11725 } | Sort-Object TimeCreated)
+    $coded = @($Events | Where-Object { $_.Id -eq 11721 -or $_.Id -eq 11722 } | Sort-Object TimeCreated)
+    [pscustomobject]@{
+        Failures      = $failed.Count
+        LastErrorCode = $(if ($coded.Count -gt 0) { [int]$coded[$coded.Count - 1].Id - 10000 } else { $null })
+        LastFailureAt = $(if ($failed.Count -gt 0) { $failed[$failed.Count - 1].TimeCreated.ToUniversalTime() } else { $null })
+        Completed     = @($Events | Where-Object { $_.Id -eq 11724 }).Count
+    }
+}
+
+# Read-only: the Application log's MsiInstaller events for the MSP Core Agent since SinceUtc.
+function Get-UfaRemovalEvent([datetime]$SinceUtc) {
+    if ($SinceUtc -le [datetime]::MinValue.AddDays(2)) { $SinceUtc = (Get-Date).ToUniversalTime().AddDays(-1) }
+    try {
+        @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'MsiInstaller'; StartTime = $SinceUtc.ToLocalTime() } -ErrorAction Stop |
+            Where-Object { ($_.Id -in 11721, 11722, 11724, 11725) -and $_.Message -match 'MSP Core Agent' })
+    } catch { @() }
+}
+
+# Read-only: is the Ecoverse agent registered, is its program there, does its service exist.
+function Get-UfaRegistration {
+    $entry = Get-UninstallEntry 'MSP Core Agent'
+    $core = [Environment]::GetFolderPath('ProgramFilesX86') + '\Msp Agent\msp-agent-core.exe'
+    [pscustomobject]@{
+        Registered    = [bool]$entry
+        ProductCode   = $(if ($entry -and $entry.Key -match '^\{[0-9A-Fa-f-]{36}\}$') { $entry.Key } else { $null })
+        Version       = $(if ($entry) { $entry.Version } else { $null })
+        ExePresent    = (Test-Path -LiteralPath $core)
+        ServiceExists = [bool](Get-Service -Name 'MspAgent' -ErrorAction SilentlyContinue)
+    }
+}
+
 function Test-RebootPending {
     foreach ($k in 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending',
                    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') {
@@ -249,15 +337,21 @@ function Test-RebootPending {
     return $false
 }
 
-# Products removed by a full cleanup, in order. Matched by exact display name, never by wildcard.
-$CleanupProducts = 'Windows Agent', 'MSP Core Agent', 'Patch Management Service Controller', 'Request Handler Agent', 'File Cache Service Agent'
+# Products removed by a full cleanup, in order. Matched by exact display name, never by wildcard. Only the legacy
+# N-central agent and its companions: the Ecoverse agent (UFA, "MSP Core Agent") is touchy and is removed only by its own
+# msp-agent-core.exe --uninstall (Invoke-UfaCoreUninstall), never by an MSI uninstall or by deleting its folders.
+$CleanupProducts = 'Windows Agent', 'Patch Management Service Controller', 'Request Handler Agent', 'File Cache Service Agent'
 $ProgramFilesX86 = [Environment]::GetFolderPath('ProgramFilesX86')
 $CommonAppData = [Environment]::GetFolderPath('CommonApplicationData')
+# The legacy N-central agent's folders only. Never the Ecoverse agent's (Program Files (x86)\Msp Agent, ProgramData\MspAgent,
+# SYSTEM's MSPScriptExecution): in the lab a UFA whose folder this cleanup deleted before its own uninstall had finished
+# was never redeployed by the new Windows Agent, while one whose folder was left to the Windows Agent was.
 $CleanupFolders = @(
-    "$ProgramFilesX86\N-able Technologies", "$ProgramFilesX86\Msp Agent", "$ProgramFilesX86\MspPlatform",
-    "$CommonAppData\N-able Technologies", "$CommonAppData\MspAgent", "$CommonAppData\MspPlatform",
-    "$env:windir\System32\config\systemprofile\AppData\Local\MSPScriptExecution"
+    "$ProgramFilesX86\N-able Technologies", "$ProgramFilesX86\MspPlatform",
+    "$CommonAppData\N-able Technologies", "$CommonAppData\MspPlatform"
 )
+# What the UFA leaves behind: reported after the cleanup, never touched.
+$UfaLeftovers = @("$ProgramFilesX86\Msp Agent", "$CommonAppData\MspAgent")
 $CleanupRegistry = 'HKLM:\SOFTWARE\N-able Technologies', 'HKLM:\SOFTWARE\WOW6432Node\N-able Technologies'
 
 function Get-UninstallEntry([string]$DisplayName) {
@@ -267,7 +361,7 @@ function Get-UninstallEntry([string]$DisplayName) {
         foreach ($name in $uninstall.GetSubKeyNames()) {
             $k = $uninstall.OpenSubKey($name)
             if ($k -and $k.GetValue('DisplayName') -eq $DisplayName) {
-                return [pscustomobject]@{ Key = $name; Msi = [bool]$k.GetValue('WindowsInstaller') -or ([string]$k.GetValue('UninstallString')) -match '^MsiExec'; Uninstall = [string]$k.GetValue('UninstallString') }
+                return [pscustomobject]@{ Key = $name; Msi = [bool]$k.GetValue('WindowsInstaller') -or ([string]$k.GetValue('UninstallString')) -match '^MsiExec'; Uninstall = [string]$k.GetValue('UninstallString'); Version = [string]$k.GetValue('DisplayVersion') }
             }
         }
     }
@@ -316,6 +410,16 @@ function Invoke-FullCleanup($Status) {
         if (Get-UninstallEntry $product) { $code = "$code (entry still present after 5 min)" }
         Add-StatusHistory $Status 'cleanup-uninstall' "$product -> $code"
     }
+    # The Windows Agent's uninstall hands the Ecoverse agent's own MSI removal on, and that can still be running after the
+    # uninstall returns: on SUP-2190 it failed (MSI error 1722) in the same second this cleanup stopped processes and deleted
+    # folders, and every later attempt failed with 1721 because msp-agent-core.exe was gone. So wait for the entry to go,
+    # for at most 5 minutes, and never remove it or touch its folders ourselves.
+    $ufaWaited = 0
+    while ($ufaWaited -lt 60 -and (Get-UninstallEntry 'MSP Core Agent')) { Start-Sleep -Seconds 5; $ufaWaited++ }
+    if ($ufaWaited -gt 0) {
+        $ufaGone = -not (Get-UninstallEntry 'MSP Core Agent')
+        Add-StatusHistory $Status 'cleanup-ufa-wait' $(if ($ufaGone) { "the Ecoverse agent's own removal finished after $($ufaWaited * 5) s" } else { "the Ecoverse agent is still registered after $($ufaWaited * 5) s; left alone" })
+    }
     # Whatever service is still registered from an N-able folder goes too.
     $leftover = Get-CimInstance Win32_Service | Where-Object { $p = [string]$_.PathName; $CleanupFolders | Where-Object { $p -like "*$_*" } }
     foreach ($svc in $leftover) {
@@ -342,7 +446,12 @@ function Invoke-FullCleanup($Status) {
     }
     # A folder that was already gone logs nothing above, so say what the old agent's folders look like now.
     $remaining = @($CleanupFolders | Where-Object { Test-Path $_ })
-    Add-StatusHistory $Status 'cleanup-verify' $(if ($remaining) { "still present: $($remaining -join ', ')" } else { 'none of the old agent folders are present' })
+    Add-StatusHistory $Status 'cleanup-verify' $(if ($remaining) { "still present: $($remaining -join ', ')" } else { 'none of the legacy agent folders are present' })
+    # The Ecoverse agent is left alone, but its state after the uninstall is the evidence if it never comes back.
+    $ufaLeft = @($UfaLeftovers | Where-Object { Test-Path -LiteralPath $_ })
+    $ufaSvc = if (Get-Service -Name 'MspAgent' -ErrorAction SilentlyContinue) { 'MspAgent service present' } else { 'MspAgent service gone' }
+    $ufaProduct = if (Get-UninstallEntry 'MSP Core Agent') { 'MSP Core Agent still registered' } else { 'MSP Core Agent not registered' }
+    Add-StatusHistory $Status 'cleanup-ufa-leftover' ('Ecoverse agent folders left in place on purpose: {0}; {1}; {2}' -f $(if ($ufaLeft) { $ufaLeft -join ', ' } else { 'none present' }), $ufaSvc, $ufaProduct)
     foreach ($key in $CleanupRegistry) {
         if (Test-Path $key) {
             Remove-Item -Path $key -Recurse -Force -ErrorAction SilentlyContinue
@@ -435,16 +544,38 @@ try {
         }
 
         # The Windows Agent installs the UFA a few minutes after itself. When the destination is linked, a UFA that isn't
-        # there yet is not a healthy device: wait for it, up to the same limit as the data sync.
+        # there yet is not a healthy device: wait for it, up to the same limit as the data sync. One state can't fix itself
+        # (SUP-2190, see Test-UfaRegistrationBroken): the Ecoverse agent is registered but its program is gone, so the Windows
+        # Agent never installs a new one. That is reported plainly, with what Windows Installer logged, and never repaired here.
         if ($job.expectUfa -eq 'true' -and -not $ufaService -and -not $status.ufaRepairedAt) {
-            $waitedAbsent = ((Get-Date).ToUniversalTime() - $since).TotalMinutes
+            $nowUtc = (Get-Date).ToUniversalTime()
+            $waitedAbsent = ($nowUtc - $since).TotalMinutes
+            $reg = Get-UfaRegistration
+            $broken = Test-UfaRegistrationBroken $reg.Registered $reg.ExePresent $reg.ServiceExists
+            if ($broken -and -not $status.ufaBrokenFirstSeenAt) { $status.ufaBrokenFirstSeenAt = $nowUtc.ToString('o') }
+            if (-not $broken) { $status.Remove('ufaBrokenFirstSeenAt') }
+            $firstSeen = if ($status.ufaBrokenFirstSeenAt) { [datetime]::Parse($status.ufaBrokenFirstSeenAt).ToUniversalTime() } else { $null }
+            $confirmed = Test-UfaBrokenConfirmed $broken $firstSeen $nowUtc $UfaBrokenConfirmMinutes
+            $status.ufa.brokenRegistration = $confirmed
+            $brokenNote = ''
+            if ($confirmed) {
+                $removal = Get-UfaRemovalSummary (Get-UfaRemovalEvent $since)
+                $status.ufa.removalFailures = $removal.Failures
+                $status.ufa.removalError = $removal.LastErrorCode
+                $removalText = 'Windows Installer removal failures since the install: {0}{1}' -f $removal.Failures, $(if ($removal.LastErrorCode) { ", last MSI error $($removal.LastErrorCode)" } else { '' })
+                $brokenNote = "; the Ecoverse agent is registered but msp-agent-core.exe is missing, so the Windows Agent cannot install a new one ($removalText)"
+                if (-not $status.ufaBrokenReportedAt) {
+                    $status.ufaBrokenReportedAt = $nowUtc.ToString('o')
+                    Add-StatusHistory $status 'ufa-registration-broken' ('MSP Core Agent {0} is registered but msp-agent-core.exe is missing and there is no MspAgent service (seen since {1:o}). The Windows Agent can only try to remove it, which runs that program, and will not install a new one. {2}. See the troubleshooting guide for the recovery steps' -f $reg.Version, $firstSeen, $removalText)
+                }
+            }
             if ($waitedAbsent -lt $UfaSyncGraceMinutes) {
                 $status.stage = 'awaiting-ufa'
-                Add-StatusHistory $status 'awaiting-ufa' ('MspAgent is not installed yet; {0:N0} min since install' -f $waitedAbsent)
+                Add-StatusHistory $status 'awaiting-ufa' ('MspAgent is not installed yet; {0:N0} min since install{1}' -f $waitedAbsent, $brokenNote)
                 Save-Status $status
                 exit 0
             }
-            $status.warning = "MspAgent was not installed $([math]::Round($waitedAbsent)) min after the install"
+            $status.warning = "MspAgent was not installed $([math]::Round($waitedAbsent)) min after the install$(if ($confirmed) { ' (the Ecoverse agent is registered but msp-agent-core.exe is missing)' })"
         }
 
         # Only wait for the UFA when the destination is linked to Ecoverse (the project says so); otherwise it can't provision there.
@@ -480,7 +611,8 @@ try {
         # if its log shows the configuration fetch timing out (see Get-UfaSyncState). Bounded: a few restarts, a grace period.
         if ($job.expectUfa -eq 'true' -and $ufaService -and $ufaProvisioned) {
             $coreLog = [Environment]::GetFolderPath('ProgramFilesX86') + '\Msp Agent\logs\msp-agent-core.log'
-            $sync = Get-UfaSyncState $coreLog $since
+            $componentLog = [Environment]::GetFolderPath('ProgramFilesX86') + '\Msp Agent\logs\component.log'
+            $sync = Get-UfaSyncState $coreLog $since $componentLog
             $status.ufa.sync = $sync.State
             $nowUtc = (Get-Date).ToUniversalTime()
             $restarts = [int]$status.ufaSyncRestarts
@@ -509,7 +641,7 @@ try {
                 $waitedSync = ((Get-Date).ToUniversalTime() - $since).TotalMinutes
                 # Once a fault has been seen the watcher keeps going for longer: blocked often clears by itself, and a
                 # state it turns into (stalled, rejected, denied) needs its own restart or repair clock to run out.
-                if ($sync.State -in 'blocked', 'stalled', 'rejected', 'denied' -and -not $status.ufaFaultSeenAt) { $status.ufaFaultSeenAt = (Get-Date).ToUniversalTime().ToString('o') }
+                if ($sync.State -in 'blocked', 'stalled', 'rejected', 'denied', 'nodevice' -and -not $status.ufaFaultSeenAt) { $status.ufaFaultSeenAt = (Get-Date).ToUniversalTime().ToString('o') }
                 $grace = if ($status.ufaFaultSeenAt) { $UfaBlockedWatchMinutes } else { $UfaSyncGraceMinutes }
                 if ($waitedSync -lt $grace) {
                     $status.stage = 'awaiting-ufa'
@@ -517,13 +649,15 @@ try {
                         'rejected' { 'the cloud rejects the Ecoverse agent login (400 SSL certificate error); a restart does not fix this' }
                         'denied' { 'the component CDN refuses the Ecoverse agent downloads (403); a restart does not fix this' }
                         'blocked' { 'the Ecoverse auth service does not answer the agent; it often clears by itself, so it is watched first' }
+                        'nodevice' { 'the Ecoverse agent logs in but the cloud has not given it a device record yet (no GOAT NRI), so its data cannot be sent; normal for about the first 90 minutes after provisioning; after that it needs fixing in the Ecoverse tenant' }
                         default { $sync.State }
                     }
                     Add-StatusHistory $status 'awaiting-ufa' ('MspAgent data sync: {0}; {1:N0} min since install' -f $why, $waitedSync)
                     Save-Status $status
                     exit 0
                 }
-                $status.warning = "MspAgent had not synced its data $([math]::Round($waitedSync)) min after the install (state: $($sync.State))"
+                $status.warning = if ($sync.State -eq 'nodevice') { "MspAgent logs in but the cloud still has no device record for it (no GOAT NRI), so its data cannot be sent ($([math]::Round($waitedSync)) min after the install)" }
+                                  else { "MspAgent had not synced its data $([math]::Round($waitedSync)) min after the install (state: $($sync.State))" }
             }
         }
 

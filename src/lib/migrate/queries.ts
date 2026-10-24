@@ -1,7 +1,7 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
-import type { CandidateQuery, CleanupProgress, DeviceChoice, DeviceCommand, MigrationSettings, PlanQuery, TrackQuery, LaunchResult, MapView, Override, PollDigest, ReportFormat, ScriptOrg, ScriptSide } from "./bindings";
+import type { CandidateQuery, CleanupProgress, DeviceChoice, DeviceCommand, MigrationSettings, PlanQuery, TrackQuery, LaunchResult, MapView, Override, PollDigest, ReportFormat, ScriptOrg, ScriptSide, StructureProgress } from "./bindings";
 import { jobStore } from "../jobs";
 import { applyChoice } from "./map";
 import {
@@ -251,12 +251,26 @@ export function useTracker(id: string, enabled: boolean): TrackerState {
         else Promise.resolve().then(stop).catch(() => undefined);
       })
       .catch(() => undefined);
+    // After the tracker has probed devices on its own, the device sheet and table have something new to show.
+    let unlistenProbed: (() => void) | undefined;
+    listen<{ id: string }>("migration-probed", (event) => {
+      if (event.payload.id !== id) return;
+      for (const key of ["track", "device"]) qc.invalidateQueries({ queryKey: ["migrate", key, id] });
+    })
+      .then((stop) => {
+        if (!cancelled) unlistenProbed = stop;
+        else Promise.resolve().then(stop).catch(() => undefined);
+      })
+      .catch(() => undefined);
     startTracker(id).catch((e) => setState({ last: null, error: String(e), starting: false }));
     return () => {
       cancelled = true;
       // Stopping a listener that is already gone isn't an error, and it fails asynchronously.
       Promise.resolve()
         .then(() => unlisten?.())
+        .catch(() => undefined);
+      Promise.resolve()
+        .then(() => unlistenProbed?.())
         .catch(() => undefined);
       stopTracker(id).catch(() => undefined);
     };
@@ -306,6 +320,33 @@ export function useCreateStructure(id: string) {
     mutationFn: ({ serviceOrgId, dryRun }: { serviceOrgId: string; dryRun: boolean }) => createStructure(id, serviceOrgId, dryRun),
     onSettled: () => Promise.all(["map", "map-details", "plan", "structure"].map((what) => qc.invalidateQueries({ queryKey: ["migrate", what, id] }))),
   });
+}
+
+/** The latest step of each customer, site and the token step while the missing structure is being created, by `kind:name`. */
+export function useStructureProgress(id: string, active: boolean): Record<string, StructureProgress> {
+  const [steps, setSteps] = useState<Record<string, StructureProgress>>({});
+  useEffect(() => {
+    if (!active) return;
+    setSteps({});
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    listen<{ id: string; progress: StructureProgress }>("migration-structure", (event) => {
+      const p = event.payload.progress;
+      if (event.payload.id === id) setSteps((cur) => ({ ...cur, [`${p.kind}:${p.name}`]: p }));
+    })
+      .then((stop) => {
+        if (!cancelled) unlisten = stop;
+        else Promise.resolve().then(stop).catch(() => undefined);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+      Promise.resolve()
+        .then(() => unlisten?.())
+        .catch(() => undefined);
+    };
+  }, [id, active]);
+  return steps;
 }
 
 export const useRetire = (id: string) => useQuery({ queryKey: ["migrate", "retire", id], queryFn: () => getRetire(id), staleTime: 0, retry: false, refetchOnWindowFocus: false });

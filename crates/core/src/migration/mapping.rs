@@ -174,17 +174,19 @@ pub fn auto_map(source: &[OrgUnit], destination: &[OrgUnit]) -> Vec<MappingEntry
 }
 
 /// Applies the operator's decisions over the automatic mapping. A choice for a
-/// unit that isn't in the list is ignored (the unit may have been deleted).
-pub fn apply_overrides(entries: &mut [MappingEntry], overrides: &HashMap<String, Override>) {
+/// unit that isn't in the list is ignored (the unit may have been deleted), and so is a choice of a destination that
+/// isn't in `destination` (deleted, or not visible to the signed-in user): that row goes back to the automatic match.
+pub fn apply_overrides(entries: &mut [MappingEntry], overrides: &HashMap<String, Override>, destination: &[OrgUnit]) {
     for entry in entries {
         match overrides.get(&entry.source_id) {
-            Some(Override::MapTo(dest)) => {
+            Some(Override::MapTo(dest)) if destination.iter().any(|u| &u.org_unit_id == dest) => {
                 entry.dest_id = Some(dest.clone());
                 entry.confidence = None;
                 entry.candidates.clear();
                 entry.excluded = false;
                 entry.manual = true;
             }
+            Some(Override::MapTo(_)) => {}
             Some(Override::Exclude) => {
                 entry.excluded = true;
                 entry.manual = true;
@@ -291,7 +293,7 @@ mod tests {
         let dest = vec![unit("100", "SO", ServiceOrg, None), unit("110", "Acme", Customer, Some("100")), unit("111", "HQ", Site, Some("110"))];
         let mut map = auto_map(&source, &dest);
         let overrides = HashMap::from([("12".to_string(), Override::MapTo("111".into()))]);
-        apply_overrides(&mut map, &overrides);
+        apply_overrides(&mut map, &overrides, &dest);
         assert_eq!(entry(&map, "11").dest_id, entry(&map, "12").dest_id);
         assert!(entry(&map, "12").manual && !entry(&map, "11").manual);
     }
@@ -302,9 +304,20 @@ mod tests {
         let dest = vec![unit("100", "SO", ServiceOrg, None), unit("110", "Acme", Customer, Some("100"))];
         let mut map = auto_map(&source, &dest);
         let overrides = HashMap::from([("10".to_string(), Override::Exclude), ("20".to_string(), Override::MapTo("110".into())), ("999".to_string(), Override::Exclude)]);
-        apply_overrides(&mut map, &overrides);
+        apply_overrides(&mut map, &overrides, &dest);
         assert_eq!(entry(&map, "10").status(), MappingStatus::Excluded);
         assert_eq!((entry(&map, "20").status(), entry(&map, "20").dest_id.as_deref()), (MappingStatus::Mapped, Some("110")));
+    }
+
+    #[test]
+    fn a_choice_of_a_destination_that_is_not_in_the_list_goes_back_to_the_automatic_match() {
+        let source = vec![unit("1", "SO", ServiceOrg, None), unit("10", "Acme", Customer, Some("1")), unit("20", "Globex", Customer, Some("1"))];
+        let dest = vec![unit("100", "SO", ServiceOrg, None), unit("110", "Acme", Customer, Some("100"))];
+        let mut map = auto_map(&source, &dest);
+        let overrides = HashMap::from([("10".to_string(), Override::MapTo("999".into())), ("20".to_string(), Override::MapTo("998".into()))]);
+        apply_overrides(&mut map, &overrides, &dest);
+        assert_eq!((entry(&map, "10").dest_id.as_deref(), entry(&map, "10").manual), (Some("110"), false), "the automatic match stands");
+        assert_eq!(entry(&map, "20").status(), MappingStatus::Unmatched, "and a unit with none is open to Create missing");
     }
 
     #[test]
@@ -318,7 +331,7 @@ mod tests {
         assert_eq!(target(None).as_deref(), Some("110"));
         assert!(destination_for(&map, Some("404"), None).is_none());
         let mut excluded = map.clone();
-        apply_overrides(&mut excluded, &HashMap::from([("11".to_string(), Override::Exclude)]));
+        apply_overrides(&mut excluded, &HashMap::from([("11".to_string(), Override::Exclude)]), &dest);
         assert_eq!(destination_for(&excluded, Some("10"), Some("11")).map(|e| e.status()), Some(MappingStatus::Excluded));
     }
 }

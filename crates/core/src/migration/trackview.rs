@@ -28,6 +28,33 @@ const NAMES_FOR: Duration = Duration::from_secs(600);
 const ACTION_WAIT: Duration = Duration::from_secs(120);
 /// Devices probed per request, longest-waiting first: each one is a script run on a device, one after another.
 pub(crate) const PROBE_BATCH: usize = 20;
+/// The tracker probes a device that is waiting for Ecoverse's data on its own, once it has been healthy this long (the agent
+/// needs a few minutes to provision, and nothing useful is on the device before that)...
+const AUTO_PROBE_AFTER_HEALTHY: chrono::Duration = chrono::Duration::minutes(10);
+/// ... at most this many per pass, since each can wait up to `ACTION_WAIT` for its device.
+pub(crate) const AUTO_PROBE_BATCH: usize = 3;
+/// The least time between two automatic Probes of one device, whatever the setting says.
+pub const AUTO_PROBE_MIN_MINUTES: u32 = 5;
+/// How a failed automatic Probe is written on the device's timeline, so it is retried after the interval, not on every pass.
+const AUTO_PROBE_FAILED: &str = "Automatic Probe failed";
+
+/// The devices the tracker should probe now: healthy, waiting for Ecoverse's data, healthy for a few minutes, and not
+/// probed (or failed to be) for `every`. The ones probed longest ago, or never, come first.
+pub fn due_for_probe(project: &Project, now: chrono::DateTime<chrono::Utc>, every: chrono::Duration) -> Vec<usize> {
+    let at = |text: &str| chrono::DateTime::parse_from_rfc3339(text).ok().map(|t| t.with_timezone(&chrono::Utc));
+    let mut due: Vec<(Option<chrono::DateTime<chrono::Utc>>, usize)> = project
+        .devices
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| project.waiting_for_ecoverse(d) && at(&d.entered_stage_at).is_some_and(|t| now - t >= AUTO_PROBE_AFTER_HEALTHY))
+        .filter_map(|(i, d)| {
+            let last = d.events.iter().rev().find(|e| e.kind == "status" || (e.kind == "note" && e.detail.starts_with(AUTO_PROBE_FAILED))).and_then(|e| at(&e.at));
+            last.is_none_or(|t| now - t >= every).then_some((last, i))
+        })
+        .collect();
+    due.sort();
+    due.into_iter().map(|(_, i)| i).take(AUTO_PROBE_BATCH).collect()
+}
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "TrackRow.ts"))]
@@ -51,6 +78,8 @@ pub struct TrackRow {
     pub ecoverse: Option<EcoState>,
     /// Healthy in N-central but not yet sending asset data to Ecoverse: registered, not fully working.
     pub waiting_for_ecoverse: bool,
+    /// Still waiting after two hours: healthy devices got their data in about an hour and a half.
+    pub ecoverse_overdue: bool,
 }
 
 /// The stage strip's groups: the stages read in nine.
@@ -158,6 +187,8 @@ pub struct TrackView {
     /// the commonest first, each with its first few devices.
     pub needs_you_total: usize,
     pub needs_you: Vec<NeedKind>,
+    /// Devices waiting for Ecoverse's data for longer than a healthy one needs (see `ecoverse_overdue`).
+    pub ecoverse_overdue: usize,
 }
 
 /// One reason devices need the person, with how many there are and a few of them to open.
@@ -237,6 +268,8 @@ pub struct DeviceDetail {
     /// Why Ecoverse doesn't show it, when it doesn't: where it was looked and what was found there.
     pub ecoverse_note: Option<String>,
     pub waiting_for_ecoverse: bool,
+    /// Still waiting after two hours (see `Project::ecoverse_overdue`).
+    pub ecoverse_overdue: bool,
     /// What the device's own record says about its Ecoverse agent, from the last Probe. Only for a project whose
     /// destination is linked to Ecoverse; none when the device hasn't been probed.
     pub device_ufa: Option<DeviceUfa>,
@@ -384,6 +417,7 @@ pub fn track_view(project: &Project, source_names: &HashMap<String, String>, des
             last_error: d.last_error.clone(),
             ecoverse: d.ecoverse,
             waiting_for_ecoverse: project.waiting_for_ecoverse(d),
+            ecoverse_overdue: project.ecoverse_overdue(d, chrono::Utc::now()),
         })
         .collect();
     let mut customers: Vec<String> = rows.iter().map(|r| r.customer.clone()).collect();
@@ -409,6 +443,7 @@ pub fn track_view(project: &Project, source_names: &HashMap<String, String>, des
         counts,
         needs_you_total: needs.len(),
         needs_you: need_kinds(&needs),
+        ecoverse_overdue: rows.iter().filter(|r| r.ecoverse_overdue).count(),
     }
 }
 
@@ -432,6 +467,7 @@ pub fn device_detail(project: &Project, index: usize, source_names: &HashMap<Str
         ecoverse: d.ecoverse,
         ecoverse_note: d.ecoverse_note.clone(),
         waiting_for_ecoverse: project.waiting_for_ecoverse(d),
+        ecoverse_overdue: project.ecoverse_overdue(d, chrono::Utc::now()),
         device_ufa: if project.dest_ecoverse == DestEcoverse::NotLinked { None } else { device_ufa(&d.events) },
         candidates: d.match_candidates.iter().map(|MatchCandidate { device_id, name }| DeviceCandidate { device_id: device_id.clone(), name: name.clone() }).collect(),
         actions: actions_for(d),
@@ -574,6 +610,26 @@ impl Core {
         let (_, report) = self.migration_poll_saved(id, instance, &self.migration_settings().thresholds()).await?;
         Ok(digest(&report, &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)))
     }
+
+    /// Probes, for the tracker, the few devices that are due (see `due_for_probe`), saving after each, and says how many it
+    /// tried. A device that can't be reached gets a note on its timeline and is tried again after `every`, not on the
+    /// next pass. Does nothing, and doesn't even save, when none is due.
+    pub async fn migration_probe_due(&self, id: &str, instance: &str, every: chrono::Duration) -> Result<usize, String> {
+        use crate::migration::packager::Operation;
+        let mut project = self.migration_open_for_write(id, instance).await?;
+        let due = due_for_probe(&project, chrono::Utc::now(), every);
+        if due.is_empty() {
+            return Ok(0);
+        }
+        let package = Package::embedded()?;
+        for &index in &due {
+            if let Err(why) = self.migration_run_action(&mut project, index, Operation::Status, &package, ACTION_WAIT).await {
+                project.devices[index].record(chrono::Utc::now(), "note", &format!("{AUTO_PROBE_FAILED}: {why}"));
+            }
+            self.migration_save(&mut project).await?;
+        }
+        Ok(due.len())
+    }
 }
 
 #[cfg(test)]
@@ -703,6 +759,29 @@ mod tests {
             d.stage = *stage;
         }
         p
+    }
+
+    #[test]
+    fn a_healthy_device_still_waiting_for_ecoverse_after_two_hours_is_flagged_overdue() {
+        let mut p = with_stages(&[Stage::Healthy, Stage::Healthy, Stage::Healthy, Stage::Staged]);
+        p.dest_ecoverse = DestEcoverse::SameTenant; // linked: a healthy device that Ecoverse hasn't read is waiting
+        let now = chrono::Utc::now();
+        // One became healthy 3 hours ago, one 100 minutes ago (healthy devices took up to 94 minutes to get their data),
+        // one 3 hours ago but its data has arrived.
+        p.devices[0].entered_stage_at = crate::migration::project::stamp(now - chrono::Duration::hours(3));
+        p.devices[1].entered_stage_at = crate::migration::project::stamp(now - chrono::Duration::minutes(100));
+        p.devices[2].entered_stage_at = crate::migration::project::stamp(now - chrono::Duration::hours(3));
+        p.devices[2].ecoverse = Some(EcoState::Reporting);
+        p.devices[3].entered_stage_at = crate::migration::project::stamp(now - chrono::Duration::hours(3));
+        assert_eq!(p.devices.iter().map(|d| p.ecoverse_overdue(d, now)).collect::<Vec<_>>(), [true, false, false, false], "only a healthy device that is still waiting, and only after two hours");
+        let view = track_view(&p, &HashMap::new(), &HashMap::new(), &TrackQuery::all());
+        assert_eq!(view.rows.iter().map(|r| r.ecoverse_overdue).collect::<Vec<_>>(), [true, false, false, false]);
+        assert_eq!(view.ecoverse_overdue, 1);
+        assert!(device_detail(&p, 0, &HashMap::new(), &HashMap::new()).unwrap().ecoverse_overdue);
+        assert!(!device_detail(&p, 1, &HashMap::new(), &HashMap::new()).unwrap().ecoverse_overdue);
+        // Not linked to Ecoverse: nothing is waited for.
+        p.dest_ecoverse = DestEcoverse::NotLinked;
+        assert!(!p.ecoverse_overdue(&p.devices[0], now));
     }
 
     #[test]

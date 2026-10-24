@@ -7,22 +7,22 @@ export function RuleBuilder({ rule, onChange }: { rule: Rule; onChange: (rule: R
     onChange({ ...rule, conditions: rule.conditions.map((c, j) => (j === i ? { ...c, ...patch } : c)) });
 
   return (
-    <div className="space-y-2">
-      <div className="flex items-center gap-2 text-sm text-muted">
-        Match
-        <select className={`${selectClass} w-auto`} value={rule.match} onChange={(e) => onChange({ ...rule, match: e.target.value as Rule["match"] })}>
+    <div className="space-y-2.5">
+      <div className="flex flex-wrap items-center gap-2 text-sm">
+        Devices that match
+        <select className={`${selectClass} w-auto`} value={rule.match} aria-label="Match" onChange={(e) => onChange({ ...rule, match: e.target.value as Rule["match"] })}>
           <option value="all">all</option>
           <option value="any">any</option>
         </select>
-        of these conditions
+        of these
       </div>
 
       {rule.conditions.map((c, i) => {
         const fieldDef = RULE_FIELDS.find((f) => f.field === c.field)!;
         return (
-          <div key={i} className="flex items-center gap-2">
+          <div key={i} className="flex flex-wrap items-center gap-2">
             <select
-              className={`${selectClass} w-40 shrink-0`}
+              className={`${selectClass} min-w-36 flex-[1_1_140px]`}
               value={c.field}
               aria-label="Field"
               onChange={(e) => {
@@ -38,7 +38,7 @@ export function RuleBuilder({ rule, onChange }: { rule: Rule; onChange: (rule: R
               ))}
             </select>
             <select
-              className={`${selectClass} w-32 shrink-0`}
+              className={`${selectClass} min-w-28 flex-[0_1_120px]`}
               value={c.op}
               aria-label="Operator"
               onChange={(e) => setCondition(i, { op: e.target.value as RuleCondition["op"] })}
@@ -50,7 +50,7 @@ export function RuleBuilder({ rule, onChange }: { rule: Rule; onChange: (rule: R
               ))}
             </select>
             <input
-              className={inputClass}
+              className={`${inputClass} min-w-40 flex-[2_1_160px]`}
               value={c.value}
               aria-label="Value"
               placeholder={c.field === "tag" ? "Tag name" : c.field === "os" ? "Windows 11" : ""}
@@ -68,7 +68,12 @@ export function RuleBuilder({ rule, onChange }: { rule: Rule; onChange: (rule: R
         );
       })}
 
-      <Button variant="ghost" size="sm" onClick={() => onChange({ ...rule, conditions: [...rule.conditions, { field: "name", op: "contains", value: "" }] })}>
+      <Button
+        variant="ghost"
+        size="sm"
+        className="border border-dashed border-border-strong text-accent hover:text-accent-hover"
+        onClick={() => onChange({ ...rule, conditions: [...rule.conditions, { field: "name", op: "contains", value: "" }] })}
+      >
         <Plus />
         Add condition
       </Button>

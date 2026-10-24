@@ -5,6 +5,7 @@ import { parseOptions, sameOptions, toForm, type OptionsForm } from "./options";
 
 export const TRACKING = {
   pollSeconds: { low: 15, high: 900, label: "How often to read the devices", unit: "seconds", hint: "While a project is open. Shorter is faster to notice and heavier on the servers." },
+  autoProbeMinutes: { low: 0, high: 240, label: "Probe waiting devices every", unit: "minutes", hint: "Devices still waiting for Ecoverse's data are probed on their own, a few at a time, so the device sheet says why. Each probe is a script task in N-central's Job Status. 0 turns it off." },
   notPickedUpMinutes: { low: 5, high: 1440, label: "Not picked up after", unit: "minutes", hint: "A launched device that is connected but hasn't started." },
   stuckStagedMinutes: { low: 10, high: 2880, label: "Stuck staged after", unit: "minutes", hint: "Staged, but the old agent still checks in." },
   lostMinutes: { low: 30, high: 10080, label: "Lost after", unit: "minutes", hint: "The old agent is gone and nothing has appeared on the new server." },

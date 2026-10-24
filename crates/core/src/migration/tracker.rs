@@ -131,6 +131,12 @@ fn in_expected_place(device: &ProjectDevice, dest: &DestObservation) -> bool {
     }
 }
 
+/// The device is already on the destination and checking in there. A record left from an earlier move has an old check-in, so
+/// only a fresh one counts. Never for a reinstall, where the destination is the same record.
+fn alive_on_destination(obs: &Observation, ctx: &Context) -> bool {
+    !ctx.reinstall && obs.dest.as_ref().is_some_and(|d| d.checkin_age.is_some_and(|age| age <= ctx.thresholds.healthy_checkin))
+}
+
 /// Whether the old agent has stopped: the cleanup or install is under way (or done).
 fn agent_gone(device: &ProjectDevice, obs: &Observation, ctx: &Context) -> bool {
     let quiet = obs.source_checkin_age.is_some_and(|age| age > ctx.thresholds.agent_quiet);
@@ -168,6 +174,16 @@ fn next_step(device: &ProjectDevice, obs: &Observation, ctx: &Context) -> Option
             Some(LaunchOutcome::Failed(reason)) if device.stage == Stage::NotPickedUp => step(Stage::Launched, format!("the launch ended: {reason}")),
             Some(LaunchOutcome::Failed(reason)) => step(Stage::LaunchFailed, reason.clone()),
             Some(LaunchOutcome::Running) if device.stage == Stage::NotPickedUp => step(Stage::Launched, "the launch is running"),
+            // The launch's result can't be read (still pending, or its output isn't available), but the device is already on
+            // the destination and checking in there: it ran. Without this a device whose result is never read stays Launched
+            // for good while it has long since moved. The later stages follow in the same pass.
+            Some(LaunchOutcome::NoExecution) | Some(LaunchOutcome::Running) | None if alive_on_destination(obs, ctx) => {
+                if device.stage == Stage::NotPickedUp {
+                    step(Stage::Launched, "the device is already on the destination, so the launch ran")
+                } else {
+                    step(Stage::Staged, "the launch result could not be read, but the device is already on the destination and checking in there")
+                }
+            }
             // A queued launch for a device that's offline looks the same as a stalled one, so only a connected device is flagged.
             Some(LaunchOutcome::NoExecution) | None if device.stage == Stage::Launched && obs.source_connected == Some(true) && waited >= wait_for_pickup(t, obs) => {
                 step(Stage::NotPickedUp, pickup_reason(waited, obs))
@@ -358,6 +374,42 @@ mod tests {
         assert_eq!((steps[0].to, steps[0].why.as_str()), (Stage::LaunchFailed, "exit status 1004"));
         let running = Observation { launch: Some(LaunchOutcome::Running), ..Default::default() };
         assert!(advance(&d, &running, &ctx(&t)).is_empty());
+    }
+
+    #[test]
+    fn a_launch_whose_result_cannot_be_read_still_advances_once_the_device_is_alive_on_the_destination() {
+        let t = Thresholds::default();
+        let all = [Stage::Staged, Stage::AgentRemoved, Stage::Registered, Stage::Healthy];
+        for launch in [None, Some(LaunchOutcome::NoExecution), Some(LaunchOutcome::Running)] {
+            let d = device(Stage::Launched, 15, DeliveryPath::Rest);
+            let obs = Observation { launch, dest: Some(dest("111", Some(3))), ..Default::default() };
+            let steps = advance(&d, &obs, &ctx(&t));
+            assert!(steps[0].why.contains("could not be read"), "{}", steps[0].why);
+            assert_eq!(stages(steps), all);
+        }
+        // A device that was flagged as not picked up goes back to Launched first, then follows.
+        let d = device(Stage::NotPickedUp, 90, DeliveryPath::Ecoverse);
+        let obs = Observation { launch: Some(LaunchOutcome::NoExecution), dest: Some(dest("111", Some(3))), ..Default::default() };
+        assert_eq!(stages(advance(&d, &obs, &ctx(&t))), [Stage::Launched, Stage::Staged, Stage::AgentRemoved, Stage::Registered, Stage::Healthy]);
+    }
+
+    #[test]
+    fn a_record_left_from_an_earlier_move_a_failed_launch_or_a_reinstall_does_not_count_as_the_device_having_moved() {
+        let t = Thresholds::default();
+        let d = device(Stage::Launched, 15, DeliveryPath::Rest);
+        // The destination has a record of the same device from an earlier move, last seen three days ago: no evidence.
+        let stale = Observation { launch: Some(LaunchOutcome::NoExecution), dest: Some(dest("111", Some(3 * 24 * 60))), ..Default::default() };
+        assert!(advance(&d, &stale, &ctx(&t)).is_empty());
+        let never = Observation { launch: Some(LaunchOutcome::NoExecution), dest: Some(dest("111", None)), ..Default::default() };
+        assert!(advance(&d, &never, &ctx(&t)).is_empty());
+        // A launch that reported failure is still a failure.
+        let failed = Observation { launch: Some(LaunchOutcome::Failed("exit status 1004".into())), dest: Some(dest("111", Some(3))), ..Default::default() };
+        assert_eq!(stages(advance(&d, &failed, &ctx(&t))), [Stage::LaunchFailed]);
+        // A reinstall keeps the same record, so the destination proves nothing.
+        let mut reinstall = ctx(&t);
+        reinstall.reinstall = true;
+        let alive = Observation { launch: Some(LaunchOutcome::NoExecution), dest: Some(dest("111", Some(3))), ..Default::default() };
+        assert!(advance(&d, &alive, &reinstall).is_empty());
     }
 
     #[test]

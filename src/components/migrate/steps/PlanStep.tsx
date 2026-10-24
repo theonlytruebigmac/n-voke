@@ -1,24 +1,50 @@
 import { MoreHorizontal, RefreshCw } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { DeviceChoice, PlanAdded, PlanRow, PlanShow } from "../../../lib/migrate/bindings";
+import { chooseForDevice } from "../../../lib/migrate/api";
 import { BLOCKER_WORDS, rowNote } from "../../../lib/migrate/plan";
 import { usePlan, usePlanActions, useRereadPlan } from "../../../lib/migrate/queries";
 import { useDebounced } from "../../../lib/useDebounced";
-import { Button, ErrorNote, IconButton, Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger, Segmented, Status, Table, inputClass, selectClass } from "../../ui";
+import { Button, Card, ErrorNote, IconButton, Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger, Segmented, SelectionBar, Status, Table, inputClass } from "../../ui";
+import { BulkStatus, useBulk } from "../move/bulk";
+import { FilterPicker } from "../move/FilterPicker";
 import type { StepId } from "../parts/StepRail";
 
 const PAGE = 100;
-const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+const plural = (n: number, word: string) => `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
 const PATH_WORDS = { ecoverse: "Ecoverse", rest: "N-central" } as const;
+
+/** A device that has launched is past choosing. */
+const choosable = (r: PlanRow) => !r.stage || r.stage === "planned";
+
+/** What can be asked of many devices at once, and which of the ticked rows each applies to. */
+const BULK: { label: string; choice: DeviceChoice; applies: (r: PlanRow) => boolean }[] = [
+  { label: "Use Ecoverse", choice: { kind: "usePath", path: "ecoverse" }, applies: (r) => r.path !== "ecoverse" },
+  { label: "Use N-central", choice: { kind: "usePath", path: "rest" }, applies: (r) => r.path !== "rest" },
+  { label: "Suggested path", choice: { kind: "suggestedPath" }, applies: (r) => r.pathChosen },
+  { label: "Leave out", choice: { kind: "leaveOut" }, applies: (r) => !r.leftOutByChoice },
+  { label: "Include again", choice: { kind: "include" }, applies: (r) => r.leftOutByChoice },
+];
+
+function Stat({ value, label, tone = "" }: { value: number; label: string; tone?: string }) {
+  return (
+    <Card className="px-4 py-3">
+      <div className={`text-2xl font-bold tabular-nums ${tone}`}>{value.toLocaleString()}</div>
+      <div className="text-sm text-muted">{label}</div>
+    </Card>
+  );
+}
 
 /** The devices as the plan sees them, and adding the ready ones to the project (step 4 in docs/migration/11-gui-design.md). */
 export function PlanStep({ projectId, onGo }: { projectId: string; onGo: (step: StepId) => void }) {
   const { add, choose } = usePlanActions(projectId);
+  const bulk = useBulk(projectId);
   const [show, setShow] = useState<PlanShow>("all");
   const [customer, setCustomer] = useState<string | null>(null);
   const [text, setText] = useState("");
   const [offset, setOffset] = useState(0);
   const [added, setAdded] = useState<PlanAdded | null>(null);
+  const [ticked, setTicked] = useState<Set<string>>(new Set());
   const search = useDebounced(text.trim());
   const query = useMemo(() => ({ show, customer, text: search, offset, limit: PAGE }), [show, customer, search, offset]);
   const plan = usePlan(projectId, query);
@@ -26,7 +52,10 @@ export function PlanStep({ projectId, onGo }: { projectId: string; onGo: (step: 
 
   const view = plan.data;
   const rows = view?.rows ?? [];
-  const customers = view?.customers ?? [];
+  const customers = useMemo(() => (view?.customers ?? []).map((c) => ({ key: c, label: c })), [view?.customers]);
+  const choosableRows = rows.filter(choosable);
+  const tickedRows = choosableRows.filter((r) => ticked.has(r.deviceId));
+  const allTicked = choosableRows.length > 0 && tickedRows.length === choosableRows.length;
 
   const blockerFixes = view?.blockedBy ?? [];
   const readAgain = () => {
@@ -36,57 +65,92 @@ export function PlanStep({ projectId, onGo }: { projectId: string; onGo: (step: 
   const narrow = (change: () => void) => {
     change();
     setOffset(0);
+    setTicked(new Set());
+  };
+  const toggle = (id: string) =>
+    setTicked((cur) => {
+      const next = new Set(cur);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+  const runBulk = (b: (typeof BULK)[number]) => {
+    const targets = tickedRows.filter(b.applies);
+    void bulk
+      .run(
+        b.label,
+        targets,
+        (r) => r.name,
+        (r) => chooseForDevice(projectId, r.deviceId, b.choice),
+      )
+      .then(() => setTicked(new Set()));
   };
 
   return (
-    <div className="space-y-4 px-6 py-5">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-sm font-semibold">Plan</h2>
-        <div className="flex items-center gap-2">
-          <Button size="sm" onClick={readAgain} busy={reread.isPending}>
-            <RefreshCw />
-            Read servers again
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-end gap-3">
+        <Button onClick={readAgain} busy={reread.isPending}>
+          <RefreshCw />
+          Read servers again
+        </Button>
+        {view && view.readyNew === 0 ? (
+          // A greyed-out "Add to the project" read as if something were wrong; say what's true instead.
+          <span className="text-sm text-muted">Every ready device is in the project</span>
+        ) : (
+          <Button variant="primary" busy={add.isPending} disabled={!view} onClick={() => add.mutate(undefined, { onSuccess: (r) => setAdded(r) })}>
+            {view ? `Add ${plural(view.readyNew, "device")} to the project` : "Add to the project"}
           </Button>
-          <Button
-            variant="primary"
-            size="sm"
-            busy={add.isPending}
-            disabled={!view || view.readyNew === 0}
-            onClick={() => add.mutate(undefined, { onSuccess: (r) => setAdded(r) })}
-          >
-            {view && view.readyNew > 0 ? `Add ${plural(view.readyNew, "device")} to the project` : "Add to the project"}
-          </Button>
-        </div>
+        )}
       </div>
 
       {reread.isError && <ErrorNote>{String(reread.error)}</ErrorNote>}
       {plan.isError ? (
         <ErrorNote>{String(plan.error)}</ErrorNote>
       ) : !view ? (
-        <p className="text-sm text-muted">Reading both servers{" "}and Ecoverse. This takes a moment on a large server…</p>
+        <p className="text-sm text-muted">Reading both servers and Ecoverse. This takes a moment on a large server…</p>
       ) : (
         <>
-          <dl className="flex flex-wrap gap-x-6 gap-y-2 text-sm">
-            {(
-              [
-                [view.total, "devices", ""],
-                [view.readyNew, "ready", "text-ok"],
-                [view.blocked, "blocked", view.blocked ? "text-warn" : ""],
-                [view.leftOut, "left out", ""],
-                [view.inProject, "in the project", ""],
-              ] as [number, string, string][]
-            ).map(([n, label, tone]) => (
-              <div key={label}>
-                <dd className={`text-base font-semibold tabular-nums ${tone}`}>{n}</dd>
-                <dt className="text-xs text-muted">{label}</dt>
-              </div>
-            ))}
-          </dl>
-          {view.readyNew > 0 && (
-            <p className="text-xs text-muted">
-              Ready: {view.readyEcoverse} through Ecoverse, {view.readyRest} through N-central.
-            </p>
-          )}
+          <div className="flex flex-wrap items-stretch gap-4">
+            <div className="grid min-w-0 flex-[1_1_380px] grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-3">
+              <Stat value={view.total} label="devices on the source" />
+              <Card className="px-4 py-3">
+                <div className="text-2xl font-bold text-ok tabular-nums">{view.readyNew.toLocaleString()}</div>
+                <div className="text-sm text-muted">ready</div>
+                {view.readyNew > 0 && (
+                  <div className="text-xs text-faint">
+                    {view.readyEcoverse.toLocaleString()} through Ecoverse, {view.readyRest.toLocaleString()} through N-central
+                  </div>
+                )}
+              </Card>
+              <Stat value={view.blocked} label="blocked" tone={view.blocked ? "text-warn" : ""} />
+              <Stat value={view.leftOut} label="left out" tone="text-muted" />
+              <Stat value={view.inProject} label="in the project" />
+            </div>
+
+            {blockerFixes.length > 0 && (
+              <Card tone="warn" className="flex-[1_1_380px] px-4 py-3">
+                <h3 className="mb-1 font-semibold text-warn">{plural(view.blocked, "device")} blocked · by reason</h3>
+                <ul className="divide-y divide-warn/20">
+                  {blockerFixes.map(({ blocker, devices }) => {
+                    const words = BLOCKER_WORDS[blocker];
+                    return (
+                      <li key={blocker} className="flex flex-wrap items-center gap-x-3 gap-y-1.5 py-2">
+                        <span className="w-14 font-bold tabular-nums">{devices.toLocaleString()}</span>
+                        <span className="min-w-40 flex-1">
+                          {words.short}
+                          <span className="block text-xs text-faint">{words.text}</span>
+                        </span>
+                        {words.fix && (
+                          <Button size="sm" onClick={() => onGo(words.fix as StepId)}>
+                            Fix in {words.fix === "map" ? "Map" : "Prepare"}
+                          </Button>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </Card>
+            )}
+          </div>
 
           {view.warnings.map((w) => (
             <p key={w} className="text-xs text-warn">
@@ -97,11 +161,11 @@ export function PlanStep({ projectId, onGo }: { projectId: string; onGo: (step: 
           {add.isError && <ErrorNote>{String(add.error)}</ErrorNote>}
           {choose.isError && <ErrorNote>{String(choose.error)}</ErrorNote>}
           {added && (
-            <div className="flex items-center justify-between gap-3 rounded-lg border border-ok/40 bg-ok-soft px-3 py-2 text-sm">
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-ok/30 bg-ok-soft px-4 py-2.5 text-sm">
               <span>
                 Added {plural(added.added, "device")}
-                {added.alreadyIn > 0 && `, ${added.alreadyIn} were already in`}
-                {added.blocked > 0 && `. ${added.blocked} stay out until what blocks them is fixed`}.
+                {added.alreadyIn > 0 && `, ${added.alreadyIn.toLocaleString()} were already in`}
+                {added.blocked > 0 && `. ${added.blocked.toLocaleString()} stay out until what blocks them is fixed`}.
               </span>
               <Button size="sm" variant="primary" onClick={() => onGo("launch")}>
                 Continue to Launch
@@ -109,28 +173,7 @@ export function PlanStep({ projectId, onGo }: { projectId: string; onGo: (step: 
             </div>
           )}
 
-          {blockerFixes.length > 0 && (
-            <ul className="space-y-1 rounded-lg border border-border px-3 py-2">
-              {blockerFixes.map(({ blocker, devices }) => {
-                const words = BLOCKER_WORDS[blocker];
-                return (
-                  <li key={blocker} className="flex items-center justify-between gap-3 text-sm">
-                    <span>
-                      <span className="font-medium">{plural(devices, "device")}</span> · {words.short}
-                      <span className="block text-xs text-muted">{words.text}</span>
-                    </span>
-                    {words.fix && (
-                      <Button size="sm" onClick={() => onGo(words.fix as StepId)}>
-                        Fix in {words.fix === "map" ? "Map" : "Prepare"}
-                      </Button>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-
-          <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-2">
             <Segmented
               value={show}
               onChange={(v) => narrow(() => setShow(v))}
@@ -140,18 +183,24 @@ export function PlanStep({ projectId, onGo }: { projectId: string; onGo: (step: 
                 { value: "blocked", label: "Blocked" },
               ]}
             />
-            <div className="flex items-center gap-2">
-              <select className={`${selectClass} w-44`} value={customer ?? ""} onChange={(e) => narrow(() => setCustomer(e.target.value || null))} aria-label="Customer">
-                <option value="">All customers</option>
-                {customers.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
-              <input className={`${inputClass} w-44`} placeholder="Search" value={text} onChange={(e) => narrow(() => setText(e.target.value))} aria-label="Search devices" />
-            </div>
+            <FilterPicker label="Customer" anyLabel="All customers" options={customers} value={customer} onChange={(c) => narrow(() => setCustomer(c))} />
+            <input className={`${inputClass} max-w-64 flex-[1_1_180px]`} placeholder="Search devices" value={text} onChange={(e) => narrow(() => setText(e.target.value))} aria-label="Search devices" />
           </div>
+
+          {tickedRows.length > 0 && (
+            <SelectionBar count={tickedRows.length} onClear={() => setTicked(new Set())}>
+              {BULK.map((b) => {
+                const n = tickedRows.filter(b.applies).length;
+                return (
+                  <Button key={b.label} size="sm" disabled={n === 0 || bulk.busy} onClick={() => runBulk(b)} title={n < tickedRows.length ? `Applies to ${n} of the ticked devices` : undefined}>
+                    {b.label}
+                    {n > 0 && n < tickedRows.length && <span className="text-faint tabular-nums">{n}</span>}
+                  </Button>
+                );
+              })}
+            </SelectionBar>
+          )}
+          <BulkStatus state={bulk.state} onClear={bulk.clear} />
 
           {rows.length === 0 ? (
             <p className="text-sm text-muted">{view.total === 0 ? "The source server has no devices." : "No devices match."}</p>
@@ -160,6 +209,19 @@ export function PlanStep({ projectId, onGo }: { projectId: string; onGo: (step: 
               <Table
                 head={
                   <>
+                    <th className="w-9">
+                      <input
+                        type="checkbox"
+                        className="size-3.5 accent-accent"
+                        checked={allTicked}
+                        disabled={choosableRows.length === 0}
+                        ref={(el) => {
+                          if (el) el.indeterminate = tickedRows.length > 0 && !allTicked;
+                        }}
+                        onChange={() => setTicked(allTicked ? new Set() : new Set(choosableRows.map((r) => r.deviceId)))}
+                        aria-label="Tick every device on this page"
+                      />
+                    </th>
                     <th>Device</th>
                     <th>Customer → destination</th>
                     <th>Path</th>
@@ -169,19 +231,26 @@ export function PlanStep({ projectId, onGo }: { projectId: string; onGo: (step: 
                 }
               >
                 {rows.map((r) => (
-                  <PlanRowView key={r.deviceId} row={r} busy={choose.isPending} onChoose={(choice) => choose.mutate({ deviceId: r.deviceId, choice })} />
+                  <PlanRowView
+                    key={r.deviceId}
+                    row={r}
+                    ticked={ticked.has(r.deviceId)}
+                    onTick={() => toggle(r.deviceId)}
+                    busy={choose.isPending || bulk.busy}
+                    onChoose={(choice) => choose.mutate({ deviceId: r.deviceId, choice })}
+                  />
                 ))}
               </Table>
               <div className="flex items-center justify-between gap-3 text-xs text-muted">
-                <span>
-                  {view.offset + 1}–{view.offset + rows.length} of {view.matching}
+                <span className="tabular-nums">
+                  {(view.offset + 1).toLocaleString()}–{(view.offset + rows.length).toLocaleString()} of {view.matching.toLocaleString()}
                 </span>
                 {view.matching > PAGE && (
                   <span className="flex items-center gap-2">
-                    <Button size="sm" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE))}>
+                    <Button size="sm" disabled={offset === 0} onClick={() => (setOffset(Math.max(0, offset - PAGE)), setTicked(new Set()))}>
                       Previous
                     </Button>
-                    <Button size="sm" disabled={offset + PAGE >= view.matching} onClick={() => setOffset(offset + PAGE)}>
+                    <Button size="sm" disabled={offset + PAGE >= view.matching} onClick={() => (setOffset(offset + PAGE), setTicked(new Set()))}>
                       Next
                     </Button>
                   </span>
@@ -197,7 +266,7 @@ export function PlanStep({ projectId, onGo }: { projectId: string; onGo: (step: 
 
 /** What the person can say about one device. A device that has launched is past choosing. */
 function ChoiceMenu({ row, busy, onChoose }: { row: PlanRow; busy: boolean; onChoose: (choice: DeviceChoice) => void }) {
-  if (row.stage && row.stage !== "planned") return null;
+  if (!choosable(row)) return null;
   const items: { label: string; choice: DeviceChoice; danger?: boolean }[] = [];
   if (row.path !== "ecoverse") items.push({ label: "Use Ecoverse", choice: { kind: "usePath", path: "ecoverse" } });
   if (row.path !== "rest") items.push({ label: "Use N-central", choice: { kind: "usePath", path: "rest" } });
@@ -223,17 +292,22 @@ function ChoiceMenu({ row, busy, onChoose }: { row: PlanRow; busy: boolean; onCh
   );
 }
 
-function PlanRowView({ row, busy, onChoose }: { row: PlanRow; busy: boolean; onChoose: (choice: DeviceChoice) => void }) {
+function PlanRowView({ row, ticked, onTick, busy, onChoose }: { row: PlanRow; ticked: boolean; onTick: () => void; busy: boolean; onChoose: (choice: DeviceChoice) => void }) {
   const note = rowNote(row);
+  const route = `${row.customer}${row.site ? ` · ${row.site}` : ""} → ${row.destination ?? "–"}`;
   return (
-    <tr>
-      <td className="font-medium whitespace-nowrap">
-        {row.name}
-        {row.stage && <span className="ml-2 text-xs font-normal text-faint">in the project</span>}
+    <tr className={ticked ? "bg-accent-soft/60" : undefined}>
+      <td>{choosable(row) && <input type="checkbox" className="size-3.5 accent-accent" checked={ticked} onChange={onTick} aria-label={`Tick ${row.name}`} />}</td>
+      <td className="max-w-56 font-medium whitespace-nowrap">
+        <span className="flex items-center gap-2">
+          <span className="truncate" title={row.name}>
+            {row.name}
+          </span>
+          {row.stage && <span className="shrink-0 text-xs font-normal text-faint">in the project</span>}
+        </span>
       </td>
-      <td className="text-muted">
-        {row.customer}
-        {row.site ? ` · ${row.site}` : ""} → {row.destination ?? "–"}
+      <td className="max-w-0 truncate text-muted" title={route}>
+        {route}
       </td>
       <td className="whitespace-nowrap">
         {row.path ? PATH_WORDS[row.path] : <span className="text-faint">–</span>}

@@ -54,7 +54,7 @@ export function AgentDot({ status }: { status: string | undefined | null }) {
 
 export function TagKindIcon({ kind, className = "size-3.5" }: { kind: TagKind; className?: string }) {
   return kind === "DynamicTag" ? (
-    <Zap className={`${className} shrink-0 text-warn`} aria-label="Dynamic tag" />
+    <Zap className={`${className} shrink-0 text-accent`} aria-label="Dynamic tag" />
   ) : (
     <TagIcon className={`${className} shrink-0 text-muted`} aria-label="Static tag" />
   );

@@ -179,7 +179,7 @@ Describe 'Get-OneLine' {
 
 Describe 'Get-StatusSummary' {
     BeforeAll {
-        . ([scriptblock]::Create((Get-FunctionText $built @('Get-StatusSummary'))))
+        . ([scriptblock]::Create((Get-FunctionText $built @('Get-StatusSummary', 'Get-UfaNoDeviceLive'))))
         $Root = Join-Path ([IO.Path]::GetTempPath()) ('nvoke-test-' + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $Root | Out-Null
     }
@@ -198,6 +198,13 @@ Describe 'Get-StatusSummary' {
         @($parsed.history).Count | Should -Be 30
         $parsed.history[0].detail | Should -Be 'd16'
         $parsed.history[29].detail | Should -Be 'd45'
+    }
+    It 'adds what the components log says about the device record right now, whatever the saved status says' {
+        @{ schema = 1; stage = 'healthy'; ufa = @{ sync = 'synced' }; history = @(@{ at = 't1'; event = 'e'; detail = 'd' }) } | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $Root 'status.json')
+        $parsed = Get-StatusSummary | ConvertFrom-Json
+        $parsed.ufa.sync | Should -Be 'synced'
+        $parsed.ufaLive.active | Should -BeFalse
+        $parsed.ufaLive.errors | Should -Be 0
     }
 }
 
@@ -341,7 +348,8 @@ Describe 'Hide-RegistrationToken' {
 
 Describe 'Get-UfaSyncState' {
     BeforeAll {
-        . ([scriptblock]::Create((Get-FunctionText (Join-Path $here 'installAgent.ps1') @('Get-UfaSyncState', 'Test-UfaRepairDue', 'Test-UfaBlockedRestartDue', 'Test-UfaRedeployRestartDue', 'Get-UfaFolderActivity'))))
+        . ([scriptblock]::Create((Get-FunctionText (Join-Path $here 'installAgent.ps1') @('Get-UfaSyncState', 'Test-UfaRepairDue', 'Test-UfaBlockedRestartDue', 'Test-UfaRedeployRestartDue', 'Test-UfaRegistrationBroken', 'Test-UfaBrokenConfirmed', 'Get-UfaRemovalSummary', 'Get-UfaFolderActivity'))))
+        . ([scriptblock]::Create((Get-FunctionText $built @('Get-UfaNoDeviceLive'))))
         $auth = 'https://auth.example.invalid/oauth2/token'
         $timeout = "context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
         $lines = @{
@@ -391,6 +399,99 @@ Describe 'Get-UfaSyncState' {
     }
     It 'says synced when the component arrived and nothing failed' {
         (Get-State @($lines.Noise, $lines.Synced)).State | Should -Be 'synced'
+    }
+    Context 'a device the cloud has no record of (no GOAT NRI)' {
+        BeforeAll {
+            # 09:42, 09:52 and 10:02 at -04:00 are 13:42, 13:52 and 14:02 UTC.
+            $nri = @(
+                '[2026-10-22T09:42:47.164-04:00] ERROR (42): messaging::refreshDeviceInfo failed to get goat NRI',
+                '[2026-10-22T09:52:47.163-04:00] ERROR (42): messaging::refreshDeviceInfo failed to get goat NRI',
+                '[2026-10-22T10:02:47.165-04:00] ERROR (42): messaging::refreshDeviceInfo failed to get goat NRI')
+            $synced = @($lines.AuthOk, $lines.Synced)
+            function Get-StateWith($CoreLines, $ComponentLines, [string]$Now, [string]$SinceUtc = '2020-01-01T00:00:00Z') {
+                $coreFile = Join-Path ([IO.Path]::GetTempPath()) ('nvoke-core-' + [guid]::NewGuid().ToString('N') + '.log')
+                $componentFile = Join-Path ([IO.Path]::GetTempPath()) ('nvoke-comp-' + [guid]::NewGuid().ToString('N') + '.log')
+                try {
+                    Set-Content -Path $coreFile -Value $CoreLines -Encoding UTF8
+                    if ($null -ne $ComponentLines) { Set-Content -Path $componentFile -Value $ComponentLines -Encoding UTF8 }
+                    $utc = [Globalization.DateTimeStyles]::AdjustToUniversal
+                    Get-UfaSyncState $coreFile ([datetime]::Parse($SinceUtc, [Globalization.CultureInfo]::InvariantCulture, $utc)) $componentFile ([datetime]::Parse($Now, [Globalization.CultureInfo]::InvariantCulture, $utc))
+                } finally { Remove-Item $coreFile, $componentFile -Force -ErrorAction SilentlyContinue }
+            }
+        }
+        It 'outranks synced: the inventory component downloads and runs, but nothing it collects can be sent' {
+            $r = Get-StateWith $synced $nri '2026-10-22T14:05:00Z'
+            $r.State | Should -Be 'nodevice'
+            $r.FaultSince.ToString('HH:mm') | Should -Be '13:42'
+            $r.FaultLastAt.ToString('HH:mm') | Should -Be '14:02'
+        }
+        It 'needs two errors in the last 30 minutes, so one stray error or an old run of them is not a fault' {
+            # Nothing proves data is flowing here, so it is not "synced" either: the download of the inventory component alone proves nothing.
+            (Get-StateWith $synced $nri[0] '2026-10-22T14:05:00Z').State | Should -Be 'waiting'
+            (Get-StateWith $synced $nri '2026-10-22T14:40:00Z').State | Should -Be 'waiting'
+            (Get-StateWith $synced $nri '2026-10-22T14:25:00Z').State | Should -Be 'waiting' -Because 'only the 14:02 error is within 30 minutes of 14:25'
+            (Get-StateWith $synced $nri '2026-10-22T14:20:00Z').State | Should -Be 'nodevice' -Because '13:52 and 14:02 are within 30 minutes of 14:20'
+        }
+        It 'does not call the download of the inventory component data flowing when the components'' log can be read' {
+            (Get-StateWith $synced @('[2026-10-22T09:50:00.000-04:00] INFO (1): scheduler::Run job completed') '2026-10-22T14:05:00Z').State | Should -Be 'waiting'
+        }
+        It 'says synced when the device record arrived, and when the inventory was sent' {
+            $found = '[2026-10-22T09:58:00.000-04:00] INFO (9): configservice::updateDeviceConfig device GOAT NRI was found in config response [ nable:goat::node:abc ].'
+            $sent = '[2026-10-22T09:59:00.000-04:00] INFO (45): messaging::processMessages (configGUID=abc) sending 3 messages for typeURL: type.googleapis.com/Msp.Fusion.DeviceAsset'
+            (Get-StateWith @($synced + $found) @('[2026-10-22T09:50:00.000-04:00] INFO (1): scheduler::Run job completed') '2026-10-22T14:05:00Z').State | Should -Be 'synced'
+            (Get-StateWith $synced @($sent) '2026-10-22T14:05:00Z').State | Should -Be 'synced'
+            (Get-StateWith $synced @('[2026-10-22T09:59:00.000-04:00] INFO (45): messaging::processMessages (configGUID=abc) sending 3 messages for typeURL: type.googleapis.com/Msp.Fusion.Metric') '2026-10-22T14:05:00Z').State | Should -Be 'waiting' -Because 'only the inventory counts'
+        }
+        It 'ignores the errors from before the record arrived, so a device is not called faulty for 30 minutes after it got its record' {
+            $found = '[2026-10-22T09:58:00.000-04:00] INFO (9): configservice::updateDeviceConfig device GOAT NRI was found in config response [ nable:goat::node:abc ].'
+            # 13:42, 13:52 before the record (13:58 UTC); 14:02 after it.
+            (Get-StateWith @($synced + $found) $nri '2026-10-22T14:05:00Z').State | Should -Be 'synced'
+            (Get-StateWith $synced $nri '2026-10-22T14:05:00Z').State | Should -Be 'nodevice'
+        }
+        It 'ignores errors from before the install' {
+            (Get-StateWith $synced $nri '2026-10-22T14:05:00Z' '2026-10-22T14:00:00Z').State | Should -Not -Be 'nodevice'
+            (Get-StateWith $synced $nri '2026-10-22T14:05:00Z' '2026-10-22T13:00:00Z').State | Should -Be 'nodevice'
+        }
+        It 'reads as before when there is no component log' {
+            (Get-StateWith $synced $null '2026-10-22T14:05:00Z').State | Should -Be 'synced'
+        }
+        It 'asks for no restart and no repair, which were tried on such devices and changed nothing' {
+            $sync = Get-StateWith $synced $nri '2026-10-22T14:05:00Z'
+            Test-UfaRepairDue $sync ([datetime]'2026-10-22T20:00:00Z') $false 30 | Should -BeFalse
+            Test-UfaBlockedRestartDue $sync 0 ([datetime]'2026-10-22T14:05:00Z') 30 | Should -BeFalse
+        }
+        It 'is read by the launcher''s Status the same way once the record has arrived, so a Probe does not call it a fault either' {
+            $found = '[2026-10-22T09:58:00.000-04:00] INFO (9): configservice::updateDeviceConfig device GOAT NRI was found in config response [ nable:goat::node:abc ].'
+            $dir = Join-Path ([IO.Path]::GetTempPath()) ('nvoke-live-' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $dir | Out-Null
+            try {
+                Set-Content -Path (Join-Path $dir 'component.log') -Value $nri -Encoding UTF8
+                $now = [datetime]::Parse('2026-10-22T14:05:00Z', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal)
+                (Get-UfaNoDeviceLive (Join-Path $dir 'component.log') $now).active | Should -BeTrue
+                Set-Content -Path (Join-Path $dir 'msp-agent-core.log') -Value $found -Encoding UTF8
+                $live = Get-UfaNoDeviceLive (Join-Path $dir 'component.log') $now
+                $live.active | Should -BeFalse -Because 'only the 14:02 error is after the record'
+                $live.recordFoundAt | Should -Not -BeNullOrEmpty
+            } finally { Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+        It 'is read by the launcher''s Status by the same rule, so a Probe agrees with the watcher' {
+            $cases = @(
+                @{ Lines = $nri; Now = '2026-10-22T14:05:00Z' },
+                @{ Lines = $nri[0]; Now = '2026-10-22T14:05:00Z' },
+                @{ Lines = $nri; Now = '2026-10-22T14:40:00Z' },
+                @{ Lines = $nri; Now = '2026-10-22T14:25:00Z' },
+                @{ Lines = $nri; Now = '2026-10-22T14:20:00Z' })
+            foreach ($case in $cases) {
+                $comp = Join-Path ([IO.Path]::GetTempPath()) ('nvoke-comp-' + [guid]::NewGuid().ToString('N') + '.log')
+                try {
+                    Set-Content -Path $comp -Value $case.Lines -Encoding UTF8
+                    $now = [datetime]::Parse($case.Now, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal)
+                    $live = Get-UfaNoDeviceLive $comp $now
+                    $installer = (Get-StateWith $synced $case.Lines $case.Now).State -eq 'nodevice'
+                    $live.active | Should -Be $installer -Because "$($case.Now) with $(@($case.Lines).Count) error(s)"
+                } finally { Remove-Item $comp -Force -ErrorAction SilentlyContinue }
+            }
+        }
     }
     It 'says waiting when there is no fault and no component yet' {
         (Get-State @($lines.Noise)).State | Should -Be 'waiting'
@@ -509,6 +610,43 @@ Describe 'Get-UfaSyncState' {
         } finally { Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue }
         (Get-UfaFolderActivity (Join-Path ([IO.Path]::GetTempPath()) 'nvoke-no-such-folder') ([datetime]::MinValue)).Files | Should -Be 0
     }
+    It 'calls an Ecoverse agent broken only when it is registered, its program is gone and it has no service' {
+        Test-UfaRegistrationBroken $true $false $false | Should -BeTrue
+        Test-UfaRegistrationBroken $false $false $false | Should -BeFalse   # nothing registered: the Windows Agent installs a fresh one
+        Test-UfaRegistrationBroken $true $true $false | Should -BeFalse     # the program is there: a removal can run
+        Test-UfaRegistrationBroken $true $false $true | Should -BeFalse     # a service exists: it is running or starting
+        Test-UfaRegistrationBroken $true $true $true | Should -BeFalse
+    }
+    It 'reports a broken registration only once it has been seen on two runs some minutes apart' {
+        $first = [datetime]'2026-10-21T21:43:00Z'
+        Test-UfaBrokenConfirmed $true $first ([datetime]'2026-10-21T21:43:00Z') 10 | Should -BeFalse
+        Test-UfaBrokenConfirmed $true $first ([datetime]'2026-10-21T21:50:00Z') 10 | Should -BeFalse
+        Test-UfaBrokenConfirmed $true $first ([datetime]'2026-10-21T21:58:00Z') 10 | Should -BeTrue
+        Test-UfaBrokenConfirmed $false $first ([datetime]'2026-10-21T23:00:00Z') 10 | Should -BeFalse
+        Test-UfaBrokenConfirmed $true $null ([datetime]'2026-10-21T23:00:00Z') 10 | Should -BeFalse
+    }
+    It 'summarises what Windows Installer logged for the product: failures, the last MSI error and completed removals' {
+        $ev = { param($id, $t) [pscustomobject]@{ Id = $id; TimeCreated = [datetime]$t } }
+        # SUP-2190, 2026-10-21 (local times): the removal was cut short (1722), then failed with 1721 every time
+        $events = @(
+            (& $ev 11722 '2026-10-21T17:26:04'), (& $ev 11725 '2026-10-21T17:26:04'),
+            (& $ev 11721 '2026-10-21T17:29:04'), (& $ev 11725 '2026-10-21T17:29:04'),
+            (& $ev 11721 '2026-10-21T18:13:31'), (& $ev 11725 '2026-10-21T18:13:31')
+        )
+        $s = Get-UfaRemovalSummary $events
+        ($s.Failures, $s.LastErrorCode, $s.Completed) | Should -Be 3, 1721, 0
+        $s.LastFailureAt | Should -Not -BeNullOrEmpty
+        $none = Get-UfaRemovalSummary @()
+        ($none.Failures, $none.Completed) | Should -Be 0, 0
+        $none.LastErrorCode | Should -BeNullOrEmpty
+        (Get-UfaRemovalSummary @((& $ev 11724 '2026-10-21T14:24:36'))).Completed | Should -Be 1
+    }
+    It 'only reads: the detection never removes, restarts, stops or uninstalls anything' {
+        $path = Join-Path $here 'installAgent.ps1'
+        $text = Get-FunctionText $path @('Test-UfaRegistrationBroken', 'Test-UfaBrokenConfirmed', 'Get-UfaRemovalSummary', 'Get-UfaRemovalEvent', 'Get-UfaRegistration')
+        $text | Should -Not -Match 'Remove-Item|Remove-TreeSafely|Restart-|Stop-|Start-Process|msiexec|Invoke-WithTimeout|Set-ItemProperty|New-Item'
+        (Get-Content -Raw $path) | Should -Not -Match 'ufa-absent-restart|Test-UfaAbsentRestartDue'
+    }
     It 'says unknown when there is no log' {
         (Get-UfaSyncState (Join-Path ([IO.Path]::GetTempPath()) 'nvoke-no-such-core.log') ([datetime]::MinValue)).State | Should -Be 'unknown'
     }
@@ -561,8 +699,29 @@ Describe 'the installer' {
         $repair | Should -Not -Match 'Remove-Item|Remove-TreeSafely|Invoke-FullCleanup|Test-Path'
     }
 
+    It 'cleans only the legacy N-central agent: never the Ecoverse agent folders, and never its MSI, which only msp-agent-core.exe --uninstall removes' {
+        $text = Get-Content -Raw (Join-Path $here 'installAgent.ps1')
+        $folders = [regex]::Match($text, '(?s)\$CleanupFolders = @\((.*?)\r?\n\)').Groups[1].Value
+        $folders | Should -Match 'N-able Technologies'
+        $folders | Should -Match 'MspPlatform'
+        $folders | Should -Not -Match 'Msp Agent|MspAgent|MSPScriptExecution'
+        $products = [regex]::Match($text, '(?m)^\$CleanupProducts = (.*)$').Groups[1].Value
+        $products | Should -Match "'Windows Agent'"
+        $products | Should -Not -Match 'MSP Core Agent'
+        $text | Should -Match 'cleanup-ufa-leftover'
+    }
+
+    It 'waits for the Ecoverse agent''s own MSI removal to finish before it stops any process or deletes any folder, and never removes that product itself' {
+        $cleanup = Get-FunctionText (Join-Path $here 'installAgent.ps1') @('Invoke-FullCleanup')
+        $wait = $cleanup.IndexOf('cleanup-ufa-wait')
+        $wait | Should -BeGreaterThan 0
+        $wait | Should -BeLessThan $cleanup.IndexOf('Stop-Process')
+        $wait | Should -BeLessThan $cleanup.IndexOf('Remove-TreeSafely')
+        $cleanup | Should -Match "Get-UninstallEntry 'MSP Core Agent'"
+        $cleanup | Should -Not -Match 'msiexec.*MSP Core Agent|Invoke-WithTimeout[^\r\n]*MSP Core Agent'
+    }
+
     It 'is ASCII' {
-        $bytes = [IO.File]::ReadAllBytes((Join-Path $here 'installAgent.ps1'))
         ($bytes | Where-Object { $_ -gt 126 -or ($_ -lt 32 -and $_ -notin 9, 10, 13) }).Count | Should -Be 0
     }
 }
@@ -576,12 +735,15 @@ Describe 'the lab log summary probe (ufa-log-summary.ps1)' {
             '[2026-10-21T11:00:10.000-04:00] ERROR (184): auth::requestOauthToken unable to get jwt: Post "https://auth.example.invalid/oauth2/token": ' + $timeout
             '[2026-10-21T11:00:10.001-04:00] ERROR (184): auth::fetchJWTWithRetries error occurred when fetching jwt: Post "https://auth.example.invalid/oauth2/token": ' + $timeout
         )
-        function Invoke-Probe([string[]]$Lines) {
-            $log = Join-Path ([IO.Path]::GetTempPath()) ('nvoke-probe-' + [guid]::NewGuid().ToString('N') + '.log')
+        function Invoke-Probe([string[]]$Lines, [string[]]$ProbeArguments = @(), [string[]]$ComponentLines = $null) {
+            $dir = Join-Path ([IO.Path]::GetTempPath()) ('nvoke-probe-' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $dir | Out-Null
+            $log = Join-Path $dir 'msp-agent-core.log'
             try {
                 Set-Content -Path $log -Value $Lines -Encoding UTF8
-                (& $hostPath -NoProfile -ExecutionPolicy Bypass -File $probe -LogPath $log 2>&1 | Out-String)
-            } finally { Remove-Item $log -Force -ErrorAction SilentlyContinue }
+                if ($null -ne $ComponentLines) { Set-Content -Path (Join-Path $dir 'component.log') -Value $ComponentLines -Encoding UTF8 }
+                (& $hostPath -NoProfile -ExecutionPolicy Bypass -File $probe -LogPath $log -NoSystem -AsOfUtc '2026-10-21T15:30:00Z' @ProbeArguments 2>&1 | Out-String)
+            } finally { Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue }
         }
     }
 
@@ -596,13 +758,86 @@ Describe 'the lab log summary probe (ufa-log-summary.ps1)' {
         [System.Management.Automation.Language.Parser]::ParseFile($probe, [ref]$null, [ref]$errors) | Out-Null
         @($errors).Count | Should -Be 0
         $text = Invoke-Probe $blockedLog
-        $text | Should -Match 'STATE: blocked \('
+        $text | Should -Match 'STATE: blocked'
         $text | Should -Match 'failing since \d\d:\d\d:\d\d, last failure \d\d:\d\d:\d\d'
-        $text | Should -Match 'timeouts: 1'
+        $text | Should -Match 'RESULT\s+PROBLEM - Login'
+        $text | Should -Match 'timeouts 1'
     }
 
-    It 'says synced once the inventory component arrived after the failure' {
+    It 'says synced once the inventory component arrived after the failure, and finds no fault' {
         $synced = "[2026-10-21T12:00:00.000-04:00] INFO (21): components::Download Successfully downloaded 'cdn.example.invalid/components/generic-asset-interrogator/windows/v0.18.2/x.exe' to 'C:\x'"
-        (Invoke-Probe ($blockedLog + $synced)) | Should -Match 'STATE: synced \('
+        $text = Invoke-Probe ($blockedLog + $synced)
+        $text | Should -Match 'STATE: synced'
+        $text | Should -Match 'RESULT\s+NO FAULT FOUND'
+    }
+
+    It 'says nodevice, ahead of synced, when the components still cannot get a device record long after provisioning, and says a restart makes the agent ask again' {
+        $started = '[2026-10-21T07:00:00.000-04:00] INFO (31): main::run Msp Agent Service starting: PID = 1'
+        $synced = "[2026-10-21T11:00:00.000-04:00] INFO (21): components::Download Successfully downloaded 'cdn.example.invalid/components/generic-asset-interrogator/windows/v0.18.2/x.exe' to 'C:\x'"
+        $nri = @('[2026-10-21T11:10:00.000-04:00] ERROR (42): messaging::refreshDeviceInfo failed to get goat NRI', '[2026-10-21T11:20:00.000-04:00] ERROR (42): messaging::refreshDeviceInfo failed to get goat NRI')
+        $text = Invoke-Probe @($started, $synced) -ComponentLines $nri
+        $text | Should -Match 'STATE: nodevice'
+        $text | Should -Match '\[FAIL\] Device record'
+        $text | Should -Match '\[FAIL\] Data sent'
+        $text | Should -Match 'RESULT\s+PROBLEM - Device record'
+        $text | Should -Match 'restarting the MspAgent service makes it ask now'
+        $text | Should -Match 'healthy\s+devices got it after 86 to 94 minutes'
+    }
+
+    It 'calls the same thing in progress, not a fault, within 90 minutes of provisioning (a device just set up)' {
+        $provisioned = '[2026-10-21T11:00:00.000-04:00] INFO (9): coreprocessors::AgentIsProvisioned current product provisioning state: [ 3 ] [ Success ]'
+        $synced = "[2026-10-21T11:05:00.000-04:00] INFO (21): components::Download Successfully downloaded 'cdn.example.invalid/components/generic-asset-interrogator/windows/v0.18.2/x.exe' to 'C:\x'"
+        $nri = @('[2026-10-21T11:10:00.000-04:00] ERROR (42): messaging::refreshDeviceInfo failed to get goat NRI', '[2026-10-21T11:20:00.000-04:00] ERROR (42): messaging::refreshDeviceInfo failed to get goat NRI')
+        $text = Invoke-Probe @($provisioned, $synced) -ComponentLines $nri
+        $text | Should -Match 'STATE: nodevice'
+        $text | Should -Match '\[WARN\] Device record\s+not received yet'
+        $text | Should -Not -Match '\[FAIL\]'
+        $text | Should -Match 'RESULT\s+IN PROGRESS'
+        $text | Should -Match 'Run this check again in 30 minutes'
+    }
+
+    It 'keeps a failing component download visible even when another fault is the headline' {
+        $started = '[2026-10-21T07:00:00.000-04:00] INFO (31): main::run Msp Agent Service starting: PID = 1'
+        $deny = '[2026-10-21T11:00:00.000-04:00] ERROR (47): components::doRequestWithRetry received invalid status: ''403'''
+        $nri = @('[2026-10-21T11:10:00.000-04:00] ERROR (42): messaging::refreshDeviceInfo failed to get goat NRI', '[2026-10-21T11:20:00.000-04:00] ERROR (42): messaging::refreshDeviceInfo failed to get goat NRI')
+        $text = Invoke-Probe (@($started) + (@($deny) * 6)) -ComponentLines $nri
+        $text | Should -Match 'STATE: nodevice'
+        $text | Should -Match '\[FAIL\] Components\s+downloads are being REFUSED'
+        $text | Should -Match 'ALSO FAILING: Components'
+    }
+
+    It 'shows the device record arriving and the inventory leaving the device, the signs of a healthy agent' {
+        $log = @(
+            '[2026-10-21T08:00:00.000-04:00] INFO (9): coreprocessors::AgentIsProvisioned current product provisioning state: [ 3 ] [ Success ]',
+            '[2026-10-21T08:00:01.000-04:00] INFO (9): configservice::updateDeviceConfig no device GOAT NRI was found in config response. Removing from config.',
+            '[2026-10-21T09:34:00.000-04:00] INFO (9): configservice::updateDeviceConfig device GOAT NRI was found in config response [ nable:goat::node:abc ].')
+        $components = @(
+            '[2026-10-21T08:10:00.000-04:00] ERROR (42): messaging::refreshDeviceInfo failed to get goat NRI',
+            '[2026-10-21T09:35:00.000-04:00] INFO (45): messaging::processMessages (configGUID=abc) sending 3 messages for typeURL: type.googleapis.com/Msp.Fusion.DeviceAsset',
+            '[2026-10-21T09:36:00.000-04:00] ERROR (45): messaging::processMessages (configGUID=abc) failed to send 9 messages for typeURL: type.googleapis.com/Msp.Fusion.Metric: limit breached')
+        $text = Invoke-Probe $log -ComponentLines $components
+        $text | Should -Match '\[ ok \] Device record\s+received at 09:34:00, 1\.6 h after provisioning'
+        $text | Should -Match '\[ ok \] Data sent\s+the inventory \(DeviceAsset\) left the device 1 time'
+        $text | Should -Match '1 batch\(es\) were refused and re-queued'
+        $text | Should -Match 'the inventory \(DeviceAsset\) was sent for the first time'
+    }
+
+    It 'reads a folder from collect-logs.ps1 as it is laid out in the zip, taking the time of the collection from system.txt' {
+        $root = Join-Path ([IO.Path]::GetTempPath()) ('nvoke-collected-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path (Join-Path $root 'msp-agent/logs') -Force | Out-Null
+        try {
+            Set-Content -Path (Join-Path $root 'msp-agent/logs/msp-agent-core.log') -Value @('[2026-10-21T11:00:00.000-04:00] INFO (31): coreprocessors::AgentIsProvisioned current product provisioning state: [ 0 ] [ NotStarted ]', '[2026-10-21T11:04:00.000-04:00] INFO (9): coreprocessors::AgentIsProvisioned current product provisioning state: [ 3 ] [ Success ]') -Encoding UTF8
+            Set-Content -Path (Join-Path $root 'system.txt') -Value @('==== Collection', 'Collected at: 2026-10-21 11:30:00 -04:00 (UTC 2026-10-21 15:30:00)', 'Computer: SUP-9999    Run as: x', '') -Encoding UTF8
+            $text = (& $hostPath -NoProfile -File $probe -Collected $root 2>&1 | Out-String)
+            $text | Should -Match 'Ecoverse agent check - SUP-9999'
+            $text | Should -Match '\(from collected logs\)'
+            $text | Should -Match 'Provisioned\s+Success at 11:04:00, 4 min after the agent started'
+        } finally { Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'still reports, rather than stopping, when there is no log at all' {
+        $text = (& $hostPath -NoProfile -File $probe -NoSystem -LogPath (Join-Path ([IO.Path]::GetTempPath()) 'nvoke-no-such-dir/msp-agent-core.log') 2>&1 | Out-String)
+        $text | Should -Match 'RESULT\s+PROBLEM - Provisioned: there is no core log to read'
+        $text | Should -Match 'STATE: unknown'
     }
 }

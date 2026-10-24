@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import { Loader2 } from "lucide-react";
+import { Check, Loader2 } from "lucide-react";
 import { MAX_RESOLVED_DEVICES } from "../lib/api";
 import { tagMembersCached } from "../lib/collections";
 import { osMismatch, type Target } from "../lib/targets";
 import type { Asset, Script } from "../lib/types";
 import { AgentDot } from "./status";
-import { ErrorNote, SectionTitle, Table, Tooltip } from "./ui";
+import { Button, ErrorNote, Table, Tooltip } from "./ui";
 
 interface Resolved {
   asset: Asset;
@@ -13,26 +13,47 @@ interface Resolved {
   via: string[];
 }
 
+/** What the Run page needs to know about the device list, for its summary. */
+export interface DeviceSummary {
+  loading: boolean;
+  /** Devices the targets resolve to. */
+  total: number;
+  /** Devices that will run (ticked). */
+  included: number;
+  /** Ticked devices that are offline or whose OS may not suit the script. */
+  flagged: number;
+}
+
+/** Lists of this size or smaller start open; longer ones start as a count. */
+const OPEN_UP_TO = 20;
+
+const isOffline = (a: Asset) => !!a.agentConnection && a.agentConnection.status !== "CONNECTED";
+
 /**
- * The chosen targets resolved to one de-duplicated device table. Untick a row
- * to leave that device out; the parent receives the final list.
+ * The chosen targets resolved to one de-duplicated device list. Devices that need a look come first, grouped by
+ * reason, each group with Keep all / Leave all out; the rest fold into a "ready" count. Untick a row to leave that
+ * device out; the parent receives the final list.
  */
 export function TargetDevices({
   orgId,
   script,
   targets,
   onChange,
+  onSummary,
 }: {
   orgId: string;
   script: Script | null;
   targets: Target[];
   onChange: (devices: Asset[]) => void;
+  onSummary?: (summary: DeviceSummary) => void;
 }) {
   const [resolved, setResolved] = useState<Resolved[]>([]);
   const [truncated, setTruncated] = useState(false);
   const [excluded, setExcluded] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Groups the person opened or closed; the rest follow OPEN_UP_TO. */
+  const [shown, setShown] = useState<Record<string, boolean>>({});
   const key = targets.map((t) => (t.kind === "tag" ? `t${t.tag.id}` : `d${t.asset.id}`)).join(",");
 
   useEffect(() => {
@@ -77,106 +98,198 @@ export function TargetDevices({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, orgId]);
 
+  const groups = useMemo(() => {
+    const offline: Resolved[] = [];
+    const mismatch: Resolved[] = [];
+    const ready: Resolved[] = [];
+    for (const r of resolved) {
+      const off = isOffline(r.asset);
+      const os = !!osMismatch(script?.language, r.asset.operatingSystem?.name);
+      if (off) offline.push(r);
+      if (os) mismatch.push(r);
+      if (!off && !os) ready.push(r);
+    }
+    return { offline, mismatch, ready };
+  }, [resolved, script?.language]);
+
   const included = useMemo(() => resolved.filter((r) => !excluded.has(r.asset.id)), [resolved, excluded]);
   // While the list is out of date (loading, or failed) nothing may be run: the
   // last good list belongs to the previous targets.
   useEffect(() => onChange(loading || error ? [] : included.map((r) => r.asset)), [included, loading, error, onChange]);
 
-  // The "From" column only says something when tags are involved.
-  const showSource = targets.some((t) => t.kind === "tag");
-  const offline = included.filter((r) => r.asset.agentConnection && r.asset.agentConnection.status !== "CONNECTED").length;
-  // `excluded` can still hold devices whose target was removed; count only the listed ones.
-  const excludedCount = resolved.length - included.length;
-  const allChecked = resolved.length > 0 && excludedCount === 0;
+  const flaggedIncluded = included.filter((r) => isOffline(r.asset) || !!osMismatch(script?.language, r.asset.operatingSystem?.name)).length;
+  useEffect(
+    () => onSummary?.({ loading, total: resolved.length, included: included.length, flagged: flaggedIncluded }),
+    [onSummary, loading, resolved.length, included.length, flaggedIncluded],
+  );
 
-  const toggle = (id: string) =>
+  const setMany = (ids: string[], leaveOut: boolean) =>
     setExcluded((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      for (const id of ids) {
+        if (leaveOut) next.add(id);
+        else next.delete(id);
+      }
       return next;
     });
+  const toggle = (id: string) => setMany([id], !excluded.has(id));
+  const isShown = (group: string, size: number) => shown[group] ?? size <= OPEN_UP_TO;
+  const flip = (group: string, size: number) => setShown((s) => ({ ...s, [group]: !isShown(group, size) }));
 
   if (!targets.length) return null;
   if (error) return <ErrorNote>{error}</ErrorNote>;
+  if (loading && !resolved.length)
+    return (
+      <p className="flex items-center gap-2 text-sm text-muted">
+        <Loader2 className="size-3.5 animate-spin" />
+        Reading the devices…
+      </p>
+    );
+  if (!resolved.length) return <p className="text-sm text-faint">No devices in these tags.</p>;
+
+  const showSource = targets.some((t) => t.kind === "tag");
+  const language = script?.language?.toLowerCase();
+  const table = (rows: Resolved[]) => <DeviceTable rows={rows} excluded={excluded} onToggle={toggle} onSetAll={setMany} showSource={showSource} script={script} />;
+
+  const flagGroups = [
+    { id: "offline", rows: groups.offline, label: "Offline", detail: "Their agent isn't connected right now." },
+    {
+      id: "mismatch",
+      rows: groups.mismatch,
+      label: "Operating system may not suit the script",
+      detail: language ? `This is a ${language} script.` : undefined,
+    },
+  ].filter((g) => g.rows.length > 0);
 
   return (
-    <section className="space-y-2">
-      <SectionTitle
-        actions={
-          <span className="text-xs text-muted">
-            {loading ? (
-              <Loader2 className="size-3.5 animate-spin" />
-            ) : (
-              <>
-                {offline > 0 && <span className="text-warn">{offline} offline · </span>}
-                {included.length} of {resolved.length} selected
-              </>
-            )}
-          </span>
-        }
-      >
-        Devices
-      </SectionTitle>
-
+    <div className="space-y-3">
       {truncated && <p className="text-xs text-warn">Only the first {MAX_RESOLVED_DEVICES} devices of a tag are included.</p>}
-      {!loading && resolved.length === 0 ? (
-        <p className="py-6 text-center text-sm text-faint">No devices in these tags.</p>
-      ) : (
-        <Table
-          head={
-            <>
-              <th className="w-9">
-                <input
-                  type="checkbox"
-                  className="size-3.5 accent-accent"
-                  checked={allChecked}
-                  ref={(el) => {
-                    if (el) el.indeterminate = excludedCount > 0 && excludedCount < resolved.length;
-                  }}
-                  onChange={() => setExcluded(allChecked ? new Set(resolved.map((r) => r.asset.id)) : new Set())}
-                  aria-label="Select all"
-                />
-              </th>
-              <th>Device</th>
-              <th>Location</th>
-              {showSource && <th>From</th>}
-            </>
-          }
-        >
-          {resolved.map((r) => {
-            const isExcluded = excluded.has(r.asset.id);
-            const mismatch = osMismatch(script?.language, r.asset.operatingSystem?.name);
+
+      {flagGroups.length > 0 && (
+        <div className="divide-y divide-warn/20 rounded-xl border border-warn/30 bg-warn-soft/40">
+          {flagGroups.map((g) => {
+            const ids = g.rows.map((r) => r.asset.id);
+            const out = ids.filter((id) => excluded.has(id)).length;
+            const open = isShown(g.id, g.rows.length);
             return (
-              <tr key={r.asset.id} onClick={() => toggle(r.asset.id)} className={`cursor-default hover:bg-surface-2/60 ${isExcluded ? "text-faint" : ""}`}>
-                <td>
-                  <input
-                    type="checkbox"
-                    className="size-3.5 accent-accent"
-                    checked={!isExcluded}
-                    onChange={() => toggle(r.asset.id)}
-                    onClick={(e) => e.stopPropagation()}
-                    aria-label={`Include ${r.asset.name}`}
-                  />
-                </td>
-                <td>
-                  <div className="flex items-center gap-2">
-                    <AgentDot status={r.asset.agentConnection?.status} />
-                    <span className="truncate font-medium">{r.asset.name}</span>
-                    {mismatch && (
-                      <Tooltip content={`${r.asset.operatingSystem?.name}: may not support ${script?.language?.toLowerCase()} scripts`}>
-                        <span className="text-xs text-warn">OS</span>
-                      </Tooltip>
-                    )}
+              <div key={g.id} className="space-y-3 px-4 py-3">
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                  <span className="w-12 text-base font-bold tabular-nums">{g.rows.length}</span>
+                  <div className="min-w-40 flex-1">
+                    <div>{g.label}</div>
+                    <div className="text-xs text-faint">
+                      {g.detail}
+                      {out > 0 && <span className="text-muted"> {out === ids.length ? "All left out." : `${out} left out.`}</span>}
+                    </div>
                   </div>
-                </td>
-                <td className="max-w-0 truncate text-muted">{[r.asset.customer?.name, r.asset.site?.name].filter(Boolean).join(" · ")}</td>
-                {showSource && <td className="max-w-0 truncate text-muted">{r.via.map((v) => (v === "Picked" ? "Added directly" : v)).join(", ")}</td>}
-              </tr>
+                  <div className="flex flex-wrap gap-1.5">
+                    <Button size="sm" variant="ghost" onClick={() => flip(g.id, g.rows.length)} aria-expanded={open}>
+                      {open ? "Hide" : "Show"}
+                    </Button>
+                    <Button size="sm" onClick={() => setMany(ids, false)} disabled={out === 0}>
+                      Keep all
+                    </Button>
+                    <Button size="sm" onClick={() => setMany(ids, true)} disabled={out === ids.length}>
+                      Leave all out
+                    </Button>
+                  </div>
+                </div>
+                {open && table(g.rows)}
+              </div>
             );
           })}
-        </Table>
+        </div>
       )}
-    </section>
+
+      {groups.ready.length > 0 && (
+        <div className="space-y-3 rounded-xl border border-border px-4 py-3">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+            <Check className="size-4 text-ok" />
+            <span className="flex-1 font-medium">
+              {groups.ready.length} ready
+              {loading && <Loader2 className="ml-2 inline size-3.5 animate-spin text-muted" />}
+            </span>
+            <Button size="sm" variant="ghost" onClick={() => flip("ready", groups.ready.length)} aria-expanded={isShown("ready", groups.ready.length)}>
+              {isShown("ready", groups.ready.length) ? "Hide" : "Show"}
+            </Button>
+          </div>
+          {isShown("ready", groups.ready.length) && table(groups.ready)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DeviceTable({
+  rows,
+  excluded,
+  onToggle,
+  onSetAll,
+  showSource,
+  script,
+}: {
+  rows: Resolved[];
+  excluded: Set<string>;
+  onToggle: (id: string) => void;
+  onSetAll: (ids: string[], leaveOut: boolean) => void;
+  showSource: boolean;
+  script: Script | null;
+}) {
+  const ids = rows.map((r) => r.asset.id);
+  const out = ids.filter((id) => excluded.has(id)).length;
+  return (
+    <Table
+      head={
+        <>
+          <th className="w-9">
+            <input
+              type="checkbox"
+              className="size-3.5 accent-accent"
+              checked={out === 0}
+              ref={(el) => {
+                if (el) el.indeterminate = out > 0 && out < ids.length;
+              }}
+              onChange={() => onSetAll(ids, out === 0)}
+              aria-label="Select all"
+            />
+          </th>
+          <th>Device</th>
+          <th>Location</th>
+          {showSource && <th>From</th>}
+        </>
+      }
+    >
+      {rows.map((r) => {
+        const isExcluded = excluded.has(r.asset.id);
+        const mismatch = osMismatch(script?.language, r.asset.operatingSystem?.name);
+        return (
+          <tr key={r.asset.id} onClick={() => onToggle(r.asset.id)} className={`cursor-default hover:bg-surface-2/60 ${isExcluded ? "text-faint" : ""}`}>
+            <td>
+              <input
+                type="checkbox"
+                className="size-3.5 accent-accent"
+                checked={!isExcluded}
+                onChange={() => onToggle(r.asset.id)}
+                onClick={(e) => e.stopPropagation()}
+                aria-label={`Include ${r.asset.name}`}
+              />
+            </td>
+            <td>
+              <div className="flex items-center gap-2 whitespace-nowrap">
+                <AgentDot status={r.asset.agentConnection?.status} />
+                <span className="truncate font-medium">{r.asset.name}</span>
+                {mismatch && (
+                  <Tooltip content={`${r.asset.operatingSystem?.name}: may not support ${script?.language?.toLowerCase()} scripts`}>
+                    <span className="text-xs text-warn">{r.asset.operatingSystem?.name ?? "OS"}</span>
+                  </Tooltip>
+                )}
+              </div>
+            </td>
+            <td className="max-w-0 truncate text-muted">{[r.asset.customer?.name, r.asset.site?.name].filter(Boolean).join(" · ")}</td>
+            {showSource && <td className="max-w-0 truncate text-muted">{r.via.map((v) => (v === "Picked" ? "Added directly" : v)).join(", ")}</td>}
+          </tr>
+        );
+      })}
+    </Table>
   );
 }

@@ -21,4 +21,8 @@ counts: Array<GroupCount>,
  * How many devices need the person in all, and what for: one entry per reason (a stage, or a match to choose),
  * the commonest first, each with its first few devices.
  */
-needsYouTotal: number, needsYou: Array<NeedKind>, };
+needsYouTotal: number, needsYou: Array<NeedKind>, 
+/**
+ * Devices waiting for Ecoverse's data for longer than a healthy one needs (see `ecoverse_overdue`).
+ */
+ecoverseOverdue: number, };

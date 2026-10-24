@@ -2,7 +2,7 @@
 @import "@fontsource-variable/inter";
 
 /* Semantic tokens. Components use these (bg-surface, text-muted, ...) rather
-   than raw palette colors so light and dark stay consistent. */
+   than raw palette colors, so the palette lives in one place. */
 @theme inline {
   --font-sans: "Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
@@ -30,6 +30,8 @@
   --color-accent: var(--accent);
   --color-accent-hover: var(--accent-hover);
   --color-accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+  --color-accent-fill: var(--accent-fill);
+  --color-accent-fill-hover: var(--accent-fill-hover);
   --color-on-accent: var(--on-accent);
   --color-ok: var(--ok);
   --color-ok-soft: color-mix(in srgb, var(--ok) 13%, transparent);
@@ -54,46 +56,29 @@
   }
 }
 
+/* The app is dark only. Violet comes from the logo. `accent` is the light violet
+   for text, borders and marks; `accent-fill` is the deep violet behind white
+   text (primary buttons, the current step), which the light one is too pale for. */
 :root {
-  color-scheme: light;
-  --bg: #fbfbfc;
-  --sidebar: #f4f5f7;
-  --surface: #ffffff;
-  --surface-2: #f3f4f6;
-  --surface-3: #eaecef;
-  --border: #e4e6ea;
-  --border-strong: #d3d7dd;
-  --text: #16181d;
-  --muted: #5b626e;
-  --faint: #8b929d;
-  --accent: #3b5bdb;
-  --accent-hover: #3250c8;
+  color-scheme: dark;
+  --bg: #0e0f14;
+  --sidebar: #0a0b0f;
+  --surface: #13141b;
+  --surface-2: #1a1c25;
+  --surface-3: #1f2030;
+  --border: #1f212b;
+  --border-strong: #2a2d3a;
+  --text: #ecedf2;
+  --muted: #a3a7b5;
+  --faint: #8a8fa0;
+  --accent: #a99bff;
+  --accent-hover: #c7bdff;
+  --accent-fill: #6552e0;
+  --accent-fill-hover: #7462ea;
   --on-accent: #ffffff;
-  --ok: #1a7f37;
-  --warn: #9a6700;
-  --err: #cf222e;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    color-scheme: dark;
-    --bg: #0d0f12;
-    --sidebar: #0a0c0e;
-    --surface: #13161a;
-    --surface-2: #181c21;
-    --surface-3: #1f242b;
-    --border: #22272e;
-    --border-strong: #2f353e;
-    --text: #e4e7eb;
-    --muted: #979ea9;
-    --faint: #626a76;
-    --accent: #5e7bf7;
-    --accent-hover: #7189fa;
-    --on-accent: #ffffff;
-    --ok: #3fb950;
-    --warn: #d29922;
-    --err: #f85149;
-  }
+  --ok: #4ade80;
+  --warn: #fbbf24;
+  --err: #f87171;
 }
 
 /* Base rules live in the base layer so Tailwind utilities (e.g. outline-none) can override them. */
@@ -141,6 +126,39 @@
   :focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 1px;
+  }
+
+  /* Checkboxes are drawn here rather than by the system: WebKitGTK (Linux) draws its own tick off-centre and clips
+     it at small sizes, and ignores accent-color. Width and height come from the size-* class where one is given. */
+  input[type="checkbox"] {
+    appearance: none;
+    -webkit-appearance: none;
+    flex-shrink: 0;
+    width: 14px;
+    height: 14px;
+    margin: 0;
+    border: 1.5px solid var(--border-strong);
+    border-radius: 4px;
+    background: var(--bg) center / 10px 10px no-repeat;
+    vertical-align: middle;
+    cursor: default;
+  }
+  input[type="checkbox"]:hover {
+    border-color: var(--faint);
+  }
+  input[type="checkbox"]:checked,
+  input[type="checkbox"]:indeterminate {
+    border-color: var(--accent-fill);
+    background-color: var(--accent-fill);
+  }
+  input[type="checkbox"]:checked {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m3.5 8.5 3 3 6-7'/%3E%3C/svg%3E");
+  }
+  input[type="checkbox"]:indeterminate {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='white' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='M4 8h8'/%3E%3C/svg%3E");
+  }
+  input[type="checkbox"]:disabled {
+    opacity: 0.4;
   }
 
   ::selection {

@@ -85,9 +85,9 @@ export const ECO_WORDS: Record<EcoState | "unread", EcoWords> = {
   waitingForData: {
     short: "Waiting for Ecoverse data",
     tone: "warn",
-    long: "Registered with Ecoverse and shown there, but no asset data has arrived yet. Until it does the device isn't fully working: its name, serial number and addresses are unknown and scripts can't run on it. This commonly takes 20 to 60 minutes. If the agent's first attempt to fetch its setup fails, it tries again at its next hourly check, so it can take up to about an hour and a half.",
+    long: "Registered with Ecoverse and shown there, but no asset data has arrived yet. Until it does the device isn't fully working: its name, serial number and addresses are unknown and scripts can't run on it. This commonly takes about an hour and a half (86 to 94 minutes on healthy test devices), because the agent only learns that Ecoverse has created its device record at its next hourly check. If it is still missing after about 2 hours, something is wrong: open the device and Probe it.",
   },
-  notSeen: { short: "Not in Ecoverse yet", tone: "warn", long: "The new Ecoverse agent is still setting up, and the device isn't in the destination's Ecoverse yet. This commonly takes 20 to 60 minutes and doesn't block the move. If its first attempt fails it tries again at its next hourly check, so it can take up to about an hour and a half." },
+  notSeen: { short: "Not in Ecoverse yet", tone: "warn", long: "The new Ecoverse agent is still setting up, and the device isn't in the destination's Ecoverse yet. This commonly takes about 10 minutes and doesn't block the move. If its first attempt fails it tries again at its next hourly check, so it can take up to about an hour and a half before the device's data follows." },
   notLinked: {
     short: "Ecoverse not checked",
     tone: "muted",
@@ -98,6 +98,13 @@ export const ECO_WORDS: Record<EcoState | "unread", EcoWords> = {
 
 export const ecoWords = (state: EcoState | null): EcoWords => ECO_WORDS[state ?? "unread"];
 
+/** A healthy device that has waited longer than a healthy one needs (two hours; healthy test devices got theirs in about an hour and a half). */
+export const ECO_OVERDUE: EcoWords = {
+  short: "Ecoverse data overdue",
+  tone: "warn",
+  long: "This device has waited more than 2 hours for Ecoverse's data. Healthy test devices got theirs in about an hour and a half, so something may be wrong. Probe it: the card below says what its Ecoverse agent reports (for example a device record that never arrives, a refused login or refused downloads).",
+};
+
 /**
  * What the Ecoverse agent itself is doing on the device, from the installer's watcher (see
  * docs/migration/05-endpoint-scripts.md, "UFA sync watchdog"). It is the device's own account, as of the last Probe,
@@ -107,7 +114,7 @@ export const ecoWords = (state: EcoState | null): EcoWords => ECO_WORDS[state ??
 export const UFA_WORDS: Record<UfaState, EcoWords> = {
   notInstalled: { short: "Not installed yet", tone: "muted", long: "The Windows Agent installs the Ecoverse agent a few minutes after itself." },
   notProvisioned: { short: "Setting up", tone: "accent", long: "The Ecoverse agent is installed and registering with the destination." },
-  waiting: { short: "Waiting for data", tone: "accent", long: "The Ecoverse agent is running and no problem was seen. Its data usually arrives within an hour of the install." },
+  waiting: { short: "Waiting for data", tone: "accent", long: "The Ecoverse agent is running and no problem was seen. Its data usually arrives about an hour and a half after the agent is set up: Ecoverse creates the device record some time after it registers, and the agent only asks for it hourly." },
   synced: { short: "Sending data", tone: "ok", long: "The Ecoverse agent received its components and is sending the device's data." },
   stalled: {
     short: "Needs a restart",
@@ -129,19 +136,34 @@ export const UFA_WORDS: Record<UfaState, EcoWords> = {
     tone: "err",
     long: "The agent can log in, but the cloud refuses its component downloads (403). A restart doesn't help. The installer does a one-time repair after 30 minutes.",
   },
+  noDeviceRecord: {
+    short: "Waiting for a device record",
+    tone: "warn",
+    long: "The Ecoverse agent logs in and its components run, but the cloud has not given it a device record yet (the components log \"failed to get goat NRI\"), so nothing they collect can be sent and Ecoverse shows the device with no data. Ecoverse creates the record some time after the agent registers, and the agent asks for it only at provisioning and then at its hourly update check, so on healthy test devices it took about an hour and a half (86 to 94 minutes). Restarting the agent makes it ask at once, which helps only if the record already exists. If it is still missing after about 2 hours it is a fault that has to be fixed on the Ecoverse side: check that the customer or site the device registered under exists in the destination's Ecoverse tenant and is linked to N-central, and that other devices there show data. If they look right, send N-able the agent's logs (collect-logs.ps1 gathers them).",
+  },
+  broken: {
+    short: "Registered but broken",
+    tone: "err",
+    long: "The Ecoverse agent is registered on the device, but its program is missing and it has no service. The Windows Agent can then only try to remove it, which needs that program, and never installs a new one. The installer can't fix this. Remove the registration (or restore the agent's program and remove it properly), then restart the Windows Agent services. The troubleshooting guide has the steps.",
+  },
   unknown: { short: "No agent log", tone: "muted", long: "The device has no log from the Ecoverse agent to read yet." },
 };
 
 /** The words for the agent's state; after the one-time repair, a missing agent is being put back, not just late. */
-export function ufaWords(ufa: Pick<DeviceUfa, "state" | "repairedAt" | "redeployFiles">): EcoWords {
-  if (ufa.repairedAt && (ufa.state === "notInstalled" || ufa.state === "notProvisioned")) {
-    const files = ufa.redeployFiles ?? null;
-    const progress = files === null ? "" : files > 0 ? ` ${files} file${files === 1 ? "" : "s"} written to its folder since the last restart: it is being put back.` : " Nothing new in its folder since the last restart yet.";
+export function ufaWords(ufa: Pick<DeviceUfa, "state" | "repairedAt" | "redeployFiles"> & { removalFailures?: number | null; removalError?: number | null }): EcoWords {
+  const missing = ufa.state === "notInstalled" || ufa.state === "notProvisioned";
+  const files = ufa.redeployFiles ?? null;
+  const progress = files === null ? "" : files > 0 ? ` ${files} file${files === 1 ? "" : "s"} written to its folder since the last restart: it is being put back.` : " Nothing new in its folder since the last restart yet.";
+  if (ufa.repairedAt && missing) {
     return {
       short: "Being redeployed",
       tone: "accent",
       long: `The installer removed the Ecoverse agent to repair it and restarted the Windows Agent services. The Windows Agent should now put it back, which usually takes 5 to 15 minutes.${progress}`,
     };
+  }
+  if (ufa.state === "broken" && ufa.removalFailures) {
+    const failures = `Windows Installer logged ${ufa.removalFailures} failed ${ufa.removalFailures === 1 ? "removal" : "removals"}${ufa.removalError ? `, the last with MSI error ${ufa.removalError}` : ""}.`;
+    return { ...UFA_WORDS.broken, long: `${UFA_WORDS.broken.long} ${failures}` };
   }
   return UFA_WORDS[ufa.state];
 }
@@ -150,6 +172,7 @@ const UFA_STEP_WORDS: Record<string, string> = {
   "ufa-sync-restart": "Restarted the Ecoverse agent",
   "ufa-repair": "Repaired the Ecoverse agent (removed it, then restarted the Windows Agent services)",
   "ufa-repair-restart": "Restarted the Windows Agent services again",
+  "ufa-registration-broken": "Found the Ecoverse agent registered with its program missing",
 };
 
 /** A step the installer took, as a title; an unknown one reads as its own name. */

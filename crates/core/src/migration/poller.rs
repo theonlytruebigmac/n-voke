@@ -68,6 +68,9 @@ fn age(now: DateTime<Utc>, at: Option<DateTime<Utc>>) -> Option<Duration> {
 struct Found {
     dest_device_id: Option<String>,
     ambiguous: Vec<(String, String)>,
+    /// The destination record the device had been matched to no longer exists (HTTP 404): it was deleted, or the agent was
+    /// reinstalled by hand, which makes a new device with a new ID. The device is looked for again in this pass.
+    dest_gone: Option<String>,
 }
 
 #[derive(Default)]
@@ -106,8 +109,17 @@ impl Core {
         };
         for (index, observation, found) in observed {
             let device = &mut project.devices[index];
-            if let Some(id) = found.dest_device_id {
-                device.dest_device_id = Some(id);
+            if let Some(old) = &found.dest_gone {
+                // The record the device was matched to is gone. Say so on its timeline once (the id is dropped here, so the next
+                // pass doesn't ask for it again), and follow the new record if there is one.
+                let said = match &found.dest_device_id {
+                    Some(new) => format!("The destination record {old} is gone (deleted, or the agent was reinstalled by hand, which makes a new device). The device was found again as {new}."),
+                    None => format!("The destination record {old} is gone (deleted, or the agent was reinstalled by hand, which makes a new device). Looking for it again under its mapped customer or site."),
+                };
+                device.dest_device_id = found.dest_device_id.clone();
+                device.record(now, "note", &said);
+            } else if let Some(id) = &found.dest_device_id {
+                device.dest_device_id = Some(id.clone());
             }
             // What the operator has to choose between is kept on the device; it's cleared once there's a match or no question.
             device.match_candidates = found.ambiguous.iter().map(|(device_id, name)| MatchCandidate { device_id: device_id.clone(), name: name.clone() }).collect();
@@ -178,7 +190,14 @@ impl Core {
                     let detail = &details[0];
                     let finished = matches!(detail.status.to_ascii_lowercase().as_str(), "success" | "failed");
                     let output = match (&detail.output_file_name, finished) {
-                        (Some(file), true) => self.ncentral_task_output(&project.source_server_id, file).await.ok(),
+                        (Some(file), true) => match self.ncentral_task_output(&project.source_server_id, file).await {
+                            Ok(output) => Some(output),
+                            // Not swallowed: a launch that succeeded but whose output can't be read otherwise looks like nothing at all.
+                            Err(e) => {
+                                report.errors.push(format!("{}: the launch task finished, but its output could not be read: {e}", device.name));
+                                None
+                            }
+                        },
                         _ => None,
                     };
                     outcomes.insert(i, launch_outcome_from_rest(&detail.status, detail.message.as_deref().unwrap_or(""), output.as_ref()));
@@ -224,8 +243,15 @@ impl Core {
 
             // Where it is now.
             let looks_for_dest = match device.stage {
+                // A REST-launched device is looked for too: if its launch result is never readable, its appearance on the
+                // destination is the only way to learn that it ran (see `alive_on_destination`).
+                Stage::Launched | Stage::NotPickedUp => device.path == Some(DeliveryPath::Rest) && !project.is_reinstall(),
                 Stage::Staged | Stage::StuckStaged => !project.is_reinstall(),
                 Stage::AgentRemoved | Stage::Lost | Stage::Registered => true,
+                // A healthy device still waiting for Ecoverse's data is looked for too: if its record is gone (the agent was
+                // reinstalled by hand) it has to be found again, or it waits on an ID that no longer exists. The stage logic
+                // ignores the destination observation for a healthy device, so this changes nothing else.
+                Stage::Healthy => device.dest_device_id.is_some() && project.waiting_for_ecoverse(device),
                 _ => false,
             };
             if looks_for_dest {
@@ -241,7 +267,8 @@ impl Core {
                 obs.dest_ecoverse = Some(EcoState::NotLinked);
             }
             if linked && matches!(device.stage, Stage::Registered | Stage::Healthy) {
-                let dest_id = found.dest_device_id.clone().or_else(|| device.dest_device_id.clone());
+                // A record that was gone is not looked up in Ecoverse by its old id: only by the one it was found as, if any.
+                let dest_id = if found.dest_gone.is_some() { found.dest_device_id.clone() } else { found.dest_device_id.clone().or_else(|| device.dest_device_id.clone()) };
                 if project.dest_ecoverse != DestEcoverse::NotLinked {
                     if shared.eco_dest.is_none() {
                         let fetched = self.with_ecoverse(project.dest_ecoverse_server(), self.eco_devices(&project.dest_ecoverse_org_ids)).await.map(|d| {
@@ -305,13 +332,19 @@ impl Core {
 
         if project.is_reinstall() {
             let same = self.ncentral_device(&project.dest_server_id, &device.source_device_id).await.map_err(|e| e.message)?;
-            return Ok((Some(observation(&same)), Found { dest_device_id: Some(same.device_id), ambiguous: vec![] }));
+            return Ok((Some(observation(&same)), Found { dest_device_id: Some(same.device_id), ..Default::default() }));
         }
+        let mut gone = None;
         if let Some(known) = &device.dest_device_id {
-            let found = self.ncentral_device(&project.dest_server_id, known).await.map_err(|e| e.message)?;
-            return Ok((Some(observation(&found)), Found { dest_device_id: Some(found.device_id), ambiguous: vec![] }));
+            match self.ncentral_device(&project.dest_server_id, known).await {
+                Ok(found) => return Ok((Some(observation(&found)), Found { dest_device_id: Some(found.device_id), ..Default::default() })),
+                // The record is gone: deleted, or the agent was reinstalled by hand, which makes a new device with a new ID.
+                // Look for the device again, by the same rules as a device that has not been found yet.
+                Err(e) if e.status == Some(404) => gone = Some(known.clone()),
+                Err(e) => return Err(e.message),
+            }
         }
-        let Some(unit) = device.dest_org_unit_id.clone() else { return Ok((None, Found::default())) };
+        let Some(unit) = device.dest_org_unit_id.clone() else { return Ok((None, Found { dest_gone: gone, ..Default::default() })) };
         if !shared.dest_units.contains_key(&unit) {
             let listed = self.ncentral_org_unit_devices(&project.dest_server_id, &unit).await.map_err(|e| e.message);
             shared.dest_units.insert(unit.clone(), listed);
@@ -344,13 +377,13 @@ impl Core {
             MatchResult::Found { device_id, .. } => {
                 let detail = self.ncentral_device(&project.dest_server_id, &device_id).await.map_err(|e| e.message)?;
                 shared.claimed.insert(device_id.clone());
-                Ok((Some(observation(&detail)), Found { dest_device_id: Some(device_id), ambiguous: vec![] }))
+                Ok((Some(observation(&detail)), Found { dest_device_id: Some(device_id), dest_gone: gone, ..Default::default() }))
             }
             MatchResult::Ambiguous(ids) => {
                 let named = ids.into_iter().map(|id| (listed.iter().find(|d| d.device_id == id).map_or_else(|| id.clone(), |d| d.name().to_string()), id)).map(|(name, id)| (id, name)).collect();
-                Ok((None, Found { dest_device_id: None, ambiguous: named }))
+                Ok((None, Found { dest_device_id: None, ambiguous: named, dest_gone: gone }))
             }
-            MatchResult::None => Ok((None, Found::default())),
+            MatchResult::None => Ok((None, Found { dest_gone: gone, ..Default::default() })),
         }
     }
 }
@@ -395,6 +428,10 @@ mod tests {
         identities: HashMap<String, (String, String, String)>,
         /// Source device's customer and site, and the destination device's.
         placement: HashMap<String, (String, String)>,
+        /// Devices N-central no longer has, by "<host>/<device id>": asking for one answers 404.
+        gone: HashSet<String>,
+        /// Devices whose lookup fails with a server error (500), by "<host>/<device id>".
+        broken: HashSet<String>,
     }
 
     const STAGED_OUTPUT: &str = r#"NVOKE-RESULT {"action":"Launch","result":"staged","errorCode":0,"taskCreated":true,"message":"Staged"}"#;
@@ -436,6 +473,12 @@ mod tests {
                 (Method::Get, p) if p.starts_with("api/org-units/") && p.ends_with("/devices") => ok(json!({ "data": w.dest_list, "totalPages": 1 })),
                 (Method::Get, p) if p.starts_with("api/devices/") => {
                     let id = p.trim_start_matches("api/devices/");
+                    if w.gone.contains(&format!("{host}/{id}")) {
+                        return status(404, r#"{"message":"Device was not found! deviceId=gone. Not found."}"#);
+                    }
+                    if w.broken.contains(&format!("{host}/{id}")) {
+                        return status(500, r#"{"message":"boom"}"#);
+                    }
                     ok(json!({ "data": device(host, id) }))
                 }
                 other => panic!("unexpected {other:?} on {host}"),
@@ -778,5 +821,154 @@ mod tests {
         core.migration_poll_at(&mut p, &Thresholds::default(), now()).await;
         let claimed: Vec<Option<&str>> = p.devices.iter().map(|d| d.dest_device_id.as_deref()).collect();
         assert_eq!(claimed, [Some("5001"), None], "the second one doesn't take the same record");
+    }
+
+    #[tokio::test]
+    async fn a_launched_device_whose_task_never_reports_still_follows_the_device_to_the_destination() {
+        let world = Arc::new(Mutex::new(World::default()));
+        let (core, mut p) = setup(&[planned("9001", DeliveryPath::Rest, None)], false).await;
+        core.set_rest_transport(rest_fake(&world));
+        p.devices[0].identity = Some(DeviceIdentity { serial: Some("VMW-1".into()), hostname: Some("PC-9001".into()), macs: vec!["aabbccddee01".into()], smbios_uuid: None });
+        p.dest_baseline.insert("111".into(), vec!["4001".into()]);
+        launch(&mut p, 0, 15, "5550");
+        // The task never reports (as when the old agent is removed before it can), but the device is on the destination, checking in.
+        {
+            let mut w = world.lock().unwrap();
+            w.task = Some(("Pending".into(), None));
+            w.dest_list = vec![json!({ "deviceId": 5001, "longName": "PC-9001" })];
+            w.identities.insert("5001".into(), ("vmw-1".into(), "PC-9001".into(), "AA-BB-CC-DD-EE-01".into()));
+            w.checkin.insert("dst.example.com/5001".into(), 3);
+        }
+        let report = core.migration_poll_at(&mut p, &Thresholds::default(), now()).await;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(stages(&p), [Stage::Healthy]);
+        assert_eq!(p.devices[0].dest_device_id.as_deref(), Some("5001"));
+        let whys: Vec<&str> = p.devices[0].events.iter().filter(|e| e.kind == "stage").map(|e| e.detail.as_str()).collect();
+        assert!(whys.iter().any(|w| w.contains("could not be read") && w.contains("on the destination")), "{whys:?}");
+    }
+
+    #[tokio::test]
+    async fn an_old_record_of_the_device_on_the_destination_does_not_make_a_launched_device_look_moved() {
+        let world = Arc::new(Mutex::new(World::default()));
+        let (core, mut p) = setup(&[planned("9001", DeliveryPath::Rest, None)], false).await;
+        core.set_rest_transport(rest_fake(&world));
+        p.devices[0].identity = Some(DeviceIdentity { serial: Some("VMW-1".into()), hostname: Some("PC-9001".into()), macs: vec!["aabbccddee01".into()], smbios_uuid: None });
+        p.dest_baseline.insert("111".into(), vec!["5001".into()]);
+        launch(&mut p, 0, 15, "5550");
+        {
+            let mut w = world.lock().unwrap();
+            w.task = Some(("Pending".into(), None));
+            w.dest_list = vec![json!({ "deviceId": 5001, "longName": "PC-9001" })];
+            w.identities.insert("5001".into(), ("vmw-1".into(), "PC-9001".into(), "AA-BB-CC-DD-EE-01".into()));
+            // The record from an earlier move: last seen three days ago.
+            w.checkin.insert("dst.example.com/5001".into(), 3 * 24 * 60);
+        }
+        let report = core.migration_poll_at(&mut p, &Thresholds::default(), now()).await;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(stages(&p), [Stage::Launched]);
+    }
+
+    #[tokio::test]
+    async fn a_launch_task_that_finished_but_whose_output_cannot_be_read_says_so_instead_of_looking_like_nothing() {
+        let world = Arc::new(Mutex::new(World::default()));
+        let (core, mut p) = setup(&[planned("9001", DeliveryPath::Rest, None)], false).await;
+        core.set_rest_transport(rest_fake(&world));
+        launch(&mut p, 0, 15, "5550");
+        world.lock().unwrap().task = Some(("Success".into(), Some(b"this is not a zip file".to_vec())));
+        let report = core.migration_poll_at(&mut p, &Thresholds::default(), now()).await;
+        assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+        assert!(report.errors[0].contains("PC-9001") && report.errors[0].contains("output could not be read"), "{}", report.errors[0]);
+        assert_eq!(stages(&p), [Stage::Launched], "nothing is guessed from an output nobody could read");
+    }
+
+    /// A device already matched to destination record 5001, whose agent was then uninstalled and reinstalled by hand: N-central
+    /// no longer has 5001 and the device is registered again as 5002 (a new device).
+    async fn reinstalled_by_hand(stage: Stage) -> (Arc<Mutex<World>>, Arc<Core>, Project) {
+        let world = Arc::new(Mutex::new(World::default()));
+        let (core, mut p) = setup(&[planned("9001", DeliveryPath::Rest, None)], false).await;
+        core.set_rest_transport(rest_fake(&world));
+        p.devices[0].identity = Some(DeviceIdentity { serial: Some("VMW-1".into()), hostname: Some("PC-9001".into()), macs: vec!["aabbccddee01".into()], smbios_uuid: None });
+        p.devices[0].stage = stage;
+        p.devices[0].dest_device_id = Some("5001".into());
+        p.dest_baseline.insert("111".into(), vec!["4001".into()]);
+        {
+            let mut w = world.lock().unwrap();
+            w.gone.insert("dst.example.com/5001".into());
+            w.dest_list = vec![json!({ "deviceId": 5002, "longName": "PC-9001" })];
+            w.identities.insert("5002".into(), ("vmw-1".into(), "PC-9001".into(), "AA-BB-CC-DD-EE-01".into()));
+            w.checkin.insert("dst.example.com/5002".into(), 3);
+        }
+        (world, core, p)
+    }
+
+    fn notes(p: &Project) -> Vec<&str> {
+        p.devices[0].events.iter().filter(|e| e.kind == "note").map(|e| e.detail.as_str()).collect()
+    }
+
+    #[tokio::test]
+    async fn a_device_whose_destination_record_is_gone_is_found_again_under_its_new_id_instead_of_failing_every_poll() {
+        let (_world, core, mut p) = reinstalled_by_hand(Stage::Registered).await;
+        let report = core.migration_poll_at(&mut p, &Thresholds::default(), now()).await;
+        assert!(report.errors.is_empty(), "a 404 on the old record is not an error any more: {:?}", report.errors);
+        assert_eq!(p.devices[0].dest_device_id.as_deref(), Some("5002"));
+        assert_eq!(stages(&p), [Stage::Healthy], "it follows the new record, which is checking in");
+        let said = notes(&p);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("5001") && said[0].contains("gone") && said[0].contains("found again as 5002"), "{}", said[0]);
+        // A second pass has nothing more to say.
+        core.migration_poll_at(&mut p, &Thresholds::default(), now()).await;
+        assert_eq!(notes(&p).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_device_whose_record_is_gone_and_not_back_yet_drops_the_dead_id_says_so_once_and_keeps_looking() {
+        let (world, core, mut p) = reinstalled_by_hand(Stage::Registered).await;
+        world.lock().unwrap().dest_list = vec![];
+        let report = core.migration_poll_at(&mut p, &Thresholds::default(), now()).await;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(p.devices[0].dest_device_id.is_none(), "the id of a record that no longer exists is not kept");
+        assert_eq!(stages(&p), [Stage::Registered]);
+        assert!(notes(&p)[0].contains("Looking for it again"), "{:?}", notes(&p));
+        core.migration_poll_at(&mut p, &Thresholds::default(), now()).await;
+        assert_eq!(notes(&p).len(), 1, "once, not on every poll");
+
+        // The reinstalled agent registers: the next pass finds it.
+        world.lock().unwrap().dest_list = vec![json!({ "deviceId": 5002, "longName": "PC-9001" })];
+        let report = core.migration_poll_at(&mut p, &Thresholds::default(), now()).await;
+        assert!(report.errors.is_empty());
+        assert_eq!((p.devices[0].dest_device_id.as_deref(), p.devices[0].stage), (Some("5002"), Stage::Healthy));
+    }
+
+    #[tokio::test]
+    async fn a_server_error_looking_up_the_destination_record_is_reported_and_the_id_is_kept_not_treated_as_gone() {
+        let (world, core, mut p) = reinstalled_by_hand(Stage::Registered).await;
+        {
+            let mut w = world.lock().unwrap();
+            w.gone.clear();
+            w.broken.insert("dst.example.com/5001".into());
+        }
+        let report = core.migration_poll_at(&mut p, &Thresholds::default(), now()).await;
+        assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+        assert!(report.errors[0].contains("could not look for it on the destination"), "{}", report.errors[0]);
+        assert_eq!(p.devices[0].dest_device_id.as_deref(), Some("5001"), "a failure that isn't 'not found' says nothing about the record");
+        assert!(notes(&p).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_healthy_device_still_waiting_for_ecoverse_is_found_again_too_and_one_that_is_reporting_is_left_alone() {
+        let (_world, core, mut p) = reinstalled_by_hand(Stage::Healthy).await;
+        p.dest_ecoverse = DestEcoverse::SameTenant;
+        p.devices[0].ecoverse = Some(EcoState::WaitingForData);
+        core.set_empty_ecoverse();
+        core.migration_poll_at(&mut p, &Thresholds::default(), now()).await;
+        assert_eq!(p.devices[0].dest_device_id.as_deref(), Some("5002"), "{:?}", notes(&p));
+        assert_eq!(stages(&p), [Stage::Healthy]);
+
+        let (_world, core, mut p) = reinstalled_by_hand(Stage::Healthy).await;
+        p.dest_ecoverse = DestEcoverse::SameTenant;
+        p.devices[0].ecoverse = Some(EcoState::Reporting);
+        core.set_empty_ecoverse();
+        core.migration_poll_at(&mut p, &Thresholds::default(), now()).await;
+        assert_eq!(p.devices[0].dest_device_id.as_deref(), Some("5001"), "a device Ecoverse is receiving data from isn't looked up");
     }
 }
