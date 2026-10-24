@@ -162,7 +162,7 @@ fn how(entry: &MappingEntry) -> Option<MatchHow> {
 /// The Map rows for two servers' units and the operator's decisions.
 pub fn map_view(source_label: &str, dest_label: &str, source_units: &[OrgUnit], dest_units: &[OrgUnit], overrides: &HashMap<String, Override>) -> MapView {
     let mut mapping = auto_map(source_units, dest_units);
-    apply_overrides(&mut mapping, overrides);
+    apply_overrides(&mut mapping, overrides, dest_units);
     let dest_ref = |id: &str| dest_units.iter().find(|u| u.org_unit_id == id).and_then(|u| unit_ref(u, dest_units));
 
     let mut rows: Vec<MapRow> = mapping
@@ -211,7 +211,7 @@ pub fn map_view(source_label: &str, dest_label: &str, source_units: &[OrgUnit], 
 /// Devices per source unit and a token row per destination unit they go to.
 pub fn map_details(devices: &[Device], source_units: &[OrgUnit], dest_units: &[OrgUnit], overrides: &HashMap<String, Override>, statuses: &HashMap<String, TokenStatus>) -> MapDetails {
     let mut mapping = auto_map(source_units, dest_units);
-    apply_overrides(&mut mapping, overrides);
+    apply_overrides(&mut mapping, overrides, dest_units);
 
     let mut counts: HashMap<String, u32> = HashMap::new();
     for device in devices {
@@ -264,7 +264,7 @@ impl Core {
         let project = self.migration_project(id).await?;
         let (source_label, dest_label, source_units, dest_units) = self.migration_units(&project).await?;
         let mut mapping = auto_map(&source_units, &dest_units);
-        apply_overrides(&mut mapping, &project.mapping_overrides);
+        apply_overrides(&mut mapping, &project.mapping_overrides, &dest_units);
 
         let mut by_id: HashMap<String, Device> = HashMap::new();
         for customer in source_units.iter().filter(|u| u.org_unit_type == OrgUnitType::Customer) {

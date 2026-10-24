@@ -387,12 +387,16 @@ async fn project_structure_preview(core: State<'_, Core>, id: String, only: Opti
     core.migration_structure_preview(&id, only).await
 }
 
-/// Creates the missing customers and sites on the destination, then their registration tokens. With `dry_run` nothing is sent.
+/// Creates the missing customers and sites on the destination, then their registration tokens, telling the page after each
+/// step with the `migration-structure` event. With `dry_run` nothing is sent.
 #[tauri::command]
-async fn project_structure_create(core: State<'_, Core>, locks: State<'_, ProjectLocks>, id: String, service_org_id: String, only: Option<Vec<String>>, dry_run: bool) -> Result<StructureReport, String> {
+async fn project_structure_create(app: AppHandle, core: State<'_, Core>, locks: State<'_, ProjectLocks>, id: String, service_org_id: String, only: Option<Vec<String>>, dry_run: bool) -> Result<StructureReport, String> {
     let lock = locks.get(&id);
     let _held = lock.lock().await;
-    core.migration_structure_create(&id, &instance(), &service_org_id, only, dry_run).await
+    core.migration_structure_create_with(&id, &instance(), &service_org_id, only, dry_run, &|progress| {
+        let _ = app.emit("migration-structure", serde_json::json!({ "id": id, "progress": progress }));
+    })
+    .await
 }
 
 /// What retiring the old source records would delete, and why anything isn't offered yet.

@@ -272,6 +272,7 @@ impl Core {
         // The audit log was built with the real vault (the keychain's data key): give it the test one, or a test that writes an entry asks the keychain.
         core.audit = AuditLog::new(core.vault.clone(), core.paths.data_dir.clone());
         core.secrets = Arc::new(credentials::MemoryStore::default());
+        core.rest.set_assume_complete(true);
         *core.api_key.lock().unwrap() = Some("test-key-not-real".into());
         core.set_dry_run(false);
         Arc::new(core)

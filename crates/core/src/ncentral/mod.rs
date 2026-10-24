@@ -2,6 +2,7 @@
 //! client that talks to them. Server addresses and labels are in `config.json`
 //! (not secret); each server's JWT is in the keychain, account `ncentral:<host>`.
 
+pub mod capabilities;
 pub mod model;
 pub mod rest;
 
@@ -99,15 +100,25 @@ impl Core {
         self.load_config().ncentral_servers.into_iter().find(|s| s.id == id).ok_or_else(|| format!("No N-central server with id {id} is configured."))
     }
 
-    pub(crate) async fn ncentral_jwt(&self, host: &str) -> Result<Option<String>, String> {
+    pub(crate) async fn ncentral_jwt(&self, server: &ServerConfig) -> Result<Option<String>, String> {
         let secrets = self.secrets.clone();
-        let account = ncentral_account(host);
-        blocking(move || secrets.get(&account)).await
+        let (account, legacy) = (ncentral_account(&server.id), ncentral_account(&server.host));
+        blocking(move || {
+            if let Some(jwt) = secrets.get(&account)? {
+                return Ok(Some(jwt));
+            }
+            // Older versions kept the JWT under the host name. It moves to the server's own account the first time it's read.
+            let Some(jwt) = secrets.get(&legacy)? else { return Ok(None) };
+            secrets.set(&account, &jwt)?;
+            secrets.delete(&legacy)?;
+            Ok(Some(jwt))
+        })
+        .await
     }
 
     /// Adds a server, or updates the one with `id`. A JWT, when given, replaces
-    /// the saved one and ends any session using the old one. Changing the host
-    /// carries the saved JWT over to the new host.
+    /// the saved one and ends any session using the old one. Several servers may share
+    /// a host (one per service organization, each with its own JWT) if their labels differ.
     pub async fn save_ncentral_server(
         &self,
         id: Option<String>,
@@ -122,12 +133,16 @@ impl Core {
         let jwt = jwt.map(|j| j.trim().to_string()).filter(|j| !j.is_empty());
 
         let mut config = self.load_config();
-        if config.ncentral_servers.iter().any(|s| s.host == host && Some(&s.id) != id.as_ref()) {
-            return Err(format!("{host} is already in the server list."));
+        if let Some(twin) = config.ncentral_servers.iter().find(|s| s.host == host && s.label.eq_ignore_ascii_case(&label) && Some(&s.id) != id.as_ref()) {
+            return Err(format!("{host} is already in the server list as \"{}\". To add another service organization on the same server, give it a different name.", twin.label));
         }
         let previous = id.as_ref().and_then(|id| config.ncentral_servers.iter().find(|s| &s.id == id).cloned());
         if id.is_some() && previous.is_none() {
             return Err("That server no longer exists.".into());
+        }
+        // A JWT still under its host name moves to its server's account now, before another server can share that host.
+        for existing in config.ncentral_servers.iter().filter(|s| s.host == host || previous.as_ref().is_some_and(|p| p.host == s.host)) {
+            self.ncentral_jwt(existing).await?;
         }
         let server = ServerConfig {
             id: id.unwrap_or_else(|| format!("srv-{}", &uuid::Uuid::new_v4().simple().to_string()[..8])),
@@ -137,37 +152,19 @@ impl Core {
             ecoverse: previous.as_ref().map(|p| p.ecoverse).unwrap_or_default(),
         };
 
-        let secrets = self.secrets.clone();
-        let account = ncentral_account(&host);
-        let result = match (&jwt, &previous) {
-            (Some(jwt), previous) => {
-                let jwt = jwt.clone();
-                let old_account = previous.as_ref().filter(|old| old.host != host).map(|old| ncentral_account(&old.host));
-                blocking(move || {
-                    secrets.set(&account, &jwt)?;
-                    // The old host's copy would otherwise stay in the keychain with nothing pointing at it.
-                    old_account.map_or(Ok(()), |old| secrets.delete(&old))
-                })
-                .await
+        let result = match &jwt {
+            Some(jwt) => {
+                let (secrets, account, jwt) = (self.secrets.clone(), ncentral_account(&server.id), jwt.clone());
+                blocking(move || secrets.set(&account, &jwt)).await
             }
-            (None, Some(old)) if old.host != host => {
-                let old_account = ncentral_account(&old.host);
-                blocking(move || {
-                    if let Some(secret) = secrets.get(&old_account)? {
-                        secrets.set(&account, &secret)?;
-                    }
-                    secrets.delete(&old_account)
-                })
-                .await
-            }
-            _ => Ok(()),
+            None => Ok(()),
         };
         let summary = match (&previous, &jwt) {
             (None, _) => format!("Added N-central server {host}"),
             (Some(_), Some(_)) => format!("Updated N-central server {host} and replaced its JWT"),
             (Some(_), None) => format!("Updated N-central server {host}"),
         };
-        self.record(&AuditEntry::new("settings.ncentral_server", &summary, result.clone(), json!({ "host": host })));
+        self.record(&AuditEntry::new("settings.ncentral_server", &summary, result.clone(), json!({ "host": host, "label": server.label })));
         result?;
 
         match config.ncentral_servers.iter_mut().find(|s| s.id == server.id) {
@@ -176,16 +173,13 @@ impl Core {
         }
         self.save_config(&config)?;
         if jwt.is_some() || previous.as_ref().is_some_and(|p| p.host != host) {
-            self.rest.forget(&host);
-            if let Some(old) = previous.filter(|p| p.host != host) {
-                self.rest.forget(&old.host);
-            }
+            self.rest.forget(&server.id);
         }
         self.server_view(server).await
     }
 
     async fn server_view(&self, server: ServerConfig) -> Result<ServerView, String> {
-        let has_jwt = self.ncentral_jwt(&server.host).await?.is_some();
+        let has_jwt = self.ncentral_jwt(&server).await?.is_some();
         let has_ecoverse_token = if server.ecoverse == EcoCredential::Own {
             let secrets = self.secrets.clone();
             let account = ecoverse_account(&server.id);
@@ -266,15 +260,22 @@ impl Core {
     pub async fn remove_ncentral_server(&self, id: &str) -> Result<(), String> {
         let server = self.ncentral_server(id)?;
         let secrets = self.secrets.clone();
-        let account = ncentral_account(&server.host);
+        let account = ncentral_account(&server.id);
         let eco_account = ecoverse_account(&server.id);
-        let result = blocking(move || secrets.delete(&account).and_then(|()| secrets.delete(&eco_account))).await;
-        self.record(&AuditEntry::new("settings.ncentral_server", &format!("Removed N-central server {}", server.host), result.clone(), json!({ "host": server.host })));
+        // A JWT still under the host name is this server's only if no other server shares that host.
+        let legacy = (!self.load_config().ncentral_servers.iter().any(|s| s.host == server.host && s.id != server.id)).then(|| ncentral_account(&server.host));
+        let result = blocking(move || {
+            secrets.delete(&account)?;
+            secrets.delete(&eco_account)?;
+            legacy.map_or(Ok(()), |legacy| secrets.delete(&legacy))
+        })
+        .await;
+        self.record(&AuditEntry::new("settings.ncentral_server", &format!("Removed N-central server {}", server.host), result.clone(), json!({ "host": server.host, "label": server.label })));
         result?;
         let mut config = self.load_config();
         config.ncentral_servers.retain(|s| s.id != id);
         self.save_config(&config)?;
-        self.rest.forget(&server.host);
+        self.rest.forget(&server.id);
         crate::migration::readcache::forget_server(&server.id);
         crate::migration::forget_names_of(&server.id);
         Ok(())
@@ -307,33 +308,61 @@ mod tests {
         let added = core.save_ncentral_server(None, "Old server", "https://Old.example.com", Some(" jwt-1 ".into()), None).await.unwrap();
         assert_eq!(added.host, "old.example.com");
         assert!(added.has_jwt);
-        assert_eq!(core.ncentral_jwt("old.example.com").await.unwrap().as_deref(), Some("jwt-1"), "whitespace is trimmed");
+        assert_eq!(jwt_of(&core, &added.id).await.as_deref(), Some("jwt-1"), "whitespace is trimmed");
         assert!(!serde_json::to_string(&added).unwrap().contains("jwt-1"));
 
-        let duplicate = core.save_ncentral_server(None, "Again", "old.example.com", None, None).await;
+        let duplicate = core.save_ncentral_server(None, "old server", "old.example.com", None, None).await;
         assert!(duplicate.unwrap_err().contains("already in the server list"));
 
         // Renaming the host keeps the saved JWT.
         let moved = core.save_ncentral_server(Some(added.id.clone()), "", "older.example.com", None, Some("tenant-1".into())).await.unwrap();
         assert_eq!((moved.label.as_str(), moved.has_jwt, moved.ecoverse_tenant.as_deref()), ("older.example.com", true, Some("tenant-1")));
-        assert_eq!(core.ncentral_jwt("old.example.com").await.unwrap(), None);
-        assert_eq!(core.ncentral_jwt("older.example.com").await.unwrap().as_deref(), Some("jwt-1"));
+        assert_eq!(jwt_of(&core, &added.id).await.as_deref(), Some("jwt-1"));
 
         core.remove_ncentral_server(&added.id).await.unwrap();
         assert!(core.ncentral_servers().await.unwrap().is_empty());
-        assert_eq!(core.ncentral_jwt("older.example.com").await.unwrap(), None);
+        assert_eq!(core.secrets.get(&ncentral_account(&added.id)).unwrap(), None);
         let log = core.audit_log(None).unwrap().entries;
         assert_eq!(log.len(), 3);
         assert!(!serde_json::to_string(&log).unwrap().contains("jwt-1"), "the audit log never holds the JWT");
     }
 
     #[tokio::test]
-    async fn changing_the_host_and_the_jwt_together_leaves_no_copy_under_the_old_host() {
+    async fn changing_the_host_and_the_jwt_together_replaces_the_jwt() {
         let core = Core::for_tests("servers-rehost");
         let added = core.save_ncentral_server(None, "S", "old.example.com", Some("jwt-1".into()), None).await.unwrap();
-        core.save_ncentral_server(Some(added.id), "S", "new.example.com", Some("jwt-2".into()), None).await.unwrap();
-        assert_eq!(core.ncentral_jwt("old.example.com").await.unwrap(), None);
-        assert_eq!(core.ncentral_jwt("new.example.com").await.unwrap().as_deref(), Some("jwt-2"));
+        core.save_ncentral_server(Some(added.id.clone()), "S", "new.example.com", Some("jwt-2".into()), None).await.unwrap();
+        assert_eq!(jwt_of(&core, &added.id).await.as_deref(), Some("jwt-2"));
+    }
+
+    #[tokio::test]
+    async fn one_host_holds_several_service_orgs_each_with_its_own_jwt() {
+        let core = Core::for_tests("servers-same-host");
+        let a = core.save_ncentral_server(None, "Org A", "nc.example.com", Some("jwt-a".into()), None).await.unwrap();
+        let b = core.save_ncentral_server(None, "Org B", "nc.example.com", Some("jwt-b".into()), None).await.unwrap();
+        assert_ne!(a.id, b.id);
+        assert_eq!(jwt_of(&core, &a.id).await.as_deref(), Some("jwt-a"));
+        assert_eq!(jwt_of(&core, &b.id).await.as_deref(), Some("jwt-b"));
+
+        core.remove_ncentral_server(&a.id).await.unwrap();
+        assert_eq!(jwt_of(&core, &b.id).await.as_deref(), Some("jwt-b"), "removing one leaves the other's JWT");
+    }
+
+    #[tokio::test]
+    async fn a_jwt_saved_under_the_host_by_an_older_version_follows_its_server_when_a_second_one_joins() {
+        let core = Core::for_tests("servers-legacy");
+        let a = core.save_ncentral_server(None, "Org A", "nc.example.com", Some("jwt-a".into()), None).await.unwrap();
+        core.secrets.delete(&ncentral_account(&a.id)).unwrap();
+        core.secrets.set(&ncentral_account("nc.example.com"), "jwt-a").unwrap();
+
+        let b = core.save_ncentral_server(None, "Org B", "nc.example.com", None, None).await.unwrap();
+        assert!(!b.has_jwt, "the new server does not inherit the old host-wide JWT");
+        assert_eq!(jwt_of(&core, &a.id).await.as_deref(), Some("jwt-a"));
+        assert_eq!(core.secrets.get(&ncentral_account("nc.example.com")).unwrap(), None);
+    }
+
+    async fn jwt_of(core: &Core, id: &str) -> Option<String> {
+        core.ncentral_jwt(&core.ncentral_server(id).unwrap()).await.unwrap()
     }
 
     async fn server(core: &Core, host: &str) -> ServerView {

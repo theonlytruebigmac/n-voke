@@ -89,7 +89,7 @@ impl Core {
         let dest_units = if dest.id == source.id { source_units.clone() } else { self.org_units_cached(&dest.id).await.map_err(|e| format!("{}: {e}", dest.label))? };
         let mut mapping = auto_map(&source_units, &dest_units);
         if let Some(project) = project {
-            apply_overrides(&mut mapping, &project.mapping_overrides);
+            apply_overrides(&mut mapping, &project.mapping_overrides, &dest_units);
         }
 
         let wanted = options.customer.as_deref().map(normalize_name).filter(|n| !n.is_empty());

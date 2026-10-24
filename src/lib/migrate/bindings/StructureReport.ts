@@ -12,4 +12,8 @@ wouldCreate: Array<string>,
 /**
  * How many registration tokens were generated for the new units.
  */
-tokensGenerated: number, };
+tokensGenerated: number, 
+/**
+ * Created, but missing from the destination's list afterwards: the signed-in user can't see them (yet).
+ */
+notVisible: Array<string>, };

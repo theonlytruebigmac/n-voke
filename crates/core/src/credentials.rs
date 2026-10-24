@@ -15,9 +15,9 @@ pub trait SecretStore: Send + Sync {
     fn delete(&self, account: &str) -> Result<(), String>;
 }
 
-/// Keychain account holding the JWT for an N-central server.
-pub fn ncentral_account(host: &str) -> String {
-    format!("ncentral:{host}")
+/// Keychain account holding a server's JWT. Pass the server id; before one host could hold several service orgs, the host was used.
+pub fn ncentral_account(key: &str) -> String {
+    format!("ncentral:{key}")
 }
 
 /// Keychain account holding an Ecoverse key for a tenant.
@@ -158,7 +158,7 @@ mod tests {
 
     #[test]
     fn accounts_are_named_per_server_and_tenant() {
-        assert_eq!(ncentral_account("new.example.com"), "ncentral:new.example.com");
+        assert_eq!(ncentral_account("srv-1"), "ncentral:srv-1");
         assert_eq!(ecoverse_account("t-1"), "ecoverse:t-1");
     }
 

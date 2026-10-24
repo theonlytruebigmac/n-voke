@@ -25,7 +25,11 @@ use tokio::{
     time::Instant,
 };
 
-use super::model::{Device, DeviceIdentity, OrgUnit, RegistrationToken, ServerInfo, TaskDetail};
+use super::{
+    ServerConfig,
+    capabilities::{Capabilities, Capability},
+    model::{Device, DeviceIdentity, OrgUnit, RegistrationToken, ServerInfo, TaskDetail},
+};
 use crate::migration::endpoint_result::RestOutput;
 use crate::{
     Core, DRY_RUN_ERROR,
@@ -46,7 +50,7 @@ const GATEWAY_RETRIES: u32 = 2;
 /// The Windows Agent's software ID, used when the installer list doesn't say.
 const WINDOWS_AGENT_SOFTWARE_ID: &str = "101";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Method {
     Get,
     Post,
@@ -277,21 +281,44 @@ impl HostState {
     }
 }
 
-/// Everything REST that outlives one call: sessions and limits per host, and the transport.
+/// Everything REST that outlives one call: sessions and limits per server, and the transport.
 #[derive(Default)]
 pub struct RestState {
     hosts: Mutex<HashMap<String, Arc<HostState>>>,
+    capabilities: Mutex<HashMap<String, Capabilities>>,
+    /// Held while a spec is read, so concurrent first calls share one download.
+    pub(super) spec_read: AsyncMutex<()>,
+    /// For tests: every server is taken to offer everything, so a fake server needn't serve its spec.
+    assume_complete: std::sync::atomic::AtomicBool,
     transport: Mutex<Option<Arc<dyn RestTransport>>>,
 }
 
 impl RestState {
-    fn host(&self, host: &str) -> Arc<HostState> {
-        self.hosts.lock().unwrap().entry(host.to_string()).or_default().clone()
+    fn host(&self, server_id: &str) -> Arc<HostState> {
+        self.hosts.lock().unwrap().entry(server_id.to_string()).or_default().clone()
     }
 
-    /// Ends the host's session, so the next call logs in again (a JWT was replaced, or a server removed).
-    pub(crate) fn forget(&self, host: &str) {
-        self.hosts.lock().unwrap().remove(host);
+    pub(super) fn capabilities(&self, server_id: &str) -> Option<Capabilities> {
+        self.capabilities.lock().unwrap().get(server_id).cloned()
+    }
+
+    pub(super) fn assume_complete(&self) -> bool {
+        self.assume_complete.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[doc(hidden)]
+    pub fn set_assume_complete(&self, on: bool) {
+        self.assume_complete.store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(super) fn remember_capabilities(&self, server_id: &str, found: Capabilities) {
+        self.capabilities.lock().unwrap().insert(server_id.to_string(), found);
+    }
+
+    /// Ends the server's session, so the next call logs in again (a JWT was replaced, or a server removed).
+    pub(crate) fn forget(&self, server_id: &str) {
+        self.hosts.lock().unwrap().remove(server_id);
+        self.capabilities.lock().unwrap().remove(server_id);
     }
 
     fn transport(&self, http: &reqwest::Client) -> Arc<dyn RestTransport> {
@@ -377,13 +404,14 @@ impl Core {
         }
     }
 
-    /// A valid access token for the host, logging in when there is none or it's about to expire.
-    async fn rest_access_token(&self, host: &str, state: &HostState) -> Result<String, RestError> {
+    /// A valid access token for the server, logging in when there is none or it's about to expire.
+    async fn rest_access_token(&self, server: &ServerConfig, state: &HostState) -> Result<String, RestError> {
+        let host = server.host.as_str();
         let mut session = state.session.lock().await;
         if let Some(s) = session.as_ref().filter(|s| s.valid_until > Instant::now()) {
             return Ok(s.access.clone());
         }
-        let jwt = self.ncentral_jwt(host).await?.ok_or_else(|| RestError::new(None, format!("No JWT is saved for {host}. Add one in Settings.")))?;
+        let jwt = self.ncentral_jwt(server).await?.ok_or_else(|| RestError::new(None, format!("No JWT is saved for {host}. Add one in Settings.")))?;
         let response = self.rest_send(RestRequest { method: Method::Post, url: format!("https://{host}/api/auth/authenticate"), bearer: Some(jwt), body: None }).await?;
         if response.status >= 300 {
             return Err(RestError::new(Some(response.status), format!("Could not sign in to {host}: {}", describe_error(response.status, &response.text()))));
@@ -398,7 +426,7 @@ impl Core {
     /// One call to a configured server. Returns the parsed JSON body (`null` when there is none).
     pub async fn ncentral_call(&self, server_id: &str, call: Call<'_>) -> Result<Value, RestError> {
         let server = self.ncentral_server(server_id)?;
-        let host = server.host;
+        let host = server.host.clone();
         let is_write = call.method != Method::Get;
         let operation = format!("{} {}", call.method.as_str(), call.path);
 
@@ -418,10 +446,10 @@ impl Core {
             return Err(RestError::new(None, DRY_RUN_ERROR));
         }
 
-        let state = self.rest.host(&host);
+        let state = self.rest.host(&server.id);
         let result = {
             let _permit = state.permit(call.method, call.path).await;
-            self.rest_call_with_session(&host, &state, call.method, url.as_str(), call.body.clone()).await
+            self.rest_call_with_session(&server, &state, call.method, url.as_str(), call.body.clone()).await
         };
 
         if is_write {
@@ -431,10 +459,11 @@ impl Core {
         result
     }
 
-    async fn rest_call_with_session(&self, host: &str, state: &HostState, method: Method, url: &str, body: Option<Value>) -> Result<Value, RestError> {
+    async fn rest_call_with_session(&self, server: &ServerConfig, state: &HostState, method: Method, url: &str, body: Option<Value>) -> Result<Value, RestError> {
+        let host = server.host.as_str();
         let mut renewed = false;
         let response = loop {
-            let access = self.rest_access_token(host, state).await?;
+            let access = self.rest_access_token(server, state).await?;
             let response = self.rest_send(RestRequest { method, url: url.to_string(), bearer: Some(access), body: body.clone() }).await?;
             // A 401 on a session that was fine a moment ago means the server forgot it (a restart).
             if response.status == 401 && !renewed {
@@ -558,6 +587,7 @@ impl Core {
     /// `CommandLine` parameter, which N-central shows in full in the task's details, token included.
     /// Returns the direct task's ID. Never retried on a gateway error: the task may have been created.
     pub async fn ncentral_run_direct_task(&self, server_id: &str, task: &DirectTask<'_>) -> Result<String, RestError> {
+        self.require_capability(server_id, Capability::RestLaunch).await?;
         let host = self.ncentral_server(server_id)?.host;
         let numeric = |what: &str, v: &str| v.parse::<u64>().map_err(|_| RestError::new(None, format!("The {what} \"{v}\" isn't numeric.")));
         let body = json!({
@@ -585,6 +615,7 @@ impl Core {
     /// Creates a customer under a service organization and returns its ID. A name that is already taken is a 409.
     pub async fn ncentral_create_customer(&self, server_id: &str, service_org_id: &str, name: &str) -> Result<String, RestError> {
         let so = check_id(service_org_id)?;
+        self.require_capability(server_id, Capability::CreateStructure).await?;
         let host = self.ncentral_server(server_id)?.host;
         let meta = AuditMeta { action: "migration.structure.customer".into(), summary: format!("Created the customer {name} on {host}") };
         let path = format!("/api/service-orgs/{so}/customers");
@@ -595,6 +626,7 @@ impl Core {
     /// Creates a site under a customer and returns its ID. The site endpoint is marked as a preview in N-central's spec.
     pub async fn ncentral_create_site(&self, server_id: &str, customer_id: &str, name: &str) -> Result<String, RestError> {
         let customer = check_id(customer_id)?;
+        self.require_capability(server_id, Capability::CreateStructure).await?;
         let host = self.ncentral_server(server_id)?.host;
         let meta = AuditMeta { action: "migration.structure.site".into(), summary: format!("Created the site {name} on {host}") };
         let path = format!("/api/customers/{customer}/sites");
@@ -606,6 +638,7 @@ impl Core {
     /// it). The record then reads 404. Returns whether there was a record to remove.
     pub async fn ncentral_delete_device_record(&self, server_id: &str, device_id: &str, label: &str) -> Result<bool, RestError> {
         let id = check_id(device_id)?;
+        self.require_capability(server_id, Capability::RetireRecord).await?;
         let host = self.ncentral_server(server_id)?.host;
         let meta = AuditMeta { action: "migration.retire".into(), summary: format!("Removed the old record of {label} from {host}") };
         let path = format!("/api/devices/{id}");
@@ -622,6 +655,7 @@ impl Core {
     /// itself is never written to the audit log.
     pub async fn ncentral_generate_registration_token(&self, server_id: &str, org_unit_id: &str, label: &str) -> Result<RegistrationToken, RestError> {
         let id = check_id(org_unit_id)?;
+        self.require_capability(server_id, Capability::GenerateToken).await?;
         let host = self.ncentral_server(server_id)?.host;
         let installers = self
             .ncentral_call(server_id, Call::get(&format!("/api/customers/{id}/software/installers")).with_query("softwareType", "Agent").with_query("installerType", "Generic"))

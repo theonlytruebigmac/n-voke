@@ -14,7 +14,10 @@ use super::{
 use crate::{
     Core,
     audit::AuditEntry,
-    ncentral::model::{OrgUnit, OrgUnitType},
+    ncentral::{
+        capabilities::Capability,
+        model::{OrgUnit, OrgUnitType},
+    },
 };
 use serde_json::json;
 
@@ -64,11 +67,47 @@ pub struct StructureReport {
     pub would_create: Vec<String>,
     /// How many registration tokens were generated for the new units.
     pub tokens_generated: usize,
+    /// Created, but missing from the destination's list afterwards: the signed-in user can't see them (yet).
+    pub not_visible: Vec<String>,
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "StructureKind.ts"))]
+#[serde(rename_all = "camelCase")]
+pub enum StructureKind {
+    Customer,
+    Site,
+    Tokens,
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "StructureState.ts"))]
+#[serde(rename_all = "camelCase")]
+pub enum StructureState {
+    Running,
+    Created,
+    AlreadyThere,
+    WouldCreate,
+    Failed,
+}
+
+/// One step of creating the missing structure, for the page to show as it happens.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "StructureProgress.ts"))]
+#[serde(rename_all = "camelCase")]
+pub struct StructureProgress {
+    pub name: String,
+    pub kind: StructureKind,
+    /// 1-based, of `total` (the customers and sites; the token step reports `total` of `total`).
+    pub position: usize,
+    pub total: usize,
+    pub state: StructureState,
+    pub why: Option<String>,
 }
 
 fn entries(source: &[OrgUnit], dest: &[OrgUnit], overrides: &HashMap<String, Override>) -> Vec<MappingEntry> {
     let mut mapping = auto_map(source, dest);
-    apply_overrides(&mut mapping, overrides);
+    apply_overrides(&mut mapping, overrides, dest);
     mapping
 }
 
@@ -115,6 +154,7 @@ impl Core {
             return Err("This project reinstalls on the same server, so there is nothing to create.".into());
         }
         let (source, dest) = (self.ncentral_server(&project.source_server_id)?, self.ncentral_server(&project.dest_server_id)?);
+        self.require_capability(&dest.id, Capability::CreateStructure).await?;
         if fresh {
             super::readcache::forget_server(&dest.id);
         }
@@ -137,6 +177,19 @@ impl Core {
     /// each so that nothing created is lost. Then generates registration tokens for the new units. With `dry_run`
     /// nothing is sent.
     pub async fn migration_structure_create(&self, id: &str, instance: &str, service_org_id: &str, only: Option<Vec<String>>, dry_run: bool) -> Result<StructureReport, String> {
+        self.migration_structure_create_with(id, instance, service_org_id, only, dry_run, &|_| {}).await
+    }
+
+    /// The same, telling `progress` as each customer, site and the token step starts and finishes.
+    pub async fn migration_structure_create_with(
+        &self,
+        id: &str,
+        instance: &str,
+        service_org_id: &str,
+        only: Option<Vec<String>>,
+        dry_run: bool,
+        progress: &(dyn Fn(StructureProgress) + Sync),
+    ) -> Result<StructureReport, String> {
         let mut project = self.migration_open_for_write(id, instance).await?;
         let (host, source, dest) = self.structure_units(&project, true).await?;
         if !dest.iter().any(|u| u.org_unit_type == OrgUnitType::ServiceOrg && u.org_unit_id == service_org_id) {
@@ -151,48 +204,95 @@ impl Core {
         }
         let mut report = StructureReport::default();
         let mut created = false;
+        // Where each source customer is on the destination now: matched already, or created by this run, so a site finds its customer without re-matching every unit.
+        let mut customer_dest: HashMap<String, String> = entries(&source, &dest, &project.mapping_overrides)
+            .into_iter()
+            .filter(|e| e.kind == OrgUnitType::Customer && e.status() == MappingStatus::Mapped)
+            .filter_map(|e| Some((e.source_id, e.dest_id?)))
+            .collect();
+        let parent_of: HashMap<&str, &str> = source.iter().filter_map(|u| Some((u.org_unit_id.as_str(), u.parent_id.as_deref()?))).collect();
+        let mut made: Vec<(String, String)> = vec![];
+        let total = customers.len() + sites.len();
+        let mut position = 0;
         for customer in &customers {
+            position += 1;
+            let step = |state, why| StructureProgress { name: customer.name.clone(), kind: StructureKind::Customer, position, total, state, why };
+            progress(step(StructureState::Running, None));
             match self.ncentral_create_customer(&project.dest_server_id, service_org_id, &customer.name).await {
                 Ok(new_id) => {
+                    made.push((customer.name.clone(), new_id.clone()));
+                    customer_dest.insert(customer.source_id.clone(), new_id.clone());
                     let _ = self.migration_set_mapping(&mut project, &customer.source_id, Override::MapTo(new_id));
                     report.customers_created.push(customer.name.clone());
                     created = true;
                     self.migration_save(&mut project).await?;
+                    progress(step(StructureState::Created, None));
                 }
-                Err(e) if e.is_dry_run() => report.would_create.push(format!("Customer {}", customer.name)),
-                Err(e) if e.is_already_there() => report.already_there.push(customer.name.clone()),
-                Err(e) => report.failed.push((customer.name.clone(), e.message)),
+                Err(e) if e.is_dry_run() => {
+                    report.would_create.push(format!("Customer {}", customer.name));
+                    progress(step(StructureState::WouldCreate, None));
+                }
+                Err(e) if e.is_already_there() => {
+                    report.already_there.push(customer.name.clone());
+                    progress(step(StructureState::AlreadyThere, None));
+                }
+                Err(e) => {
+                    progress(step(StructureState::Failed, Some(e.message.clone())));
+                    report.failed.push((customer.name.clone(), e.message));
+                }
             }
         }
         for site in &sites {
+            position += 1;
+            let step = |state, why| StructureProgress { name: site.name.clone(), kind: StructureKind::Site, position, total, state, why };
             // The customer a site goes under is wherever its source customer is mapped now, including one just created.
-            let parent = source.iter().find(|u| u.org_unit_id == site.source_id).and_then(|u| u.parent_id.clone());
-            let mapping = entries(&source, &dest, &project.mapping_overrides);
-            let under = parent.as_deref().and_then(|p| mapping.iter().find(|e| e.source_id == p)).filter(|e| e.status() == MappingStatus::Mapped).and_then(|e| e.dest_id.clone());
+            let parent = parent_of.get(site.source_id.as_str()).map(|p| p.to_string());
+            let under = parent.as_ref().and_then(|p| customer_dest.get(p)).cloned();
             let Some(under) = under else {
                 if dry_run && customers.iter().any(|c| Some(&c.source_id) == parent.as_ref()) {
                     report.would_create.push(format!("Site {} under {}", site.name, site.under));
+                    progress(step(StructureState::WouldCreate, None));
                 } else {
-                    report.failed.push((site.name.clone(), format!("Its customer {} has no destination, so the site can't be created.", site.under)));
+                    let why = format!("Its customer {} has no destination, so the site can't be created.", site.under);
+                    progress(step(StructureState::Failed, Some(why.clone())));
+                    report.failed.push((site.name.clone(), why));
                 }
                 continue;
             };
+            progress(step(StructureState::Running, None));
             match self.ncentral_create_site(&project.dest_server_id, &under, &site.name).await {
                 Ok(new_id) => {
+                    made.push((site.name.clone(), new_id.clone()));
                     let _ = self.migration_set_mapping(&mut project, &site.source_id, Override::MapTo(new_id));
                     report.sites_created.push(site.name.clone());
                     created = true;
                     self.migration_save(&mut project).await?;
+                    progress(step(StructureState::Created, None));
                 }
-                Err(e) if e.is_dry_run() => report.would_create.push(format!("Site {} under {}", site.name, site.under)),
-                Err(e) if e.is_already_there() => report.already_there.push(site.name.clone()),
-                Err(e) => report.failed.push((site.name.clone(), e.message)),
+                Err(e) if e.is_dry_run() => {
+                    report.would_create.push(format!("Site {} under {}", site.name, site.under));
+                    progress(step(StructureState::WouldCreate, None));
+                }
+                Err(e) if e.is_already_there() => {
+                    report.already_there.push(site.name.clone());
+                    progress(step(StructureState::AlreadyThere, None));
+                }
+                Err(e) => {
+                    progress(step(StructureState::Failed, Some(e.message.clone())));
+                    report.failed.push((site.name.clone(), e.message));
+                }
             }
         }
         if dry_run && !was_dry {
             self.set_dry_run(false);
         }
         if created {
+            // Read the destination again, as the signed-in user sees it: a unit it can't see can't be mapped to or given a token.
+            super::readcache::forget_server(&project.dest_server_id);
+            if let Ok(now) = self.org_units_cached(&project.dest_server_id).await {
+                let listed: HashSet<&str> = now.iter().map(|n| n.org_unit_id.as_str()).collect();
+                report.not_visible = made.iter().filter(|(_, id)| !listed.contains(id.as_str())).map(|(name, _)| name.clone()).collect();
+            }
             self.record(&AuditEntry::new(
                 "migration.structure.done",
                 &format!("Created {} customers and {} sites on {host} for {}", report.customers_created.len(), report.sites_created.len(), project.name),
@@ -200,9 +300,17 @@ impl Core {
                 json!({ "project": project.id, "customers": report.customers_created.len(), "sites": report.sites_created.len(), "failed": report.failed.len() }),
             ));
             // The new units have no registration token yet; the plan can't add their devices without one.
+            let step = |state, why| StructureProgress { name: "Registration tokens".into(), kind: StructureKind::Tokens, position: total, total, state, why };
+            progress(step(StructureState::Running, None));
             match self.migration_generate_tokens(&project, None).await {
-                Ok(tokens) => report.tokens_generated = tokens.generated.len(),
-                Err(e) => report.failed.push(("Registration tokens".into(), e)),
+                Ok(tokens) => {
+                    report.tokens_generated = tokens.generated.len();
+                    progress(step(StructureState::Created, None));
+                }
+                Err(e) => {
+                    progress(step(StructureState::Failed, Some(e.clone())));
+                    report.failed.push(("Registration tokens".into(), e));
+                }
             }
         }
         if created {
@@ -346,6 +454,7 @@ mod tests {
         assert_eq!(report.sites_created, ["Attic", "Lab"]);
         assert_eq!(report.already_there, ["Depot"]);
         assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert_eq!(report.not_visible.len(), 4, "this destination's list never shows what was created: {:?}", report.not_visible);
 
         let posts: Vec<String> = fake.paths().into_iter().filter(|p| p.starts_with("POST api/service-orgs") || p.ends_with("/sites")).collect();
         assert!(posts[0].starts_with("POST api/service-orgs/100/customers") && posts[1].starts_with("POST api/service-orgs/100/customers"), "customers first: {posts:?}");
@@ -358,6 +467,84 @@ mod tests {
         };
         assert!(new_id("11").starts_with('9') && new_id("22").starts_with('9'));
         assert!(!saved.mapping_overrides.contains_key("21"), "a conflict isn't guessed at");
+    }
+
+    #[tokio::test]
+    async fn each_step_is_reported_as_it_starts_and_finishes_including_a_failure_and_the_tokens() {
+        let fake = lab("Lab");
+        let (core, id) = setup(&fake).await;
+        let seen = std::sync::Mutex::new(vec![]);
+        let report = core.migration_structure_create_with(&id, "me", "100", None, false, &|p| seen.lock().unwrap().push((p.name, p.kind, p.position, p.total, p.state, p.why))).await.unwrap();
+        let seen = seen.into_inner().unwrap();
+
+        let of = |name: &str| seen.iter().filter(|s| s.0 == name).map(|s| s.4).collect::<Vec<_>>();
+        assert_eq!(of("Newco"), [StructureState::Running, StructureState::Created]);
+        assert_eq!(of("Lab"), [StructureState::Running, StructureState::AlreadyThere]);
+        assert_eq!(of("Registration tokens"), [StructureState::Running, StructureState::Created]);
+        assert!(seen.iter().filter(|s| s.1 != StructureKind::Tokens).all(|s| s.3 == 5 && (1..=5).contains(&s.2)));
+        assert_eq!(report.customers_created.len() + report.sites_created.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn a_destination_that_cannot_create_units_refuses_the_preview_and_the_creation_once_with_the_reason() {
+        let fake = lab("");
+        let (core, id) = setup(&fake).await;
+        core.rest.set_assume_complete(false);
+        let spec_fake = Fake::new(|req, _| {
+            let path = req.url.trim_start_matches("https://").split_once('/').unwrap().1.to_string();
+            match path.as_str() {
+                "api/auth/authenticate" => auth_ok(3600),
+                "api-explorer/openapi-spec.json" => ok(json!({ "openapi": "3.0.1", "paths": { "/api/org-units": { "get": {} } } })),
+                _ => status(404, "{}"),
+            }
+        });
+        core.set_rest_transport(spec_fake.clone());
+        let why = core.migration_structure_preview(&id, None).await.unwrap_err();
+        assert!(why.contains("doesn't offer creating customers and sites") && why.contains("Create the customers and sites in N-central"), "{why}");
+        let why = core.migration_structure_create(&id, "me", "100", None, false).await.unwrap_err();
+        assert!(why.contains("doesn't offer creating customers and sites"), "{why}");
+        assert!(spec_fake.paths().iter().all(|p| !p.starts_with("POST api/service-orgs") && !p.contains("/sites")), "{:?}", spec_fake.paths());
+    }
+
+    #[tokio::test]
+    async fn hundreds_of_customers_with_their_sites_are_created_in_one_pass_each_site_under_its_own_customer() {
+        const CUSTOMERS: usize = 150;
+        const SITES_EACH: usize = 4;
+        let mut units = vec![unit("1", "Old SO", ServiceOrg, None)];
+        for c in 0..CUSTOMERS {
+            let cid = (1000 + c).to_string();
+            units.push(unit(&cid, &format!("Customer {c:03}"), Customer, Some("1")));
+            for s in 0..SITES_EACH {
+                units.push(unit(&(100_000 + c * 10 + s).to_string(), &format!("Site {c:03}-{s}"), Site, Some(&cid)));
+            }
+        }
+        let fake = Fake::new(move |req, n| {
+            let (host, path) = req.url.trim_start_matches("https://").split_once('/').map(|(h, p)| (h.to_string(), p.split('?').next().unwrap().to_string())).unwrap();
+            match (req.method, path.as_str()) {
+                (_, "api/auth/authenticate") => auth_ok(3600),
+                (_, "api/server-info") => ok(json!({ "ncentral": "2026.4.0.25", "version": "1.3.23" })),
+                (_, "api/org-units") => {
+                    let listed = if host == "src.example.com" { units.clone() } else { vec![unit("100", "New SO", ServiceOrg, None)] };
+                    let items: Vec<_> = listed.iter().map(|u| json!({ "orgUnitId": u.org_unit_id.parse::<u64>().unwrap(), "orgUnitName": u.org_unit_name, "orgUnitType": match u.org_unit_type { ServiceOrg => "SO", Customer => "CUSTOMER", Site => "SITE" }, "parentId": u.parent_id.as_ref().map(|p| p.parse::<u64>().unwrap()) })).collect();
+                    ok(json!({ "data": items, "totalPages": 1, "totalItems": items.len(), "page": 1, "pageSize": 1000 }))
+                }
+                (_, p) if p.ends_with("/devices") => ok(json!({ "data": [], "totalPages": 1, "totalItems": 0, "page": 1, "pageSize": 1000 })),
+                (crate::ncentral::rest::Method::Post, p) if p.ends_with("/customers") => status(201, &json!({ "customerId": 500_000 + n }).to_string()),
+                (crate::ncentral::rest::Method::Post, p) if p.ends_with("/sites") => status(201, &json!({ "siteId": 900_000 + n }).to_string()),
+                _ => status(404, "{}"),
+            }
+        });
+        let (core, id) = setup(&fake).await;
+
+        let started = std::time::Instant::now();
+        let report = core.migration_structure_create(&id, "me", "100", None, false).await.unwrap();
+        assert_eq!((report.customers_created.len(), report.sites_created.len()), (CUSTOMERS, CUSTOMERS * SITES_EACH));
+        assert!(report.failed.is_empty(), "{:?}", &report.failed[..report.failed.len().min(3)]);
+        let customer_posts = fake.paths().iter().filter(|p| p.starts_with("POST api/service-orgs/100/customers")).count();
+        assert_eq!(customer_posts, CUSTOMERS);
+        let orphans = fake.paths().iter().filter(|p| p.starts_with("POST api/customers/") && p.ends_with("/sites") && !p.starts_with("POST api/customers/5")).count();
+        assert_eq!(orphans, 0, "every site goes under a customer this run created");
+        assert!(started.elapsed() < std::time::Duration::from_secs(30), "took {:?}: creation should be linear in the number of units", started.elapsed());
     }
 
     #[tokio::test]
