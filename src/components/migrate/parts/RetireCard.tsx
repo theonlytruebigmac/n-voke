@@ -20,7 +20,7 @@ export function RetireCard({ projectId, onOptions }: { projectId: string; onOpti
   const open = (mode: "ready" | "early") => (run.reset(), setDryRun(false), setAcknowledged(false), setConfirming(mode));
 
   const aside = !v ? null : v.turnedOn ? (
-    <span className="rounded-full bg-ok-soft px-2 text-[11px] leading-5 font-semibold text-ok">{plural(v.ready.length, "record")} ready</span>
+    <span className={`rounded-full px-2 text-[11px] leading-5 font-semibold ${v.ready.length > 0 ? "bg-ok-soft text-ok" : "bg-surface-3 text-muted"}`}>{plural(v.ready.length, "record")} ready</span>
   ) : (
     <span className="rounded-full bg-surface-3 px-2 text-[11px] leading-5 font-semibold text-muted">Off</span>
   );
@@ -38,7 +38,7 @@ export function RetireCard({ projectId, onOptions }: { projectId: string; onOpti
       ) : !v.turnedOn ? (
         <>
           <p className="text-sm text-muted">
-            The moved devices' old records stay on {v.sourceHost} until you remove them. This project can retire them for you once a device has been cleaned up and its review period of {v.reviewDays} days is over. Only the record goes: nothing is sent to the device, and the stale Ecoverse asset for it
+            The moved devices' old records stay on {v.sourceHost} until you remove them. This project can retire them for you once a device has been cleaned up and its review period of {plural(v.reviewDays, "day")} is over. Only the record goes: nothing is sent to the device, and the stale Ecoverse asset for it
             disappears by itself.
           </p>
           <Button size="sm" onClick={onOptions}>
@@ -48,23 +48,27 @@ export function RetireCard({ projectId, onOptions }: { projectId: string; onOpti
       ) : (
         <>
           <p className="text-sm text-muted">
-            Deletes the old record of each cleaned-up device from {v.sourceHost}, once its review period of {v.reviewDays} days is over. Only the record goes: nothing is sent to the device. Devices that haven't been cleaned up yet are left alone.
+            Deletes the old record of each cleaned-up device from {v.sourceHost}, once its review period of {plural(v.reviewDays, "day")} is over. Only the record goes: nothing is sent to the device. Devices that haven't been cleaned up yet are left alone.
           </p>
           <p className="text-sm text-muted">
-            {plural(v.ready.length, "device")} ready
+            {v.ready.length > 0 ? `${plural(v.ready.length, "device")} ready` : "None ready yet"}
             {v.inReview > 0 && ` · ${v.inReview} still in the review period${v.nextReviewEnds ? ` (the first ends ${new Date(v.nextReviewEnds).toLocaleDateString()})` : ""}`}
             {v.notCleanedUp > 0 && ` · ${v.notCleanedUp} healthy but not cleaned up`}
           </p>
-          <div className="flex flex-wrap gap-2">
-            <Button size="sm" variant="danger" className="border border-err/40" disabled={v.ready.length === 0} onClick={() => open("ready")}>
-              Retire old records…
-            </Button>
-            {v.waiting.length > 0 && (
-              <Button size="sm" variant="ghost" onClick={() => open("early")}>
-                Retire before the review period ends…
-              </Button>
-            )}
-          </div>
+          {(v.ready.length > 0 || v.waiting.length > 0) && (
+            <div className="flex flex-wrap gap-2">
+              {v.ready.length > 0 && (
+                <Button size="sm" variant="danger" onClick={() => open("ready")}>
+                  Retire {plural(v.ready.length, "old record")}…
+                </Button>
+              )}
+              {v.waiting.length > 0 && (
+                <Button size="sm" onClick={() => open("early")}>
+                  Retire before the review period ends…
+                </Button>
+              )}
+            </div>
+          )}
           {v.waiting.length > 0 && <p className="text-xs text-faint">The review period is there so you can check each moved device first. You can skip it, with a warning, for example to test retiring.</p>}
         </>
       )}

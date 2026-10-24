@@ -353,10 +353,37 @@ async fn project_finish(core: State<'_, Core>, id: String) -> Result<FinishView,
     core.migration_finish_view(&id).await
 }
 
-/// Saves a report into the Downloads folder and returns where it went.
+/// Builds a report from the devices as they are now (an open project's are read from the servers first), saves it into
+/// the Downloads folder and returns where it went.
 #[tauri::command]
-async fn project_report(core: State<'_, Core>, id: String, format: ReportFormat) -> Result<String, String> {
-    core.migration_finish_report(&id, format).await
+async fn project_report(core: State<'_, Core>, locks: State<'_, ProjectLocks>, id: String, format: ReportFormat) -> Result<String, String> {
+    let lock = locks.get(&id);
+    let _held = lock.lock().await;
+    core.migration_finish_report(&id, &instance(), format).await
+}
+
+/// Closes a project by hand (tracking stops and nothing in it can change), or reopens one closed that way.
+#[tauri::command]
+async fn project_set_closed(core: State<'_, Core>, locks: State<'_, ProjectLocks>, id: String, closed: bool) -> Result<(), String> {
+    let lock = locks.get(&id);
+    let _held = lock.lock().await;
+    core.migration_set_closed(&id, &instance(), closed).await
+}
+
+/// Opens a saved report in the program the system uses for it (the web browser for a web page).
+#[tauri::command]
+fn project_report_open(app: AppHandle, core: State<'_, Core>, path: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let file = core.migration_saved_report(&path)?;
+    app.opener().open_path(file.to_string_lossy(), None::<&str>).map_err(|e| format!("The report couldn't be opened: {e}"))
+}
+
+/// Shows a saved report selected in the system's file manager.
+#[tauri::command]
+fn project_report_reveal(app: AppHandle, core: State<'_, Core>, path: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let file = core.migration_saved_report(&path)?;
+    app.opener().reveal_item_in_dir(file).map_err(|e| format!("The folder couldn't be shown: {e}"))
 }
 
 /// Runs Cleanup on every healthy device that is fully working (or only on the `only` source device IDs), telling the page after each step with the
@@ -561,6 +588,7 @@ pub fn run() {
     let core = Core::new(env!("CARGO_PKG_VERSION")).expect("failed to initialise the N-voke core");
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .manage(core)
         .manage(Trackers::default())
         .manage(ProjectLocks::default())
@@ -609,6 +637,9 @@ pub fn run() {
             project_probe_waiting,
             project_finish,
             project_report,
+            project_report_open,
+            project_report_reveal,
+            project_set_closed,
             project_cleanup,
             project_cleanup_cancel,
             project_structure_preview,

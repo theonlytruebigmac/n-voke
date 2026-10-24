@@ -1,10 +1,13 @@
-import { Download } from "lucide-react";
+import { Download, ExternalLink, FolderOpen } from "lucide-react";
 import { useState } from "react";
-import type { CleanupDevice, CleanupReport } from "../../../lib/migrate/bindings";
+import { openReport, revealReport } from "../../../lib/migrate/api";
+import type { CleanupDevice, CleanupReport, ReportFormat } from "../../../lib/migrate/bindings";
 import { cleanupScope, waveGroups } from "../../../lib/migrate/cleanup";
-import { stopCleanup, useCleanupProgress, useFinish, useFinishActions } from "../../../lib/migrate/queries";
+import { whatKeepsItOpen } from "../../../lib/migrate/closing";
+import { stopCleanup, useCleanupProgress, useFinish, useFinishActions, useProject, useSetClosed } from "../../../lib/migrate/queries";
 import { Button, Card, CopyButton, Dot, ErrorNote, Modal, inputClass } from "../../ui";
 import { NameList } from "../move/NameList";
+import { CloseProjectDialog } from "../parts/CloseProjectDialog";
 import { RetireCard } from "../parts/RetireCard";
 
 const plural = (n: number, word: string) => `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
@@ -57,11 +60,81 @@ function PickList({ devices, picked, onToggle }: { devices: CleanupDevice[]; pic
   );
 }
 
+/**
+ * The two reports. The web page is the full account (summary, waves, destinations, what needs attention, every
+ * device and its history) and opens in the browser as soon as it is saved; the spreadsheet is one row per device.
+ */
+function ReportSection({ projectId }: { projectId: string }) {
+  const { report } = useFinishActions(projectId);
+  const [saved, setSaved] = useState<{ path: string; format: ReportFormat } | null>(null);
+  const [openError, setOpenError] = useState<string | null>(null);
+  const open = (path: string) => openReport(path).then(() => setOpenError(null), (e) => setOpenError(String(e)));
+  const save = (format: ReportFormat) => {
+    setOpenError(null);
+    report.mutate(format, {
+      onSuccess: (path) => {
+        setSaved({ path, format });
+        if (format === "html") void open(path);
+      },
+    });
+  };
+  const saving = (format: ReportFormat) => report.isPending && report.variables === format;
+
+  return (
+    <Section title="Report" aside={<span className="text-xs text-faint">Each save builds a new one from where the devices are now</span>}>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div className="flex flex-col gap-3 rounded-xl border border-border px-4 py-3">
+          <div className="flex-1 space-y-1">
+            <p className="font-medium">Web page</p>
+            <p className="text-sm text-muted">The full account, to read or send on: where the move stands, each wave and destination, what needs attention and why, and every device with its history. Opens in your browser once saved.</p>
+          </div>
+          <Button variant="tinted" className="self-start" busy={saving("html")} disabled={report.isPending && !saving("html")} onClick={() => save("html")}>
+            <ExternalLink />
+            Save and open
+          </Button>
+        </div>
+        <div className="flex flex-col gap-3 rounded-xl border border-border px-4 py-3">
+          <div className="flex-1 space-y-1">
+            <p className="font-medium">Spreadsheet (CSV)</p>
+            <p className="text-sm text-muted">One row per device with its IDs, wave, path, stage and last error, for filtering or importing elsewhere.</p>
+          </div>
+          <Button className="self-start" busy={saving("csv")} disabled={report.isPending && !saving("csv")} onClick={() => save("csv")}>
+            <Download />
+            Save
+          </Button>
+        </div>
+      </div>
+      {saved && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl bg-ok-soft px-3 py-2 text-sm">
+          <span className="min-w-0 flex-1 break-all text-ok">
+            {saved.format === "html" ? "Web page" : "Spreadsheet"} saved to {saved.path}
+          </span>
+          <span className="flex items-center gap-1.5">
+            <Button size="sm" onClick={() => void open(saved.path)}>
+              <ExternalLink />
+              Open
+            </Button>
+            <Button size="sm" onClick={() => revealReport(saved.path).then(() => setOpenError(null), (e) => setOpenError(String(e)))}>
+              <FolderOpen />
+              Show in folder
+            </Button>
+            <CopyButton text={saved.path} label="Copy path" />
+          </span>
+        </div>
+      )}
+      {report.isError && <ErrorNote>{String(report.error)}</ErrorNote>}
+      {openError && <ErrorNote>{openError}</ErrorNote>}
+    </Section>
+  );
+}
+
 /** Where the project stands, the report, and tidying up (step 7 in docs/migration/11-gui-design.md). */
 export function FinishStep({ projectId, onOptions }: { projectId: string; onOptions: () => void }) {
   const finish = useFinish(projectId);
-  const { report, cleanup } = useFinishActions(projectId);
-  const [savedAt, setSavedAt] = useState<string | null>(null);
+  const { cleanup } = useFinishActions(projectId);
+  const project = useProject(projectId);
+  const setClosed = useSetClosed(projectId);
+  const [closing, setClosing] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [cleaned, setCleaned] = useState<CleanupReport | null>(null);
   const v = finish.data;
@@ -97,19 +170,38 @@ export function FinishStep({ projectId, onOptions }: { projectId: string; onOpti
                 <span className={`rounded-full px-2 text-[11px] leading-5 font-semibold ${v.closed ? "bg-ok-soft text-ok" : "bg-surface-3 text-muted"}`}>{v.closed ? "Closed" : "Open"}</span>
               </div>
               <p className="text-sm text-muted">
-                {v.closed
-                  ? "Every device is finished with, so this project is closed. Nothing more is needed."
-                  : healthy > 0
-                    ? `Each healthy device removes its own migration record ${v.reviewDays} days after it became healthy. This app notes it the next time the project is open (it checks every minute while the Track step is showing), and the project closes once every device has cleaned up. To finish sooner, run the cleanup below.`
-                    : v.moving + v.waiting + v.needsYou > 0
-                      ? "Some devices aren't done yet. Go back to Track to see what each is waiting for."
-                      : "Nothing is waiting on you."}
+                {v.closedAt
+                  ? `You closed this project on ${new Date(v.closedAt).toLocaleDateString()}.${v.unfinished > 0 ? ` ${plural(v.unfinished, "device")} ${v.unfinished === 1 ? "wasn't" : "weren't"} finished and ${v.unfinished === 1 ? "was" : "were"} left as ${v.unfinished === 1 ? "it was" : "they were"}.` : ""} Tracking is off, and nothing in it can change until you reopen it.`
+                  : v.closed
+                    ? "Every device is finished with, so this project closed by itself. Nothing more is needed. Reopen it if you want to carry on working in it."
+                    : `${whatKeepsItOpen(v)} ${
+                        healthy > 0
+                          ? `Each healthy device cleans up by itself ${plural(v.reviewDays, "day")} after it became healthy${ready.length > 0 ? ", or you can clean up now" : ""}.`
+                          : v.moving + v.waiting + v.needsYou > 0
+                            ? "Track shows what each device is waiting for."
+                            : v.toRetire > 0
+                              ? "Retire the old records below once their review period is over."
+                              : ""
+                      }`.trim()}
               </p>
             </div>
-            {!v.closed && ready.length > 0 && (
-              <Button variant="primary" onClick={startCleanup}>
-                Clean up {plural(ready.length, "device")} now…
-              </Button>
+            <div className="flex flex-wrap items-center gap-2">
+              {!v.closed && ready.length > 0 && (
+                <Button variant="primary" onClick={startCleanup}>
+                  Clean up {plural(ready.length, "device")} now…
+                </Button>
+              )}
+              {!v.closed && v.total > 0 && <Button onClick={() => setClosing(true)}>Close project…</Button>}
+              {v.closed && (
+                <Button busy={setClosed.isPending} onClick={() => setClosed.mutate(false)}>
+                  Reopen
+                </Button>
+              )}
+            </div>
+            {setClosed.isError && (
+              <div className="basis-full">
+                <ErrorNote>{String(setClosed.error)}</ErrorNote>
+              </div>
             )}
           </Card>
 
@@ -123,11 +215,11 @@ export function FinishStep({ projectId, onOptions }: { projectId: string; onOpti
             <Stat value={v.cleanedUp + v.retired} label="cleaned up or done" tone="text-muted" />
           </div>
 
-          <div className="grid grid-cols-[repeat(auto-fit,minmax(380px,1fr))] items-start gap-4">
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(380px,1fr))] gap-4">
             <Section title="Clean up" aside={<span className="text-xs text-faint">{plural(ready.length, "device")} ready</span>}>
               <p className="text-sm text-muted">
-                Each healthy device removes what the migration left on it (its scheduled tasks and the N-voke folder, with the status file and logs) by itself after its review period of {v.reviewDays} days. To do it sooner, run the cleanup now. It never changes either N-central server or
-                Ecoverse.
+                Each healthy device removes what the migration left on it (its scheduled tasks and the N-voke folder, with the status file and logs) by itself after its review period of {plural(v.reviewDays, "day")}. It never changes either N-central server or Ecoverse.
+                {!v.closed && ready.length > 0 && " To do it sooner, use Clean up now at the top."}
               </p>
               {v.waitingForEcoverse.length > 0 && (
                 <p className="text-sm text-warn">
@@ -136,32 +228,12 @@ export function FinishStep({ projectId, onOptions }: { projectId: string; onOpti
                   {v.waitingForEcoverse.length > 6 ? ` and ${(v.waitingForEcoverse.length - 6).toLocaleString()} more` : ""}.
                 </p>
               )}
-              <Button size="sm" disabled={ready.length === 0} onClick={startCleanup}>
-                Run cleanup now…
-              </Button>
             </Section>
 
             <RetireCard projectId={projectId} onOptions={onOptions} />
           </div>
 
-          <Section title="Report">
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-              <p className="min-w-60 flex-1 text-sm text-muted">Every device with its stage, path, wave and history. It is saved to your Downloads folder.</p>
-              {(["html", "csv"] as const).map((format) => (
-                <Button key={format} size="sm" busy={report.isPending && report.variables === format} onClick={() => report.mutate(format, { onSuccess: setSavedAt })}>
-                  <Download />
-                  Save as {format === "html" ? "a web page" : "a spreadsheet (CSV)"}
-                </Button>
-              ))}
-            </div>
-            {savedAt && (
-              <div className="flex items-center gap-2 text-xs text-ok">
-                <span className="break-all">Saved to {savedAt}</span>
-                <CopyButton text={savedAt} label="Copy path" />
-              </div>
-            )}
-            {report.isError && <ErrorNote>{String(report.error)}</ErrorNote>}
-          </Section>
+          <ReportSection projectId={projectId} />
         </>
       )}
 
@@ -256,6 +328,7 @@ export function FinishStep({ projectId, onOptions }: { projectId: string; onOpti
           )}
         </Modal>
       )}
+      {closing && <CloseProjectDialog projectId={projectId} name={project.data?.name ?? "this project"} onClose={() => setClosing(false)} />}
       {cleaned && (
         <Modal title="Cleanup finished" onClose={() => setCleaned(null)} footer={<Button onClick={() => setCleaned(null)}>Done</Button>}>
           <div className="space-y-2 text-sm">

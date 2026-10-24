@@ -13,7 +13,28 @@ moving: number,
 /**
  * Planned but not launched.
  */
-waiting: number, needsYou: number, closed: boolean, reviewDays: number, retireSourceRecords: boolean, 
+waiting: number, needsYou: number, closed: boolean, 
+/**
+ * When the operator closed it by hand; None when it is open or closed by itself.
+ */
+closedAt: string | null, 
+/**
+ * When the operator reopened it after every device was finished; it then stays open until closed by hand.
+ */
+reopenedAt: string | null, 
+/**
+ * Devices not finished with yet (see `Project::is_finished`): what keeps an open project open, and what closing it
+ * by hand leaves as it is.
+ */
+unfinished: number, 
+/**
+ * Cleaned up and waiting only for their old source record to be retired, when the project retires them.
+ */
+toRetire: number, 
+/**
+ * When the first of those reaches the end of its review period, if one is still in it.
+ */
+nextReviewEnds: string | null, reviewDays: number, retireSourceRecords: boolean, 
 /**
  * Healthy devices a cleanup would run on, by name: the ones Ecoverse is receiving asset data from, or that have no
  * Ecoverse to wait for.

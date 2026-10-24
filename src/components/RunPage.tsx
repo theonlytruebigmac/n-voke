@@ -396,7 +396,7 @@ export function RunPage({
                   <Play />
                   {script && devices.length ? `Run on ${deviceWord}` : "Run"}
                 </Button>
-                {script && devices.length > 0 && <p className="text-center text-xs text-faint">You'll confirm before it starts.</p>}
+                <p className="text-center text-xs text-faint">{!script ? "Pick a script to run first." : !devices.length ? "Pick the devices to run it on first." : "You'll confirm before it starts."}</p>
               </>
             )}
           </aside>

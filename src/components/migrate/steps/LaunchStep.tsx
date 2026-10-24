@@ -244,10 +244,12 @@ export function LaunchStep({ projectId, onGo }: { projectId: string; onGo: (step
   return (
     <div className="space-y-4">
       <HeaderActions>
-        <Button variant="primary" disabled={!view || view.unassigned === 0} onClick={() => setMaking(true)}>
-          <Plus />
-          New wave
-        </Button>
+        {view && view.unassigned > 0 && (
+          <Button variant="primary" onClick={() => setMaking(true)}>
+            <Plus />
+            New wave
+          </Button>
+        )}
       </HeaderActions>
 
       {launch.isError ? (

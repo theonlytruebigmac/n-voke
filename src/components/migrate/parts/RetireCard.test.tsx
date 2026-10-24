@@ -35,7 +35,7 @@ const open = () =>
       <RetireCard projectId="p" onOptions={() => {}} />
     </TooltipProvider>,
   );
-const normal = () => screen.getByRole("button", { name: /^Retire old records/ });
+const normal = () => screen.getByRole("button", { name: /^Retire \d+ old records?…/ });
 const early = () => screen.getByRole("button", { name: /Retire before the review period ends/ });
 
 beforeEach(() => {
@@ -48,7 +48,7 @@ describe("RetireCard: before the review period ends", () => {
   it("offers a way past the review period when nothing is ready but devices are still in it", () => {
     state.view = view();
     open();
-    expect((normal() as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByRole("button", { name: /^Retire \d+ old records?…/ })).toBeNull();
     expect((early() as HTMLButtonElement).disabled).toBe(false);
     expect(screen.getByText(/3 still in the review period/)).toBeTruthy();
   });

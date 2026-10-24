@@ -276,10 +276,12 @@ export function MapStep({ projectId, onContinue }: { projectId: string; onContin
           <input className={`${inputClass} pl-8`} placeholder="Search customers or sites" value={text} onChange={(e) => setText(e.target.value)} aria-label="Search customers or sites" />
         </label>
         <span className="flex-1" />
-        <Button disabled={!view || rows.every((r) => r.status !== "unmatched")} onClick={() => setCreating(true)}>
-          <PlusSquare />
-          Create missing…
-        </Button>
+        {view && rows.some((r) => r.status === "unmatched") && (
+          <Button onClick={() => setCreating(true)}>
+            <PlusSquare />
+            Create missing…
+          </Button>
+        )}
         <Menu>
           <MenuTrigger asChild>
             <Button disabled={!details.data}>

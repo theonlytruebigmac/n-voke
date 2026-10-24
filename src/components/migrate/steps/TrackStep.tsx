@@ -49,7 +49,7 @@ function Strip({ counts, active, onPick }: { counts: GroupCount[]; active: Track
               onClick={() => onPick(on ? null : c.group)}
               aria-pressed={on}
               className={`inline-flex h-8 items-center gap-2 rounded-full border px-3 text-xs whitespace-nowrap transition-colors ${
-                on ? (warn ? "border-warn/40 bg-warn-soft" : "border-accent/40 bg-accent-soft") : "border-border bg-surface hover:bg-surface-2"
+                on ? (warn ? "border-warn/40 bg-warn-soft" : "border-accent/40 bg-accent-soft") : "border-control-border bg-surface hover:bg-surface-2"
               }`}
             >
               <span className={`size-2 rounded-sm ${GROUP_COLOR(c.group)}`} />
@@ -114,7 +114,8 @@ function NeedsYou({ kinds, total, now, onOpen, onShowAll }: { kinds: NeedKind[];
 /** The home of a running project: the stages, what needs the person, and every device (step 6 in docs/migration/11-gui-design.md). */
 export function TrackStep({ projectId, onContinue, onPrepare }: { projectId: string; onContinue: () => void; onPrepare: () => void }) {
   const project = useProject(projectId);
-  const tracker = useTracker(projectId, true);
+  // A closed project isn't tracked: everything in it is finished, or it was closed by hand and refuses changes.
+  const tracker = useTracker(projectId, project.data ? !project.data.closed : false);
   const { poll, probeWaiting } = useDeviceActions(projectId);
   const bulk = useBulk(projectId);
   const [probed, setProbed] = useState<ProbeReport | null>(null);

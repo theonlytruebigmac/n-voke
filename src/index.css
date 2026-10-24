@@ -39,6 +39,11 @@
   --color-warn-soft: color-mix(in srgb, var(--warn) 14%, transparent);
   --color-err: var(--err);
   --color-err-soft: color-mix(in srgb, var(--err) 13%, transparent);
+  --color-err-fill: var(--err-fill);
+  --color-err-fill-hover: var(--err-fill-hover);
+  --color-control: var(--control);
+  --color-control-hover: var(--control-hover);
+  --color-control-border: var(--control-border);
 
   --animate-pop: pop 120ms ease-out;
   --animate-fade: fade 120ms ease-out;
@@ -79,6 +84,13 @@
   --ok: #4ade80;
   --warn: #fbbf24;
   --err: #f87171;
+  /* Deep red behind white text (the button that deletes); `err` is too pale for it. */
+  --err-fill: #c9302c;
+  --err-fill-hover: #d93d38;
+  /* Secondary buttons: a step lighter than the cards they sit on, with an edge you can see. */
+  --control: #20222d;
+  --control-hover: #282b38;
+  --control-border: #3a3e4f;
 }
 
 /* Base rules live in the base layer so Tailwind utilities (e.g. outline-none) can override them. */

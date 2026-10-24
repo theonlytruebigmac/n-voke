@@ -119,6 +119,15 @@ impl Core {
 
     /// Loads a project for changing, holding its lease. Fails if another app instance holds it.
     pub async fn migration_open_for_write(&self, id: &str, instance: &str) -> Result<Project, String> {
+        let project = self.migration_open_for_write_even_closed(id, instance).await?;
+        if project.closed_at.is_some() {
+            return Err(format!("{} is closed. Reopen it on its Finish page to change anything.", project.name));
+        }
+        Ok(project)
+    }
+
+    /// The same for a project closed by hand too: only to reopen it.
+    pub(crate) async fn migration_open_for_write_even_closed(&self, id: &str, instance: &str) -> Result<Project, String> {
         // Lease first, then load, so what's read can't be older than the lease.
         let held = self.migration_lease(id, instance).await?;
         let project = self.migration_load(id).await?.ok_or_else(|| format!("There is no migration project {id}."))?;

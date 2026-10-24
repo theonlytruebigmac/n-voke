@@ -126,9 +126,11 @@ export function ServersPanel() {
                       )}
                     </div>
                     <div className="flex shrink-0 items-center gap-1.5">
-                      <Button size="sm" onClick={() => test(s)} busy={t?.kind === "testing"} disabled={!s.hasJwt}>
-                        Test
-                      </Button>
+                      {s.hasJwt && (
+                        <Button size="sm" onClick={() => test(s)} busy={t?.kind === "testing"}>
+                          Test
+                        </Button>
+                      )}
                       <Button
                         size="sm"
                         onClick={() => {

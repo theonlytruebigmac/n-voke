@@ -32,6 +32,7 @@ import {
   startTracker,
   stopTracker,
   writeReport,
+  setProjectClosed,
   clearMapping,
   closeProject,
   createProject,
@@ -305,9 +306,16 @@ export const useFinish = (id: string) => useQuery({ queryKey: ["migrate", "finis
 export function useFinishActions(id: string) {
   const refresh = useRefreshProject(id);
   return {
-    report: useMutation({ mutationFn: (format: ReportFormat) => writeReport(id, format) }),
+    // An open project's devices are read from the servers before the report is built, so the screens change too.
+    report: useMutation({ mutationFn: (format: ReportFormat) => writeReport(id, format), onSettled: refresh }),
     cleanup: useMutation({ mutationFn: (only: string[] | null) => cleanupHealthy(id, only), onSettled: refresh }),
   };
+}
+
+/** Closing a project by hand (true) or reopening it (false): the list moves it between Open and Closed. */
+export function useSetClosed(id: string) {
+  const refresh = useRefreshProject(id);
+  return useMutation({ mutationFn: (closed: boolean) => setProjectClosed(id, closed), onSettled: refresh });
 }
 
 export const useStructurePreview = (id: string, enabled: boolean) =>

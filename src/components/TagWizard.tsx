@@ -250,7 +250,7 @@ export function TagWizard({ initialName = "", initialKind = "StaticTag", initial
               {step === "review" ? "Create tag" : step === "members" ? "Next: review" : "Next"}
             </Button>
           </div>
-          <Button variant="ghost" onClick={onCancel} disabled={busy}>
+          <Button onClick={onCancel} disabled={busy}>
             Cancel
           </Button>
         </aside>

@@ -90,7 +90,7 @@ export function DeviceSheet({ projectId, index, onClose }: { projectId: string; 
                   <Button
                     key={a}
                     size="sm"
-                    variant={a === "markResolved" ? "ghost" : i === 0 ? "primary" : undefined}
+                    variant={i === 0 && a !== "markResolved" ? "primary" : undefined}
                     busy={command.isPending && confirming === null && active === a}
                     disabled={command.isPending && active !== a}
                     onClick={() => ask(a, d)}

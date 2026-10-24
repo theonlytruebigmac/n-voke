@@ -38,6 +38,8 @@ pub struct ProjectSummary {
     pub devices: usize,
     pub attention: usize,
     pub closed: bool,
+    /// When the operator closed it by hand; None when it is open or closed by itself.
+    pub closed_at: Option<String>,
     pub stage_counts: BTreeMap<Stage, usize>,
     /// Healthy in N-central but not yet sending asset data to Ecoverse: registered, not fully working.
     pub ecoverse_waiting: usize,
@@ -57,6 +59,7 @@ impl ProjectSummary {
             devices: project.devices.len(),
             attention: project.attention_count(),
             closed: project.is_closed(),
+            closed_at: project.closed_at.clone(),
             stage_counts: project.stage_counts(),
             ecoverse_waiting: project.ecoverse_waiting(),
             ecoverse_checked: project.dest_ecoverse != DestEcoverse::NotLinked,

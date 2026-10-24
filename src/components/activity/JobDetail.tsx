@@ -276,7 +276,7 @@ export function JobDetail({ job, onDraft }: { job: Job; onDraft: (draft: Omit<Ru
               {groups.map((g) => {
                 const out = taskOutcome(g.tasks[0]) ? groupHeadline(g) : "";
                 return (
-                  <tr key={g.key} onClick={() => showGroup(g.key)} className="group cursor-default hover:bg-surface-2/60">
+                  <tr key={g.key} onClick={() => showGroup(g.key)} className="cursor-default hover:bg-surface-2/60">
                     <td className="text-right font-semibold tabular-nums">{g.tasks.length.toLocaleString()}</td>
                     <td className="whitespace-nowrap">
                       <TaskStatus task={g.tasks[0]} />
@@ -285,7 +285,7 @@ export function JobDetail({ job, onDraft }: { job: Job; onDraft: (draft: Omit<Ru
                       {out}
                     </td>
                     <td className="whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
-                      <div className="flex justify-end gap-1.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+                      <div className="flex justify-end gap-1.5">
                         {org && (
                           <Button size="sm" onClick={() => setTagging(g.tasks)}>
                             Tag these
@@ -296,7 +296,7 @@ export function JobDetail({ job, onDraft }: { job: Job; onDraft: (draft: Omit<Ru
                             Run a script on these
                           </Button>
                         )}
-                        <Button size="sm" variant="ghost" onClick={() => showGroup(g.key)}>
+                        <Button size="sm" onClick={() => showGroup(g.key)}>
                           Show devices
                         </Button>
                       </div>

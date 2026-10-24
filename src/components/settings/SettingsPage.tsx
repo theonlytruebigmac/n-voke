@@ -274,7 +274,7 @@ function DataSettings({ settings, onSaved }: { settings: Settings; onSaved: (s: 
         <span className="flex-1 text-sm text-muted">{cleared ? "History and cached data cleared." : "Clears finished runs and cached lists. Runs in progress keep going."}</span>
         {confirmClear ? (
           <div className="flex gap-2">
-            <Button size="sm" variant="ghost" onClick={() => setConfirmClear(false)} disabled={busy}>
+            <Button size="sm" onClick={() => setConfirmClear(false)} disabled={busy}>
               Cancel
             </Button>
             <Button size="sm" variant="destructive" onClick={() => void clearData()} busy={busy}>

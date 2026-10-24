@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowRightLeft, MoreHorizontal, Plus, Search } from "lucide-react";
+import { ArrowRightLeft, Plus, Search } from "lucide-react";
 import type { ProjectSummary, ServerView } from "../../lib/migrate/bindings";
 import { projectProgress } from "../../lib/migrate/progress";
 import { useProjectActions, useProjects, useServers } from "../../lib/migrate/queries";
 import { formatRelative, useNow } from "../../lib/format";
-import { Button, Card, Dot, EmptyState, ErrorNote, IconButton, Menu, MenuContent, MenuItem, MenuTrigger, Modal, PageBody, PageHeader, Segmented, Table, inputClass } from "../ui";
+import { Button, Card, Dot, EmptyState, ErrorNote, Modal, PageBody, PageHeader, Segmented, Table, inputClass } from "../ui";
 import { NewProjectDialog } from "./NewProjectDialog";
+import { ProjectMenu } from "./parts/ProjectMenu";
 import type { SettingsSection } from "../settings/SettingsPage";
 import { ServersSheet } from "./ServersSheet";
 import { Workspace } from "./Workspace";
@@ -58,19 +59,7 @@ function ProjectRow({
       </td>
       <td className="whitespace-nowrap text-faint">{formatRelative(project.updatedAt, now)}</td>
       <td className="w-10 text-right" onClick={(e) => e.stopPropagation()}>
-        <Menu>
-          <MenuTrigger asChild>
-            <IconButton label={`More for ${project.name}`}>
-              <MoreHorizontal />
-            </IconButton>
-          </MenuTrigger>
-          <MenuContent>
-            <MenuItem onSelect={onOpen}>Open</MenuItem>
-            <MenuItem onSelect={onDelete} danger>
-              Delete…
-            </MenuItem>
-          </MenuContent>
-        </Menu>
+        <ProjectMenu project={project} onOpen={onOpen} onDelete={onDelete} />
       </td>
     </tr>
   );

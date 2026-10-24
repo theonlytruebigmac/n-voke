@@ -27,6 +27,17 @@ pub struct FinishView {
     pub waiting: usize,
     pub needs_you: usize,
     pub closed: bool,
+    /// When the operator closed it by hand; None when it is open or closed by itself.
+    pub closed_at: Option<String>,
+    /// When the operator reopened it after every device was finished; it then stays open until closed by hand.
+    pub reopened_at: Option<String>,
+    /// Devices not finished with yet (see `Project::is_finished`): what keeps an open project open, and what closing it
+    /// by hand leaves as it is.
+    pub unfinished: usize,
+    /// Cleaned up and waiting only for their old source record to be retired, when the project retires them.
+    pub to_retire: usize,
+    /// When the first of those reaches the end of its review period, if one is still in it.
+    pub next_review_ends: Option<String>,
     pub review_days: u32,
     pub retire_source_records: bool,
     /// Healthy devices a cleanup would run on, by name: the ones Ecoverse is receiving asset data from, or that have no
@@ -113,6 +124,11 @@ pub fn finish_view(project: &Project) -> FinishView {
         waiting: count(&[Stage::Planned]),
         needs_you: project.attention_count(),
         closed: project.is_closed(),
+        closed_at: project.closed_at.clone(),
+        reopened_at: project.reopened_at.clone(),
+        unfinished: project.devices.iter().filter(|d| !project.is_finished(d)).count(),
+        to_retire: if project.options.retire_source_records { count(&[Stage::CleanedUp]) } else { 0 },
+        next_review_ends: if project.options.retire_source_records { super::retire::retire_view(project, "", chrono::Utc::now()).next_review_ends } else { None },
         review_days: project.options.review_days,
         retire_source_records: project.options.retire_source_records,
         cleanup_devices: healthy_ready(project)
@@ -127,6 +143,20 @@ pub fn finish_view(project: &Project) -> FinishView {
     }
 }
 
+/// Where reports are saved: the Downloads folder, or the app data folder on a system without one.
+fn report_dir() -> Result<std::path::PathBuf, String> {
+    dirs::download_dir().or_else(dirs::data_dir).ok_or_else(|| "There is no Downloads folder to save the report in.".into())
+}
+
+fn saved_report_in(dir: &std::path::Path, path: &str) -> Result<std::path::PathBuf, String> {
+    let gone = || "That report is no longer there. Save it again.".to_string();
+    let file = std::fs::canonicalize(path).map_err(|_| gone())?;
+    let dir = std::fs::canonicalize(dir).map_err(|_| gone())?;
+    let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let is_report = name.starts_with("nvoke-migration-") && (name.ends_with(".html") || name.ends_with(".csv"));
+    if file.parent() == Some(dir.as_path()) && is_report && file.is_file() { Ok(file) } else { Err("Only a report this app saved can be opened from here.".into()) }
+}
+
 impl Core {
     pub async fn migration_finish_view(&self, id: &str) -> Result<FinishView, String> {
         let project = self.migration_load_shared(id).await?.ok_or_else(|| format!("There is no migration project {id}."))?;
@@ -134,14 +164,42 @@ impl Core {
     }
 
     /// Saves a report of the project into the Downloads folder and returns where it went.
-    pub async fn migration_finish_report(&self, id: &str, format: ReportFormat) -> Result<String, String> {
-        let project = self.migration_load(id).await?.ok_or_else(|| format!("There is no migration project {id}."))?;
-        let dir = dirs::download_dir().or_else(dirs::data_dir).ok_or("There is no Downloads folder to save the report in.")?;
+    /// Builds a report now and saves it. An open project's devices are read from the servers first (a tracker pass), so
+    /// the report says where they are now, not where they were when the project was last looked at; if that can't be done
+    /// (another window has the project), it is built from the last reading.
+    pub async fn migration_finish_report(&self, id: &str, instance: &str, format: ReportFormat) -> Result<String, String> {
+        let saved = self.migration_load(id).await?.ok_or_else(|| format!("There is no migration project {id}."))?;
+        let project = if saved.is_closed() { saved } else { self.migration_poll_saved(id, instance, &self.migration_settings().thresholds()).await.map_or(saved, |(fresh, _)| fresh) };
+        let dir = report_dir()?;
         let format = match format {
             ReportFormat::Html => Format::Html,
             ReportFormat::Csv => Format::Csv,
         };
         self.migration_write_report(&project, &Filter::default(), format, &dir).map(|p| p.display().to_string())
+    }
+
+    /// Closes a project by hand, or reopens it however it closed. Nothing is sent to a device or server: closing stops the
+    /// tracker and refuses changes until it is reopened, and the devices that weren't finished stay as they were. A
+    /// project reopened with every device finished stays open until it is closed by hand.
+    pub async fn migration_set_closed(&self, id: &str, instance: &str, closed: bool) -> Result<(), String> {
+        let mut project = self.migration_open_for_write_even_closed(id, instance).await?;
+        if project.is_closed() == closed {
+            return Ok(());
+        }
+        let unfinished = project.devices.iter().filter(|d| !project.is_finished(d)).count();
+        let now = super::project::stamp(chrono::Utc::now());
+        project.closed_at = closed.then(|| now.clone());
+        project.reopened_at = (!closed && project.all_finished()).then_some(now);
+        let result = self.migration_save(&mut project).await;
+        let summary = if closed { format!("Closed {} by hand, leaving {unfinished} unfinished device(s) as they were", project.name) } else { format!("Reopened {}", project.name) };
+        self.record(&crate::audit::AuditEntry::new(if closed { "migration.close" } else { "migration.reopen" }, &summary, result.clone(), serde_json::json!({ "project": project.id, "unfinished": unfinished })));
+        result
+    }
+
+    /// A report this app saved, given its path back from the page, so it can be opened or shown: only a migration report
+    /// in the folder reports are saved to, never any other file the page might name.
+    pub fn migration_saved_report(&self, path: &str) -> Result<std::path::PathBuf, String> {
+        saved_report_in(&report_dir()?, path)
     }
 
     /// Runs Cleanup on every healthy device that is fully working, one after another, saving after each so a stop
@@ -197,6 +255,26 @@ mod tests {
         project::{DestEcoverse, EcoState},
     };
 
+    #[test]
+    fn only_a_saved_report_in_the_report_folder_can_be_opened() {
+        let base = std::env::temp_dir().join(format!("nvoke-saved-{}", std::process::id()));
+        let dir = base.join("Downloads");
+        std::fs::create_dir_all(&dir).unwrap();
+        let report = dir.join("nvoke-migration-x-20261024-120000.html");
+        let other = dir.join("notes.html");
+        let outside = base.join("nvoke-migration-y-20261024-120000.html");
+        for f in [&report, &other, &outside] {
+            std::fs::write(f, "x").unwrap();
+        }
+        let path = |p: &std::path::Path| p.display().to_string();
+        assert!(saved_report_in(&dir, &path(&report)).is_ok());
+        assert!(saved_report_in(&dir, &path(&dir.join("..").join("Downloads").join("nvoke-migration-x-20261024-120000.html"))).is_ok(), "the same file by another route");
+        assert!(saved_report_in(&dir, &path(&other)).is_err(), "not a report");
+        assert!(saved_report_in(&dir, &path(&outside)).is_err(), "not in the report folder");
+        assert!(saved_report_in(&dir, &path(&dir.join("nvoke-migration-gone.html"))).is_err(), "no longer there");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
     fn project(stages: &[Stage]) -> Project {
         let now = chrono::Utc::now();
         let mut p = Project::new("p".into(), "x", "a", "b", DestEcoverse::NotLinked, now);
@@ -228,6 +306,59 @@ mod tests {
         assert_eq!((view.total, view.healthy, view.cleaned_up, view.retired, view.resolved), (8, 2, 1, 1, 1));
         assert_eq!((view.moving, view.waiting, view.needs_you, view.closed), (1, 1, 1, false));
         assert_eq!(view.cleanup_devices.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["PC-0", "PC-1"]);
+    }
+
+    #[test]
+    fn the_view_says_what_keeps_a_project_open() {
+        let mut p = project(&[Stage::Healthy, Stage::CleanedUp, Stage::Retired, Stage::Lost]);
+        let view = finish_view(&p);
+        assert_eq!((view.unfinished, view.to_retire, view.next_review_ends.is_some()), (2, 0, false), "cleaned up is finished when nothing is retired");
+        p.options.retire_source_records = true;
+        let view = finish_view(&p);
+        assert_eq!((view.unfinished, view.to_retire), (3, 1));
+        assert!(view.next_review_ends.is_some(), "it was cleaned up just now, so its review period is running");
+    }
+
+    #[tokio::test]
+    async fn a_project_closed_by_hand_refuses_changes_until_it_is_reopened() {
+        let (core, id) = two_healthy_devices_without_a_destination_record().await;
+        core.migration_set_closed(&id, "me", true).await.unwrap();
+        let p = core.migration_load(&id).await.unwrap().unwrap();
+        assert!(p.closed_at.is_some() && p.is_closed());
+        let view = finish_view(&p);
+        assert_eq!((view.closed, view.closed_at.is_some(), view.unfinished), (true, true, 2), "the healthy devices are left as they were");
+        assert!(core.migration_cleanup_healthy(&id, "me").await.unwrap_err().contains("is closed"));
+        assert!(core.migration_poll_saved(&id, "me", &core.migration_settings().thresholds()).await.unwrap_err().contains("Reopen it"));
+        assert!(core.audit_log(None).unwrap().entries.iter().any(|e| e.action == "migration.close"));
+
+        core.migration_set_closed(&id, "me", true).await.unwrap();
+        core.migration_set_closed(&id, "me", false).await.unwrap();
+        let p = core.migration_load(&id).await.unwrap().unwrap();
+        assert!(p.closed_at.is_none() && !p.is_closed());
+        assert!(core.migration_open_for_write(&id, "me").await.is_ok());
+        assert!(core.audit_log(None).unwrap().entries.iter().any(|e| e.action == "migration.reopen"));
+        assert!(core.migration_set_closed(&id, "other", true).await.unwrap_err().contains("Another N-voke window"));
+    }
+
+    #[tokio::test]
+    async fn a_project_that_closed_by_itself_can_be_reopened_and_stays_open_until_closed_by_hand() {
+        let (core, id) = two_healthy_devices_without_a_destination_record().await;
+        let mut p = core.migration_load(&id).await.unwrap().unwrap();
+        for d in &mut p.devices {
+            d.stage = Stage::Retired;
+        }
+        core.migration_save(&mut p).await.unwrap();
+        assert!(core.migration_load(&id).await.unwrap().unwrap().is_closed(), "every device is finished");
+
+        core.migration_set_closed(&id, "me", false).await.unwrap();
+        let p = core.migration_load(&id).await.unwrap().unwrap();
+        assert!(!p.is_closed() && p.reopened_at.is_some() && p.closed_at.is_none());
+        assert!(finish_view(&p).reopened_at.is_some());
+        assert!(core.migration_open_for_write(&id, "me").await.is_ok(), "an open project can change");
+
+        core.migration_set_closed(&id, "me", true).await.unwrap();
+        let p = core.migration_load(&id).await.unwrap().unwrap();
+        assert!(p.is_closed() && p.closed_at.is_some() && p.reopened_at.is_none());
     }
 
     #[test]

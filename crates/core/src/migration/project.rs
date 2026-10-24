@@ -357,6 +357,13 @@ pub struct Project {
     /// Counts saves, so a save from a copy that is out of date is refused rather than overwriting newer work.
     #[serde(default)]
     pub revision: u64,
+    /// When the operator closed the project by hand, before every device was finished. Nothing in it changes until it is
+    /// reopened. A project whose devices are all finished is closed without this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_at: Option<String>,
+    /// When the operator reopened a project whose devices were all finished: it stays open until it is closed by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reopened_at: Option<String>,
 }
 
 pub fn stamp(now: DateTime<Utc>) -> String {
@@ -393,6 +400,8 @@ impl Project {
             devices: vec![],
             waves: vec![],
             revision: 0,
+            closed_at: None,
+            reopened_at: None,
         }
     }
 
@@ -535,10 +544,20 @@ impl Project {
         self.devices.iter().filter(|d| d.stage.needs_attention() || !d.match_candidates.is_empty()).count()
     }
 
-    /// Every device is finished with (and there is at least one). A device that has cleaned up is the end of the road
-    /// unless the project retires the old source records, which is the one more step after it.
+    /// Closed: by hand, or because every device is finished with and it wasn't reopened since.
     pub fn is_closed(&self) -> bool {
-        !self.devices.is_empty() && self.devices.iter().all(|d| d.stage.is_final() || (d.stage == Stage::CleanedUp && !self.options.retire_source_records))
+        self.closed_at.is_some() || (self.reopened_at.is_none() && self.all_finished())
+    }
+
+    /// Every device is finished with (and there is at least one).
+    pub fn all_finished(&self) -> bool {
+        !self.devices.is_empty() && self.devices.iter().all(|d| self.is_finished(d))
+    }
+
+    /// Nothing more happens to the device. A device that has cleaned up is the end of the road unless the project retires
+    /// the old source records, which is the one more step after it.
+    pub fn is_finished(&self, device: &ProjectDevice) -> bool {
+        device.stage.is_final() || (device.stage == Stage::CleanedUp && !self.options.retire_source_records)
     }
 }
 

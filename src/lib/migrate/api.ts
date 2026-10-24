@@ -81,6 +81,9 @@ export const stopTracker = (id: string) => invoke<void>("tracker_stop", { id });
 
 export const getFinish = (id: string) => invoke<FinishView>("project_finish", { id });
 export const writeReport = (id: string, format: ReportFormat) => invoke<string>("project_report", { id, format });
+export const openReport = (path: string) => invoke<void>("project_report_open", { path });
+export const revealReport = (path: string) => invoke<void>("project_report_reveal", { path });
+export const setProjectClosed = (id: string, closed: boolean) => invoke<void>("project_set_closed", { id, closed });
 export const cleanupHealthy = (id: string, only: string[] | null) => invoke<CleanupReport>("project_cleanup", { id, only });
 export const getStructurePreview = (id: string) => invoke<StructurePreview>("project_structure_preview", { id, only: null });
 export const createStructure = (id: string, serviceOrgId: string, dryRun: boolean) => invoke<StructureReport>("project_structure_create", { id, serviceOrgId, only: null, dryRun });

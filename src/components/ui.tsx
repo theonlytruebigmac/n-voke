@@ -11,14 +11,22 @@ import { copyText } from "../lib/format";
 
 type Variant = "primary" | "tinted" | "secondary" | "ghost" | "danger" | "destructive";
 
+/*
+ * Every button but `ghost` has a fill or an outline, so it reads as a button on a card as well as on the page.
+ * Unavailable (`data-off`), it keeps its shape and goes grey rather than fading out: you can still see what it would
+ * do. A busy button keeps its colour, behind the spinner.
+ */
 const VARIANTS: Record<Variant, string> = {
-  primary: "bg-accent-fill text-on-accent hover:bg-accent-fill-hover shadow-sm",
+  primary: "bg-accent-fill text-on-accent hover:bg-accent-fill-hover shadow-sm data-off:bg-surface-3 data-off:text-faint data-off:shadow-none",
   /** Stands out without competing with the one primary action on screen, e.g. the ways into each phase. */
-  tinted: "border border-accent/40 bg-accent-soft text-accent hover:border-accent/70 hover:bg-accent/25 hover:text-accent-hover",
-  secondary: "border border-border bg-surface text-text hover:bg-surface-2 shadow-sm",
-  ghost: "text-muted hover:bg-surface-2 hover:text-text",
-  danger: "text-err hover:bg-err-soft",
-  destructive: "bg-err text-white hover:opacity-90 shadow-sm",
+  tinted:
+    "border border-accent/40 bg-accent-soft text-accent hover:border-accent/70 hover:bg-accent/25 hover:text-accent-hover data-off:border-control-border data-off:bg-transparent data-off:text-faint",
+  secondary: "border border-control-border bg-control text-text hover:border-faint/60 hover:bg-control-hover shadow-sm data-off:bg-transparent data-off:text-faint data-off:shadow-none",
+  /** For quiet toggles beside other controls (Show more, None), never for the action a card is about. */
+  ghost: "text-muted hover:bg-surface-2 hover:text-text data-off:text-faint/60",
+  /** Starts something that deletes; the dialog it opens has the `destructive` button. */
+  danger: "border border-err/45 text-err hover:border-err/75 hover:bg-err-soft data-off:border-control-border data-off:text-faint",
+  destructive: "bg-err-fill text-white hover:bg-err-fill-hover shadow-sm data-off:bg-surface-3 data-off:text-faint data-off:shadow-none",
 };
 
 type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & { variant?: Variant; size?: "sm" | "md"; busy?: boolean };
@@ -27,14 +35,15 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
   { variant = "secondary", size = "md", busy = false, className = "", children, disabled, type = "button", ...rest },
   ref,
 ) {
-  const sizes = size === "sm" ? "h-7 px-2.5 text-xs gap-1.5" : "h-8 px-3 text-sm gap-1.5";
+  const sizes = size === "sm" ? "h-7 px-2.5 text-[12.5px] gap-1.5" : "h-8 px-3 text-sm gap-1.5";
   return (
     <button
       ref={ref}
       type={type}
       {...rest}
       disabled={disabled || busy}
-      className={`inline-flex shrink-0 items-center justify-center rounded-md font-medium whitespace-nowrap transition-colors disabled:pointer-events-none disabled:opacity-50 [&_svg]:size-3.5 [&_svg]:shrink-0 ${sizes} ${VARIANTS[variant]} ${className}`}
+      data-off={disabled && !busy ? "" : undefined}
+      className={`inline-flex shrink-0 items-center justify-center rounded-md font-medium whitespace-nowrap transition-colors disabled:pointer-events-none [&_svg]:size-3.5 [&_svg]:shrink-0 ${sizes} ${VARIANTS[variant]} ${className}`}
     >
       {busy && <Loader2 className="animate-spin" />}
       {children}
@@ -327,9 +336,9 @@ export const PAGE_WIDTH = "mx-auto w-full max-w-[1280px] px-8";
 /**
  * Every page starts with the same header under the top menu: the title (with a short line under it), actions on the
  * right. With `crumbs` the title ends the trail on one line ("Projects / Contoso move / Track"): the way back muted,
- * where you are in bold. It sits on the page, not in a bar.
+ * where you are in bold. It sits on the page, not in a bar. `menu` (a ⋯ for the thing the page is about) comes last.
  */
-export function PageHeader({ title, meta, actions, crumbs }: { title: ReactNode; meta?: ReactNode; actions?: ReactNode; crumbs?: ReactNode }) {
+export function PageHeader({ title, meta, actions, crumbs, menu }: { title: ReactNode; meta?: ReactNode; actions?: ReactNode; crumbs?: ReactNode; menu?: ReactNode }) {
   return (
     <header className={`${PAGE_WIDTH} flex shrink-0 flex-wrap items-end gap-x-4 gap-y-3 pt-6 pb-5`}>
       <div className="min-w-0 flex-[1_1_320px]">
@@ -343,7 +352,12 @@ export function PageHeader({ title, meta, actions, crumbs }: { title: ReactNode;
         </div>
         {meta && <div className="mt-0.5 text-sm text-muted">{meta}</div>}
       </div>
-      {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
+      {(actions || menu) && (
+        <div className="flex flex-wrap items-center gap-2">
+          {actions}
+          {menu}
+        </div>
+      )}
     </header>
   );
 }

@@ -1,11 +1,11 @@
-import { ArrowRight, ChevronRight } from "lucide-react";
+import { ArrowRight, Check, ChevronDown, ChevronRight } from "lucide-react";
 import type { GroupCount, LaunchView, NeedKind, ProjectSummary, TrackGroup, WaveRow } from "../../lib/migrate/bindings";
 import { projectProgress, readyToFinish } from "../../lib/migrate/progress";
 import { useLaunch, useTrack, useTracker } from "../../lib/migrate/queries";
 import type { StepStatus } from "../../lib/migrate/steps";
 import { GROUP_LABELS } from "../../lib/migrate/track";
 import { STAGE_WORDS } from "../../lib/migrate/words";
-import { Button, Card, StepTitle, Timeline, type StepState, type TimelineStep } from "../ui";
+import { Button, Card, Menu, MenuContent, MenuItem, MenuTrigger, StepTitle, Timeline, type StepState, type TimelineStep } from "../ui";
 import { SETUP_STEPS, SetupChips, type StepId } from "./parts/StepRail";
 import { usePublishTracker } from "./TrackerStatus";
 
@@ -59,9 +59,17 @@ export function Overview({ projectId, project, status, onGo }: { projectId: stri
     {
       key: "setup",
       state: setupState,
-      content: (
+      // Done, it folds to one line like the other phases; its four pages are behind Open.
+      content: setupDone ? (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <div className="min-w-0 flex-1">
+            <StepTitle hint="Connect, Map, Prepare and Plan are done">Set up</StepTitle>
+          </div>
+          <SetupMenu onGo={onGo} />
+        </div>
+      ) : (
         <div className="space-y-3">
-          <StepTitle hint={setupDone ? "Done" : `${SETUP_STEPS.filter((s) => marks[s.id] === "done").length} of ${SETUP_STEPS.length} done`}>Set up</StepTitle>
+          <StepTitle hint={`${SETUP_STEPS.filter((s) => marks[s.id] === "done").length} of ${SETUP_STEPS.length} done`}>Set up</StepTitle>
           <SetupChips marks={marks} notes={notes} onSelect={onGo} />
           {!setupDone && firstOpen && (
             <NextCard
@@ -157,6 +165,28 @@ function PhaseLine({ title, hint, onOpen }: { title: string; hint: React.ReactNo
       </div>
       {onOpen && <OpenButton step={title} onClick={onOpen} />}
     </div>
+  );
+}
+
+/** Open for a finished set up, which is four pages: a menu of them, each with its check. */
+function SetupMenu({ onGo }: { onGo: (step: StepId) => void }) {
+  return (
+    <Menu>
+      <MenuTrigger asChild>
+        <Button size="sm" variant="tinted" aria-label="Open a set-up step">
+          Open
+          <ChevronDown />
+        </Button>
+      </MenuTrigger>
+      <MenuContent>
+        {SETUP_STEPS.map((s) => (
+          <MenuItem key={s.id} onSelect={() => onGo(s.id)}>
+            <Check className="text-ok!" />
+            {s.label}
+          </MenuItem>
+        ))}
+      </MenuContent>
+    </Menu>
   );
 }
 

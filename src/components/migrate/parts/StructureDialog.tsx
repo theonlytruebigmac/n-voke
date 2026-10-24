@@ -107,7 +107,7 @@ export function StructureDialog({ projectId, onClose }: { projectId: string; onC
       { key: "tokens:Registration tokens", name: "Registration tokens" },
     ];
     return (
-      <Modal title={dryRun ? "Checking what would be created" : "Creating on the destination"} size="lg" onClose={() => undefined} footer={<Button disabled>Cancel</Button>}>
+      <Modal title={dryRun ? "Checking what would be created" : "Creating on the destination"} size="lg" onClose={() => undefined} footer={<span className="text-xs text-faint">This can't be stopped part way. It takes a moment.</span>}>
         <Progress items={dryRun ? items.slice(0, -1) : items} steps={steps} />
       </Modal>
     );

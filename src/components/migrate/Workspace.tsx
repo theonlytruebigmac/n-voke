@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { closeProject } from "../../lib/migrate/api";
-import { usePrepare, useProject, useServers } from "../../lib/migrate/queries";
+import { usePrepare, useProject, useServers, useSetClosed } from "../../lib/migrate/queries";
 import { STEPS, stepStatus } from "../../lib/migrate/steps";
-import { Crumb, ErrorNote, PageBody, PageHeader } from "../ui";
+import { Button, Card, Crumb, ErrorNote, PageBody, PageHeader } from "../ui";
 import { HeaderActionsSlot } from "./HeaderActions";
+import { ProjectMenu } from "./parts/ProjectMenu";
 import { Overview } from "./Overview";
 import { SetupChips, isSetupStep, type StepId } from "./parts/StepRail";
 import { ConnectStep } from "./steps/ConnectStep";
@@ -36,6 +37,7 @@ export function Workspace({ projectId, onBack }: { projectId: string; onBack: ()
   const dest = p ? name(p.destServerId) : "the destination";
   const route = p ? (p.sourceServerId === p.destServerId ? `${name(p.sourceServerId)} (reinstall)` : `${name(p.sourceServerId)} → ${dest}`) : undefined;
   const prepare = usePrepare(projectId);
+  const reopen = useSetClosed(projectId);
   const status = stepStatus(p, prepare.data);
   const setStep = (s: StepId) => setView(s);
 
@@ -77,6 +79,7 @@ export function Workspace({ projectId, onBack }: { projectId: string; onBack: ()
             <div ref={setSlot} className="flex flex-wrap items-center gap-2 empty:hidden" />
           )
         }
+        menu={p && <ProjectMenu project={p} holdsLease bordered />}
       />
       <HeaderActionsSlot.Provider value={slot}>
         <PageBody>
@@ -86,6 +89,21 @@ export function Workspace({ projectId, onBack }: { projectId: string; onBack: ()
             <p className="text-sm text-muted">Loading the project…</p>
           ) : (
             <>
+              {p.closedAt && view !== "finish" && (
+                <Card className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3">
+                  <p className="min-w-0 flex-1 text-sm text-muted">
+                    <span className="font-semibold text-text">Closed on {new Date(p.closedAt).toLocaleDateString()}.</span> Tracking is off and nothing in this project can change until you reopen it. Its report can still be saved on Finish.
+                  </p>
+                  <Button size="sm" busy={reopen.isPending} onClick={() => reopen.mutate(false)}>
+                    Reopen
+                  </Button>
+                  {reopen.isError && (
+                    <div className="basis-full">
+                      <ErrorNote>{String(reopen.error)}</ErrorNote>
+                    </div>
+                  )}
+                </Card>
+              )}
               {view === "overview" && <Overview projectId={projectId} project={p} status={status} onGo={setStep} />}
               {view === "connect" && <ConnectStep projectId={projectId} onContinue={() => setStep("map")} />}
               {view === "map" && <MapStep projectId={projectId} onContinue={() => setStep("prepare")} />}

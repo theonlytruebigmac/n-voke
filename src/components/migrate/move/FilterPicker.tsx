@@ -42,7 +42,7 @@ export function FilterPicker<K extends string | number>({
         <button
           type="button"
           className={`flex h-8 max-w-64 items-center gap-1.5 rounded-lg border px-3 text-xs whitespace-nowrap transition-colors ${
-            current ? "border-accent/40 bg-accent-soft text-text" : "border-border bg-surface text-muted hover:text-text"
+            current ? "border-accent/40 bg-accent-soft text-text" : "border-control-border bg-surface text-muted hover:text-text"
           }`}
         >
           <span className="truncate">

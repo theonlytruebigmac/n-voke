@@ -76,7 +76,7 @@ flowchart LR
 - One row per project: name, servers, a progress bar of devices in a final or healthy stage, the **needs you** count (attention stages), and last activity. Opening a row opens the workspace.
 - A project open in another N-voke window shows *Open in another window* and opens read-only ([Lease](#lease-and-two-windows)).
 - Empty state: *No migrations yet. A project moves devices from one N-central server to another, or reinstalls them on the same one.* with **New project**.
-- Row menu: Open, Duplicate settings, Export report, Delete (confirmation: *removes the local history; the audit log keeps its entries*).
+- Row menu: Open, **Save and open the report** (builds the web page now, reading an open project's devices first, and opens it in the browser), **Close project…** or **Reopen** (see Finish), Delete (confirmation: *removes the local history; the audit log keeps its entries*). Duplicate settings isn't built.
 
 ### B. New project
 
@@ -357,12 +357,14 @@ The home of a running project. Top to bottom: a stage strip, the attention list,
 │                   (the devices themselves are untouched).   [ Review and delete… ] │
 │  Reports          [ Export CSV ]  [ Export HTML ]   Filter: [ all ▾ ]              │
 │                                                                                    │
-│  The project closes when every device is retired, left out or marked resolved.     │
+│  The project closes when every device is finished, or when you close it by hand.  │
 └────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 - *Run cleanup now* and *Delete old records* each preview the list and ask (the second behind its own confirmation, only after the review period, with the note that it also removes their stale Ecoverse assets). **Core gap:** the delete call isn't built yet, so in the first slices this row says *Not available yet* and the old records are tidied by hand.
-- Reports are written by the core (`migration_write_report`) to a folder the person picks; the page shows the path.
+- **Open or closed.** A project closes by itself once every device is finished (`Project::is_finished`: retired, left out or resolved, or cleaned up when the project doesn't retire the old records). While it is open, Finish says what is left before it closes (*Left: 3 old records to retire (the first review period ends …)*) from `FinishView.unfinished`, `toRetire` and `nextReviewEnds`. **Close project…** (Finish and the list's row menu) closes it by hand: the dialog lists what stays unfinished, nothing is sent to a device or server, tracking stops, and `migration_open_for_write` refuses every change (*… is closed. Reopen it on its Finish page*) until **Reopen** (Finish, the banner on every other step, the ⋯ menu on the list and in the project's header). A project that closed by itself can be reopened too: it then stays open until it is closed by hand (`Project.reopened_at`). Stored as `Project.closed_at`; audited as `migration.close` and `migration.reopen`. Command: `project_set_closed`.
+- Every save builds a new report: an open project's devices are read from the servers first (a tracker pass under the project lock), and if that can't be done the report uses the last reading. A closed project's report is built from the project as it is.
+- Reports are written by the core (`migration_write_report`) to the Downloads folder; the page shows the path with *Open*, *Show in folder* and *Copy path*. The web page is the full account (summary sentence and bar, waves, destinations, what needs attention grouped by reason, every device with search and a stage filter, and each device's history without repeated checks or collected output, the latest 30 events). It is dark like the app on screen, prints light, is self-contained, and opens in the browser as soon as it is saved. The CSV stays one row per device. `project_report_open` and `project_report_reveal` only act on a migration report in that folder (`migration_saved_report`), never on another path the page might send.
 
 ### Settings additions
 

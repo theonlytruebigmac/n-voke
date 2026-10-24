@@ -37,7 +37,7 @@ export function SetupChips({
               title={notes[s.id]}
               onClick={() => onSelect(s.id)}
               className={`inline-flex h-7 items-center gap-1.5 rounded-full border px-3 text-xs whitespace-nowrap transition-colors ${
-                isCurrent ? "border-accent/50 bg-accent-soft font-semibold text-text" : done ? "border-border bg-surface-2 text-muted hover:text-text" : "border-border text-faint hover:text-text"
+                isCurrent ? "border-accent/50 bg-accent-soft font-semibold text-text" : done ? "border-control-border bg-surface-2 text-muted hover:text-text" : "border-control-border text-faint hover:text-text"
               }`}
             >
               {done && !isCurrent && <Check className="size-3 text-ok" strokeWidth={3} />}
