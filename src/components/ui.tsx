@@ -9,10 +9,12 @@ import { copyText } from "../lib/format";
 // Buttons
 // ---------------------------------------------------------------------------
 
-type Variant = "primary" | "secondary" | "ghost" | "danger" | "destructive";
+type Variant = "primary" | "tinted" | "secondary" | "ghost" | "danger" | "destructive";
 
 const VARIANTS: Record<Variant, string> = {
-  primary: "bg-accent text-on-accent hover:bg-accent-hover shadow-sm",
+  primary: "bg-accent-fill text-on-accent hover:bg-accent-fill-hover shadow-sm",
+  /** Stands out without competing with the one primary action on screen, e.g. the ways into each phase. */
+  tinted: "border border-accent/40 bg-accent-soft text-accent hover:border-accent/70 hover:bg-accent/25 hover:text-accent-hover",
   secondary: "border border-border bg-surface text-text hover:bg-surface-2 shadow-sm",
   ghost: "text-muted hover:bg-surface-2 hover:text-text",
   danger: "text-err hover:bg-err-soft",
@@ -75,7 +77,7 @@ export const selectClass =
 export function Field({ label, hint, error, children }: { label: string; hint?: ReactNode; error?: string | null; children: ReactNode }) {
   return (
     <label className="block space-y-1.5">
-      <span className="text-xs font-medium text-muted">{label}</span>
+      <span className="block text-xs font-medium text-muted">{label}</span>
       {children}
       {error ? <span className="block text-xs text-err">{error}</span> : hint ? <span className="block text-xs text-faint">{hint}</span> : null}
     </label>
@@ -102,7 +104,7 @@ export function Segmented<T extends string>({
   options: { value: T; label: ReactNode }[];
 }) {
   return (
-    <div className="inline-flex rounded-md bg-surface-2 p-0.5" role="tablist">
+    <div className="inline-flex flex-wrap rounded-lg border border-border bg-bg p-0.5" role="tablist">
       {options.map((o) => (
         <button
           key={o.value}
@@ -110,8 +112,8 @@ export function Segmented<T extends string>({
           role="tab"
           aria-selected={value === o.value}
           onClick={() => onChange(o.value)}
-          className={`inline-flex h-6 items-center gap-1.5 rounded px-2.5 text-xs font-medium whitespace-nowrap transition-colors [&_svg]:size-3.5 ${
-            value === o.value ? "bg-surface text-text shadow-sm" : "text-muted hover:text-text"
+          className={`inline-flex h-7 items-center gap-1.5 rounded-md px-3 text-xs whitespace-nowrap transition-colors [&_svg]:size-3.5 ${
+            value === o.value ? "bg-accent-soft font-semibold text-text" : "font-medium text-muted hover:text-text"
           }`}
         >
           {o.label}
@@ -319,16 +321,73 @@ export function Sheet({ title, subtitle, onClose, children }: { title: ReactNode
 // Layout & content
 // ---------------------------------------------------------------------------
 
-/** Every page starts with the same 52px header: title left, actions right. */
-export function PageHeader({ title, meta, actions }: { title: ReactNode; meta?: ReactNode; actions?: ReactNode }) {
+/** Content width shared by page headers and bodies, so their edges line up. */
+export const PAGE_WIDTH = "mx-auto w-full max-w-[1280px] px-8";
+
+/**
+ * Every page starts with the same header under the top menu: the title (with a short line under it), actions on the
+ * right. With `crumbs` the title ends the trail on one line ("Projects / Contoso move / Track"): the way back muted,
+ * where you are in bold. It sits on the page, not in a bar.
+ */
+export function PageHeader({ title, meta, actions, crumbs }: { title: ReactNode; meta?: ReactNode; actions?: ReactNode; crumbs?: ReactNode }) {
   return (
-    <header className="flex h-[52px] shrink-0 items-center justify-between gap-4 border-b border-border px-5">
-      <div className="flex min-w-0 items-baseline gap-3">
-        <h1 className="truncate text-base font-semibold">{title}</h1>
-        {meta && <div className="truncate text-sm text-muted">{meta}</div>}
+    <header className={`${PAGE_WIDTH} flex shrink-0 flex-wrap items-end gap-x-4 gap-y-3 pt-6 pb-5`}>
+      <div className="min-w-0 flex-[1_1_320px]">
+        <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 text-xl">
+          {crumbs && (
+            <nav aria-label="Breadcrumb" className="contents text-muted">
+              {crumbs}
+            </nav>
+          )}
+          <h1 className="min-w-0 truncate font-semibold">{title}</h1>
+        </div>
+        {meta && <div className="mt-0.5 text-sm text-muted">{meta}</div>}
       </div>
-      {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
+      {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
     </header>
+  );
+}
+
+/** A breadcrumb link and the slash after it, for PageHeader's `crumbs`. */
+export function Crumb({ children, onClick }: { children: ReactNode; onClick: () => void }) {
+  return (
+    <>
+      <button type="button" onClick={onClick} className="max-w-[24ch] truncate text-muted hover:text-text" title={typeof children === "string" ? children : undefined}>
+        {children}
+      </button>
+      <span className="text-border-strong" aria-hidden="true">
+        /
+      </span>
+    </>
+  );
+}
+
+/** The scrolling area under a PageHeader, at the shared content width. */
+export function PageBody({ children, className = "" }: { children: ReactNode; className?: string }) {
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className={`${PAGE_WIDTH} pb-8 ${className}`}>{children}</div>
+    </div>
+  );
+}
+
+/** The rounded panel most content sits in. */
+export function Card({ children, className = "", tone }: { children: ReactNode; className?: string; tone?: "warn" | "err" | "accent" }) {
+  const toneClass =
+    tone === "warn" ? "border-warn/30 bg-warn-soft/40" : tone === "err" ? "border-err/30 bg-err-soft/40" : tone === "accent" ? "border-accent/40 bg-accent-soft" : "border-border bg-surface";
+  return <div className={`rounded-2xl border ${toneClass} ${className}`}>{children}</div>;
+}
+
+/** The bar over a list while rows are ticked: how many, what can be done to them, and a way to clear the ticks. */
+export function SelectionBar({ count, label, children, onClear }: { count: number; label?: ReactNode; children: ReactNode; onClear: () => void }) {
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded-xl border border-accent/30 bg-accent-soft px-3 py-2">
+      <span className="mr-1 flex-1 font-semibold">{label ?? `${count.toLocaleString()} selected`}</span>
+      {children}
+      <IconButton label="Clear selection" onClick={onClear}>
+        <X />
+      </IconButton>
+    </div>
   );
 }
 
@@ -341,12 +400,78 @@ export function SectionTitle({ children, actions }: { children: ReactNode; actio
   );
 }
 
+export type StepState = "done" | "current" | "attention" | "upcoming";
+
+export interface TimelineStep {
+  key: string;
+  state: StepState;
+  content: ReactNode;
+}
+
+const STEP_MARKER: Record<StepState, string> = {
+  done: "bg-ok-soft text-ok",
+  current: "bg-accent-fill text-on-accent ring-4 ring-accent-soft",
+  attention: "border-2 border-warn text-warn",
+  upcoming: "border-2 border-border-strong text-faint",
+};
+
+/**
+ * Numbered steps down a rail: a check once done, the current one filled, one that needs a look outlined amber.
+ * The rail between two steps turns green once the step above it is done.
+ */
+export function Timeline({ steps, label }: { steps: TimelineStep[]; label: string }) {
+  return (
+    <ol aria-label={label} className="rounded-2xl border border-border bg-surface px-5 py-1.5">
+      {steps.map((s, i) => {
+        const prevDone = i > 0 && steps[i - 1].state === "done";
+        return (
+          <li key={s.key} className="flex gap-4" aria-current={s.state === "current" ? "step" : undefined}>
+            <div className="flex w-7 shrink-0 flex-col items-center">
+              <span className={`h-4 w-0.5 ${i === 0 ? "" : prevDone ? "bg-ok/50" : "bg-border-strong"}`} />
+              <span className={`flex size-7 shrink-0 items-center justify-center rounded-full text-xs font-semibold tabular-nums ${STEP_MARKER[s.state]}`}>
+                {s.state === "done" ? <Check className="size-3.5" strokeWidth={3} /> : i + 1}
+              </span>
+              <span className={`w-0.5 flex-1 ${i === steps.length - 1 ? "" : s.state === "done" ? "bg-ok/50" : "bg-border-strong"}`} />
+            </div>
+            <div className="min-w-0 flex-1 py-4">{s.content}</div>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+/** A finished step folded to one line: what was chosen, and a way back to change it. */
+export function StepSummary({ label, children, onChange }: { label: string; children: ReactNode; onChange?: () => void }) {
+  return (
+    <div className="flex min-h-7 flex-wrap items-center gap-x-3 gap-y-1">
+      <span className="w-28 shrink-0 text-muted">{label}</span>
+      <span className="min-w-0 flex-1 truncate font-semibold">{children}</span>
+      {onChange && (
+        <button type="button" onClick={onChange} className="text-sm font-medium text-accent hover:text-accent-hover">
+          Change
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** The heading of the step being worked on, with a short hint beside it. */
+export function StepTitle({ children, hint }: { children: ReactNode; hint?: ReactNode }) {
+  return (
+    <div className="flex min-h-7 flex-wrap items-baseline gap-x-3 gap-y-0.5">
+      <h2 className="text-base font-semibold">{children}</h2>
+      {hint && <span className="text-sm text-faint">{hint}</span>}
+    </div>
+  );
+}
+
 /** Data table shell; rows are plain <tr>/<td> with the shared cell styles. */
 export function Table({ head, children }: { head: ReactNode; children: ReactNode }) {
   return (
-    <div className="overflow-x-auto rounded-lg border border-border">
+    <div className="overflow-x-auto rounded-xl border border-border bg-surface">
       <table className="w-full border-collapse text-sm [&_td]:px-3 [&_td]:py-2">
-        <thead className="bg-surface-2/60 text-left text-xs text-muted">
+        <thead className="text-left text-xs text-faint">
           <tr className="[&>th]:h-8 [&>th]:px-3 [&>th]:font-medium">{head}</tr>
         </thead>
         <tbody className="[&>tr]:border-t [&>tr]:border-border">{children}</tbody>

@@ -9,11 +9,13 @@ import { targetLabel, type RunDraft, type Target } from "../lib/targets";
 import type { Asset, Organization, Script } from "../lib/types";
 import { Combobox } from "./Combobox";
 import { InputsForm, type InputValues } from "./InputsForm";
-import { TargetDevices } from "./TargetDevices";
+import { TargetDevices, type DeviceSummary } from "./TargetDevices";
 import { TargetField } from "./TargetField";
-import { Button, EmptyState, FormRow, PageHeader, inputClass } from "./ui";
+import { Button, EmptyState, Field, PageBody, PageHeader, StepSummary, StepTitle, Timeline, inputClass, type StepState, type TimelineStep } from "./ui";
 
 const orgKind = (o: Organization) => (o.__typename ? humanize(o.__typename.replace(/([a-z])([A-Z])/g, "$1_$2")) : "");
+
+const NO_DEVICES: DeviceSummary = { loading: false, total: 0, included: 0, flagged: 0 };
 
 export function RunPage({
   ready,
@@ -30,8 +32,11 @@ export function RunPage({
   const [script, setScript] = useState<Script | null>(null);
   const [targets, setTargets] = useState<Target[]>([]);
   const [devices, setDevices] = useState<Asset[]>([]);
+  const [summary, setSummary] = useState<DeviceSummary>(NO_DEVICES);
   const [values, setValues] = useState<InputValues>({});
   const [showErrors, setShowErrors] = useState(false);
+  /** A finished step reopened with Change. */
+  const [editing, setEditing] = useState<"org" | "script" | null>(null);
   const [editOptions, setEditOptions] = useState(false);
   const [taskName, setTaskName] = useState("");
   const [timeout, setTimeoutValue] = useState("");
@@ -47,6 +52,7 @@ export function RunPage({
     setTargets(draft.targets ?? []);
     setValues({});
     setShowErrors(false);
+    setEditing(null);
     setConfirming(false);
     setError(null);
   }, [draft]);
@@ -62,6 +68,20 @@ export function RunPage({
   const searchOrgs = useCallback((t: string) => searchOrganizationsLocal(t), []);
   const searchScriptsInOrg = useCallback((t: string) => (org ? searchScriptsLocal(org.id, t) : Promise.resolve([])), [org]);
   const onDevices = useCallback((d: Asset[]) => setDevices(d), []);
+
+  const startOver = () => {
+    setOrg(null);
+    setScript(null);
+    setTargets([]);
+    setSummary(NO_DEVICES);
+    setValues({});
+    setShowErrors(false);
+    setEditing(null);
+    setEditOptions(false);
+    setTaskName("");
+    setTimeoutValue("");
+    setError(null);
+  };
 
   const start = async () => {
     if (!org || !script || !devices.length) return;
@@ -115,161 +135,286 @@ export function RunPage({
 
   if (!ready) {
     return (
-      <>
-        <PageHeader title="Run a script" />
-        <EmptyState
-          icon={<KeyRound />}
-          title="Connect to N-able"
-          action={
-            <Button variant="primary" onClick={onOpenSettings}>
-              Add API key
-            </Button>
-          }
-        >
-          Add your API key to start running scripts.
-        </EmptyState>
-      </>
+      <EmptyState
+        icon={<KeyRound />}
+        title="Connect to Ecoverse"
+        action={
+          <Button variant="primary" onClick={onOpenSettings}>
+            Add Ecoverse token
+          </Button>
+        }
+      >
+        Scripts run through Ecoverse. Add its API token to start.
+      </EmptyState>
     );
   }
 
-  const deviceWord = devices.length === 1 ? devices[0].name : `${devices.length} devices`;
+  const deviceWord = devices.length === 1 ? devices[0].name : `${devices.length.toLocaleString()} devices`;
+
+  const orgState: StepState = org && editing !== "org" ? "done" : "current";
+  const scriptState: StepState = !org ? "upcoming" : script && editing !== "script" ? "done" : "current";
+  const targetsState: StepState = !org ? "upcoming" : targets.length ? "done" : script ? "current" : "upcoming";
+  const inputsState: StepState = !targets.length ? "upcoming" : showErrors && hasInputErrors ? "attention" : "done";
+  const checkState: StepState = !targets.length ? "upcoming" : summary.loading ? "current" : summary.flagged > 0 ? "attention" : "done";
+
+  const steps: TimelineStep[] = [
+    {
+      key: "org",
+      state: orgState,
+      content:
+        orgState === "done" && org ? (
+          <StepSummary label="Organization" onChange={() => setEditing("org")}>
+            {org.name} <span className="ml-1 text-xs font-normal text-faint">{orgKind(org)}</span>
+          </StepSummary>
+        ) : (
+          <div className="space-y-3">
+            <StepTitle>Which organization?</StepTitle>
+            <Combobox<Organization>
+              value={org}
+              onChange={(o) => {
+                setEditing(null);
+                if (o.id === org?.id) return;
+                setOrg(o);
+                setScript(null);
+                setTargets([]);
+              }}
+              defaultOpen={editing === "org"}
+              search={searchOrgs}
+              debounceMs={0}
+              getKey={(o) => o.id}
+              placeholder="Choose an organization"
+              searchPlaceholder="Search organizations"
+              renderValue={(o) => o.name}
+              renderItem={(o) => (
+                <div className="flex items-center justify-between gap-2">
+                  <span className="truncate">{o.name}</span>
+                  <span className="shrink-0 text-xs text-faint">{orgKind(o)}</span>
+                </div>
+              )}
+            />
+          </div>
+        ),
+    },
+    {
+      key: "script",
+      state: scriptState,
+      content:
+        scriptState === "done" && script ? (
+          <StepSummary label="Script" onChange={() => setEditing("script")}>
+            {script.name}
+            <span className="ml-2 text-sm font-normal text-faint">
+              {languageName(script.language)}
+              {inputs.length > 0 && ` · ${inputs.length} input${inputs.length === 1 ? "" : "s"}`}
+            </span>
+          </StepSummary>
+        ) : !org ? (
+          <StepTitle hint="Choose an organization first">
+            <span className="text-muted">Script</span>
+          </StepTitle>
+        ) : (
+          <div className="space-y-3">
+            <StepTitle>Which script?</StepTitle>
+            <Combobox<Script>
+              key={org.id}
+              value={script}
+              onChange={(s) => {
+                setEditing(null);
+                setScript(s);
+                setValues({});
+                setShowErrors(false);
+              }}
+              defaultOpen={(!script && !draft?.script) || editing === "script"}
+              search={searchScriptsInOrg}
+              debounceMs={0}
+              scope={org.id}
+              getKey={(s) => s.id}
+              placeholder="Choose a script"
+              searchPlaceholder="Search scripts by name or description"
+              renderValue={(s) => (
+                <span className="flex items-center gap-2">
+                  <span className="truncate">{s.name}</span>
+                  <span className="text-xs text-faint">{languageName(s.language)}</span>
+                </span>
+              )}
+              renderItem={(s) => (
+                <div className="min-w-0">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="truncate">{s.name}</span>
+                    <span className="shrink-0 text-xs text-faint">{languageName(s.language)}</span>
+                  </div>
+                  {s.description && s.description !== s.name && <div className="truncate text-xs text-muted">{s.description}</div>}
+                </div>
+              )}
+            />
+          </div>
+        ),
+    },
+    {
+      key: "targets",
+      state: targetsState,
+      content: org ? (
+        <div className="space-y-3">
+          <StepTitle hint="Devices, tags, or both">Who should it run on?</StepTitle>
+          <TargetField key={org.id} org={org} targets={targets} onChange={setTargets} autoOpen={!!script && targets.length === 0} />
+        </div>
+      ) : (
+        <StepTitle>
+          <span className="text-muted">Who it runs on</span>
+        </StepTitle>
+      ),
+    },
+    ...(inputs.length > 0
+      ? [
+          {
+            key: "inputs",
+            state: inputsState,
+            content: (
+              <div className="space-y-3">
+                <StepTitle hint="Leave blank to use the script's default">Script inputs</StepTitle>
+                <InputsForm inputs={inputs} values={values} onChange={setValues} showErrors={showErrors} />
+              </div>
+            ),
+          },
+        ]
+      : []),
+    {
+      key: "check",
+      state: checkState,
+      content: (
+        <div className="space-y-3">
+          <StepTitle
+            hint={
+              !targets.length
+                ? undefined
+                : summary.loading
+                  ? "Reading the devices…"
+                  : summary.flagged > 0
+                    ? `${summary.flagged.toLocaleString()} need a look`
+                    : `${summary.total.toLocaleString()} devices`
+            }
+          >
+            {targets.length ? "Check the devices" : <span className="text-muted">Check the devices</span>}
+          </StepTitle>
+          {org && <TargetDevices orgId={org.id} script={script} targets={targets} onChange={onDevices} onSummary={setSummary} />}
+        </div>
+      ),
+    },
+  ];
+
+  const leftOut = summary.total - summary.included;
 
   return (
     <>
-      <PageHeader title="Run a script" />
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-3xl space-y-6 px-6 py-5">
-          <div className="divide-y divide-border">
-            <FormRow label="Organization">
-              <Combobox<Organization>
-                value={org}
-                onChange={(o) => {
-                  if (o.id === org?.id) return;
-                  setOrg(o);
-                  setScript(null);
-                  setTargets([]);
-                }}
-                search={searchOrgs}
-                debounceMs={0}
-                getKey={(o) => o.id}
-                placeholder="Choose an organization"
-                searchPlaceholder="Search organizations"
-                renderValue={(o) => o.name}
-                renderItem={(o) => (
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="truncate">{o.name}</span>
-                    <span className="shrink-0 text-xs text-faint">{orgKind(o)}</span>
-                  </div>
-                )}
-              />
-            </FormRow>
+      <PageHeader
+        title="Run a script"
+        actions={
+          (org || targets.length > 0) && (
+            <Button variant="secondary" onClick={startOver} disabled={running}>
+              Start over
+            </Button>
+          )
+        }
+      />
+      <PageBody>
+        <div className="flex flex-wrap items-start gap-6">
+          <div className="min-w-0 flex-[3_1_480px]">
+            <Timeline label="Steps" steps={steps} />
+          </div>
 
-            <FormRow label="Script">
-              <Combobox<Script>
-                key={org?.id ?? "none"}
-                value={script}
-                onChange={(s) => {
-                  setScript(s);
-                  setValues({});
-                  setShowErrors(false);
-                }}
-                disabled={!org}
-                defaultOpen={!!org && !script && !draft?.script}
-                search={searchScriptsInOrg}
-                debounceMs={0}
-                scope={org?.id}
-                getKey={(s) => s.id}
-                placeholder={org ? "Choose a script" : "Choose an organization first"}
-                searchPlaceholder="Search scripts by name or description"
-                renderValue={(s) => (
-                  <span className="flex items-center gap-2">
-                    <span className="truncate">{s.name}</span>
-                    <span className="text-xs text-faint">{languageName(s.language)}</span>
-                  </span>
-                )}
-                renderItem={(s) => (
-                  <div className="min-w-0">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="truncate">{s.name}</span>
-                      <span className="shrink-0 text-xs text-faint">{languageName(s.language)}</span>
-                    </div>
-                    {s.description && s.description !== s.name && <div className="truncate text-xs text-muted">{s.description}</div>}
-                  </div>
-                )}
-              />
-            </FormRow>
-
-            <FormRow label="Run on">
-              {org ? (
-                <TargetField key={org.id} org={org} targets={targets} onChange={setTargets} autoOpen={!!script && targets.length === 0} />
-              ) : (
-                <div className="flex h-8 items-center text-sm text-faint">Choose an organization first</div>
-              )}
-            </FormRow>
-
-            {inputs.length > 0 && (
-              <FormRow label="Inputs" align="start">
-                <InputsForm inputs={inputs} values={values} onChange={setValues} showErrors={showErrors} />
-              </FormRow>
+          <aside aria-label="Summary" className="sticky top-0 flex flex-[2_1_280px] flex-col gap-4 rounded-2xl border border-border bg-surface p-5">
+            {summary.total > 0 ? (
+              <>
+                <div className="flex flex-wrap items-baseline gap-2">
+                  <span className="text-3xl font-bold tabular-nums">{summary.included.toLocaleString()}</span>
+                  <span className="text-muted">{summary.included === 1 ? "device" : "devices"}{org ? ` in ${org.name}` : ""}</span>
+                </div>
+                <ul className="space-y-2">
+                  <SummaryLine tone="bg-ok" label="Ready" count={summary.included - summary.flagged} />
+                  {summary.flagged > 0 && <SummaryLine tone="bg-warn" label="Need a look" hint="optional" count={summary.flagged} />}
+                  {leftOut > 0 && <SummaryLine tone="bg-border-strong" label="Left out" count={leftOut} />}
+                </ul>
+              </>
+            ) : (
+              <p className="text-muted">{summary.loading ? "Reading the devices…" : "Choose a script and who to run it on."}</p>
             )}
 
             {script && (
-              <FormRow label="Options" align={editOptions ? "start" : "center"}>
+              <>
+                <div className="h-px bg-border" />
                 {editOptions ? (
-                  <div className="grid grid-cols-[1fr_140px] gap-3">
-                    <input className={inputClass} value={taskName} maxLength={128} onChange={(e) => setTaskName(e.target.value)} placeholder="Task name (optional)" />
-                    <input
-                      className={`${inputClass} ${timeoutError ? "border-err" : ""}`}
-                      inputMode="numeric"
-                      placeholder={`Timeout ${script.timeoutSeconds ?? 3600}s`}
-                      value={timeout}
-                      onChange={(e) => setTimeoutValue(e.target.value)}
-                      aria-label="Timeout in seconds"
-                      title="Timeout in seconds (0–3600, 0 = maximum)"
-                    />
+                  <div className="space-y-3">
+                    <Field label="Task name">
+                      <input className={inputClass} value={taskName} maxLength={128} onChange={(e) => setTaskName(e.target.value)} placeholder="Named automatically" />
+                    </Field>
+                    <Field label="Timeout, seconds" hint="Up to 3600. 0 means the maximum." error={timeoutError ? "Use a whole number from 0 to 3600." : null}>
+                      <input
+                        className={`${inputClass} ${timeoutError ? "border-err" : ""}`}
+                        inputMode="numeric"
+                        placeholder={`${script.timeoutSeconds ?? 3600}`}
+                        value={timeout}
+                        onChange={(e) => setTimeoutValue(e.target.value)}
+                      />
+                    </Field>
                   </div>
                 ) : (
-                  <button type="button" onClick={() => setEditOptions(true)} className="flex h-8 items-center gap-2 text-sm text-muted hover:text-text">
-                    Timeout {formatDuration(effectiveTimeout || 3600)}
-                    <span className="text-faint">·</span>
-                    {taskName || "auto-named"}
-                    <span className="text-accent">Edit</span>
-                  </button>
+                  <div className="flex items-center justify-between gap-3 text-xs text-faint">
+                    <span>
+                      Timeout {formatDuration(effectiveTimeout || 3600)} · {taskName || "named automatically"}
+                    </span>
+                    <button type="button" onClick={() => setEditOptions(true)} className="font-medium text-accent hover:text-accent-hover">
+                      Edit
+                    </button>
+                  </div>
                 )}
-              </FormRow>
+              </>
             )}
-          </div>
 
-          {org && <TargetDevices orgId={org.id} script={script} targets={targets} onChange={onDevices} />}
-        </div>
-      </div>
+            {error && (
+              <p className="text-sm text-err" role="alert">
+                {error}
+              </p>
+            )}
 
-      <footer className="flex h-14 shrink-0 items-center justify-between gap-4 border-t border-border px-5">
-        <div className="min-w-0 truncate text-sm text-muted">
-          {error ? (
-            <span className="text-err" role="alert">
-              {error}
-            </span>
-          ) : script && devices.length ? (
-            <>
-              <span className="text-text">{script.name}</span> on {deviceWord}
-            </>
-          ) : (
-            "Choose a script and who to run it on"
-          )}
+            {confirming && script ? (
+              <div className="space-y-3 rounded-xl border border-accent/40 bg-accent-soft p-3">
+                <p>
+                  Run <span className="font-semibold">{script.name}</span> on <span className="font-semibold">{deviceWord}</span>?
+                </p>
+                <div className="flex gap-2">
+                  <Button variant="secondary" className="flex-1" onClick={() => setConfirming(false)} disabled={running}>
+                    Cancel
+                  </Button>
+                  <Button variant="primary" className="flex-2" onClick={start} busy={running}>
+                    <Play />
+                    Confirm and run
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <Button variant="primary" className="h-10 w-full text-sm" onClick={start} disabled={!script || !devices.length}>
+                  <Play />
+                  {script && devices.length ? `Run on ${deviceWord}` : "Run"}
+                </Button>
+                {script && devices.length > 0 && <p className="text-center text-xs text-faint">You'll confirm before it starts.</p>}
+              </>
+            )}
+          </aside>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
-          {confirming && (
-            <Button variant="ghost" onClick={() => setConfirming(false)} disabled={running}>
-              Cancel
-            </Button>
-          )}
-          <Button variant="primary" onClick={start} busy={running} disabled={!script || !devices.length}>
-            <Play />
-            {confirming ? `Confirm: run on ${deviceWord}` : "Run"}
-          </Button>
-        </div>
-      </footer>
+      </PageBody>
     </>
+  );
+}
+
+function SummaryLine({ tone, label, hint, count }: { tone: string; label: string; hint?: string; count: number }) {
+  return (
+    <li className="flex items-center gap-2.5">
+      <span className={`size-2.5 rounded-sm ${tone}`} />
+      <span className="flex-1">
+        {label}
+        {hint && <span className="text-faint"> · {hint}</span>}
+      </span>
+      <span className="font-semibold tabular-nums">{count.toLocaleString()}</span>
+    </li>
   );
 }

@@ -15,11 +15,11 @@ const STATE: Record<ScriptState, { tone: "ok" | "warn" | "muted"; label: string 
   notThere: { tone: "muted", label: "Not there yet" },
 };
 
-function Card({ id, title, aside, children }: { id?: string; title: string; aside?: React.ReactNode; children: React.ReactNode }) {
+function Card({ id, title, aside, attention, children }: { id?: string; title: string; aside?: React.ReactNode; attention?: boolean; children: React.ReactNode }) {
   return (
-    <section id={id} className="scroll-mt-4 space-y-3 rounded-lg border border-border p-4">
-      <div className="flex items-center justify-between gap-3">
-        <h3 className="text-sm font-semibold">{title}</h3>
+    <section id={id} className={`scroll-mt-4 space-y-3 rounded-2xl border bg-surface px-5 py-4 ${attention ? "border-warn/40" : "border-border"}`}>
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+        <h3 className="font-semibold">{title}</h3>
         {aside}
       </div>
       {children}
@@ -54,7 +54,7 @@ function EcoverseCard({ projectId, view, side, card }: { projectId: string; view
     );
   }
   return (
-    <Card id={`prepare-${side}-ecoverse`} title={title} aside={<Status tone={STATE[card.state].tone} label={STATE[card.state].label} />}>
+    <Card id={`prepare-${side}-ecoverse`} title={title} attention={!destination && card.state !== "current"} aside={<Status tone={STATE[card.state].tone} label={STATE[card.state].label} />}>
       <p className="text-sm text-muted">
         {destination
           ? "The destination is in its own Ecoverse tenant, so a device that has moved is reached with a copy of the script published there. Probe and Cleanup use it. You don't have to do anything: it is published in the tenant's service organization the first time one of them needs it. Publish it now if you'd rather see it done."
@@ -221,14 +221,14 @@ function Checklist({ view }: { view: PrepareView }) {
   const { items, ready } = prepareChecklist(view);
   const tone = { ready: "ok", needed: "warn", optional: "muted" } as const;
   return (
-    <section className="rounded-lg border border-border">
-      <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-2.5">
-        <h3 className="text-sm font-semibold">Ready to plan?</h3>
-        <Status tone={ready ? "ok" : "warn"} label={ready ? "Yes" : "Not yet"} />
+    <section className="rounded-2xl border border-border bg-surface">
+      <div className="flex items-center justify-between gap-3 border-b border-border px-5 py-3.5">
+        <h3 className="text-base font-semibold">Ready to plan?</h3>
+        <span className={`font-semibold ${ready ? "text-ok" : "text-warn"}`}>{ready ? "Yes" : "Not yet"}</span>
       </div>
       <ul className="divide-y divide-border">
         {items.map((i) => (
-          <li key={i.anchor} className="flex items-start gap-2.5 px-4 py-2 text-sm">
+          <li key={i.anchor} className="flex items-start gap-2.5 px-5 py-2.5 text-sm">
             <span className="mt-1.5">
               <Dot tone={tone[i.status]} />
             </span>
@@ -250,35 +250,29 @@ function Checklist({ view }: { view: PrepareView }) {
 export function PrepareStep({ projectId, onBack, onContinue }: { projectId: string; onBack: () => void; onContinue: () => void }) {
   const prepare = usePrepare(projectId);
   const view = prepare.data;
+  if (prepare.isError) return <ErrorNote>{String(prepare.error)}</ErrorNote>;
+  if (!view) return <p className="text-sm text-muted">Loading…</p>;
+  const { ready } = prepareChecklist(view);
   return (
-    <div className="mx-auto max-w-2xl space-y-4 px-6 py-5">
-      <div className="flex items-baseline justify-between gap-3">
-        <h2 className="text-sm font-semibold">Prepare</h2>
-        {view && <span className="text-xs text-faint">Endpoint script {view.scriptVersion}</span>}
+    <div className="flex flex-wrap items-start gap-6">
+      <div className="min-w-0 flex-[3_1_480px] space-y-4">
+        <EcoverseCard projectId={projectId} view={view} side="source" card={view.ecoverse} />
+        <RestCard projectId={projectId} view={view} side="source" card={view.rest} />
+        {view.destination?.ecoverse && <EcoverseCard projectId={projectId} view={view} side="destination" card={view.destination.ecoverse} />}
+        {view.destination && <RestCard projectId={projectId} view={view} side="destination" card={view.destination.rest} />}
+        <EcoverseLinkCard projectId={projectId} view={view} />
+        <OptionsCard projectId={projectId} view={view} />
       </div>
-      {prepare.isError ? (
-        <ErrorNote>{String(prepare.error)}</ErrorNote>
-      ) : !view ? (
-        <p className="text-sm text-muted">Loading…</p>
-      ) : (
-        <>
-          <Checklist view={view} />
-          <EcoverseCard projectId={projectId} view={view} side="source" card={view.ecoverse} />
-          <RestCard projectId={projectId} view={view} side="source" card={view.rest} />
-          {view.destination?.ecoverse && <EcoverseCard projectId={projectId} view={view} side="destination" card={view.destination.ecoverse} />}
-          {view.destination && <RestCard projectId={projectId} view={view} side="destination" card={view.destination.rest} />}
-          <EcoverseLinkCard projectId={projectId} view={view} />
-          <OptionsCard projectId={projectId} view={view} />
-          <div className="flex items-center justify-between">
-            <Button size="sm" onClick={onBack}>
-              Back to Map
-            </Button>
-            <Button size="sm" variant="primary" onClick={onContinue}>
-              Continue to Plan
-            </Button>
-          </div>
-        </>
-      )}
+      <aside className="sticky top-0 flex min-w-0 flex-[2_1_280px] flex-col gap-3">
+        <Checklist view={view} />
+        <p className="px-1 text-xs text-faint">Endpoint script {view.scriptVersion}</p>
+        <div className="flex gap-2">
+          <Button onClick={onBack}>Back to Map</Button>
+          <Button variant={ready ? "primary" : "secondary"} className="flex-1" onClick={onContinue}>
+            {ready ? "Continue to Plan" : "Continue to Plan anyway"}
+          </Button>
+        </div>
+      </aside>
     </div>
   );
 }

@@ -89,7 +89,7 @@ export function NewProjectDialog({
         </Field>
 
         {list.length === 0 && !servers.isPending ? (
-          <div className="rounded-md border border-border px-3 py-3 text-sm text-muted">
+          <div className="rounded-xl border border-border px-3.5 py-3 text-sm text-muted">
             Add the servers first.{" "}
             <button className="text-accent underline-offset-2 hover:underline" onClick={onManageServers}>
               Manage servers
@@ -128,7 +128,7 @@ export function NewProjectDialog({
           </>
         )}
 
-        <div className="rounded-lg border border-border">
+        <div className="rounded-xl border border-border bg-surface">
           <button type="button" className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left" aria-expanded={showEco} onClick={() => setShowEco((v) => !v)}>
             <span className="text-sm">
               <span className="font-medium">Ecoverse</span>
@@ -143,7 +143,7 @@ export function NewProjectDialog({
         <fieldset className="space-y-2">
           <legend className="text-xs font-medium text-muted">How should devices be reached to start the move?</legend>
           {DELIVERY.map((o) => (
-            <label key={o.value} className="flex cursor-pointer items-start gap-2.5 rounded-md border border-border px-3 py-2 has-[:checked]:border-accent has-[:checked]:bg-accent-soft">
+            <label key={o.value} className="flex cursor-pointer items-start gap-2.5 rounded-xl border border-border px-3.5 py-2.5 has-[:checked]:border-accent has-[:checked]:bg-accent-soft">
               <input type="radio" name="delivery" className="mt-1" checked={delivery === o.value} onChange={() => setDelivery(o.value)} />
               <span className="text-sm">
                 <span className="font-medium">{o.title}</span>
@@ -161,7 +161,7 @@ export function NewProjectDialog({
             return (
               <label
                 key={o.value}
-                className={`flex items-start gap-2.5 rounded-md border border-border px-3 py-2 has-[:checked]:border-accent has-[:checked]:bg-accent-soft ${blocked ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}
+                className={`flex items-start gap-2.5 rounded-xl border border-border px-3.5 py-2.5 has-[:checked]:border-accent has-[:checked]:bg-accent-soft ${blocked ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}
               >
                 <input type="radio" name="linked" className="mt-1" disabled={blocked} checked={linked === o.value} onChange={() => setLinked(o.value)} />
                 <span className="text-sm">

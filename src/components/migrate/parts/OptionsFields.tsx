@@ -18,7 +18,7 @@ export function OptionsFields({ form, setForm, errors, deliveryLocked = false }:
             ["restOnly", "N-central only", "Every device through N-central, without using Ecoverse."],
           ] as const
         ).map(([value, title, text]) => (
-          <label key={value} className="flex cursor-pointer items-start gap-2.5 rounded-md border border-border px-3 py-2 has-[:checked]:border-accent has-[:checked]:bg-accent-soft has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-60">
+          <label key={value} className="flex cursor-pointer items-start gap-2.5 rounded-xl border border-border px-3.5 py-2.5 has-[:checked]:border-accent has-[:checked]:bg-accent-soft has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-60">
             <input type="radio" name="delivery" className="mt-1" checked={form.delivery === value} onChange={() => setForm({ ...form, delivery: value })} />
             <span className="text-sm">
               <span className="font-medium">{title}</span>
@@ -37,7 +37,7 @@ export function OptionsFields({ form, setForm, errors, deliveryLocked = false }:
             ["none", "Install over the top", "Installs without removing first. A newer destination agent can leave the device in the source's Ecoverse tenant."],
           ] as const
         ).map(([value, title, text]) => (
-          <label key={value} className="flex cursor-pointer items-start gap-2.5 rounded-md border border-border px-3 py-2 has-[:checked]:border-accent has-[:checked]:bg-accent-soft">
+          <label key={value} className="flex cursor-pointer items-start gap-2.5 rounded-xl border border-border px-3.5 py-2.5 has-[:checked]:border-accent has-[:checked]:bg-accent-soft">
             <input type="radio" name="clean" className="mt-1" checked={form.cleanMode === value} onChange={() => setForm({ ...form, cleanMode: value })} />
             <span className="text-sm">
               <span className="font-medium">{title}</span>

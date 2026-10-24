@@ -33,11 +33,13 @@ export function DestPicker({
     row.status === "leftOut" ? (
       <span className="text-muted">Left out</span>
     ) : row.dest ? (
-      <span>{label(row.dest)}</span>
+      <span className="truncate" title={label(row.dest)}>
+        {label(row.dest)}
+      </span>
     ) : row.status === "ambiguous" ? (
-      <span className="text-warn">Choose… ({row.candidates.length} fit)</span>
+      <span className="whitespace-nowrap text-warn">Choose… ({row.candidates.length} fit)</span>
     ) : (
-      <span className="text-err">No match</span>
+      <span className="whitespace-nowrap text-err">No match</span>
     );
 
   return (

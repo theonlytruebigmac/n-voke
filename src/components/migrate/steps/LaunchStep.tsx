@@ -1,3 +1,4 @@
+import { HeaderActions } from "../HeaderActions";
 import { Plus } from "lucide-react";
 import { useState } from "react";
 import type { WaveRow } from "../../../lib/migrate/bindings";
@@ -5,11 +6,11 @@ import { useLaunch, useLaunchActions, useCandidates } from "../../../lib/migrate
 import { useNow } from "../../../lib/format";
 import { ago } from "../../../lib/migrate/track";
 import { useDebounced } from "../../../lib/useDebounced";
-import { Button, ErrorNote, Field, Modal, Segmented, Status, inputClass } from "../../ui";
+import { Button, Card, ErrorNote, Field, Modal, Segmented, inputClass } from "../../ui";
 import { LaunchDialog } from "../parts/LaunchDialog";
 import type { StepId } from "../parts/StepRail";
 
-const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+const plural = (n: number, word: string) => `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
 const PILOT = 5;
 
 const CANDIDATES = 50;
@@ -109,17 +110,28 @@ function NewWaveDialog({ projectId, unassigned, defaultSize, onClose }: { projec
               <p className="text-sm text-muted">{page.waiting === 0 ? "Every planned device is already in a wave." : "No planned device matches."}</p>
             ) : (
               <>
-                <div className="max-h-72 overflow-y-auto rounded-lg border border-border">
-                  <table className="w-full border-collapse text-sm [&_td]:px-3 [&_td]:py-1.5">
+                <div className="max-h-72 overflow-y-auto rounded-xl border border-border bg-surface">
+                  <table className="w-full table-fixed border-collapse text-sm [&_td]:px-3 [&_td]:py-1.5">
                     <tbody className="[&>tr]:border-t [&>tr]:border-border first:[&>tr]:border-t-0">
                       {page.rows.map((r) => (
-                        <tr key={r.deviceId} className="cursor-pointer hover:bg-surface-2/60" onClick={() => toggle(r.deviceId)}>
-                          <td className="w-8">
-                            <input type="checkbox" checked={picked.has(r.deviceId)} onChange={() => toggle(r.deviceId)} onClick={(e) => e.stopPropagation()} aria-label={`Take ${r.name}`} />
+                        <tr key={r.deviceId} className={`cursor-pointer hover:bg-surface-2/60 ${picked.has(r.deviceId) ? "bg-accent-soft/60" : ""}`} onClick={() => toggle(r.deviceId)}>
+                          <td className="w-9">
+                            <input
+                              type="checkbox"
+                              className="size-3.5 accent-accent"
+                              checked={picked.has(r.deviceId)}
+                              onChange={() => toggle(r.deviceId)}
+                              onClick={(e) => e.stopPropagation()}
+                              aria-label={`Take ${r.name}`}
+                            />
                           </td>
-                          <td className="font-medium">{r.name}</td>
-                          <td className="text-muted">{r.customer}</td>
-                          <td className="text-faint">{r.path === "ecoverse" ? "Ecoverse" : r.path === "rest" ? "N-central" : "–"}</td>
+                          <td className="truncate font-medium" title={r.name}>
+                            {r.name}
+                          </td>
+                          <td className="truncate text-muted" title={r.customer}>
+                            {r.customer}
+                          </td>
+                          <td className="w-24 whitespace-nowrap text-faint">{r.path === "ecoverse" ? "Ecoverse" : r.path === "rest" ? "N-central" : "–"}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -157,66 +169,86 @@ function NewWaveDialog({ projectId, unassigned, defaultSize, onClose }: { projec
   );
 }
 
+const WAVE_CHIP = {
+  waiting: "bg-accent-soft text-accent",
+  partly: "bg-warn-soft text-warn",
+  launched: "bg-ok-soft text-ok",
+} as const;
+
 function WaveCard({ wave, onLaunch, onTrack }: { wave: WaveRow; onLaunch: () => void; onTrack: () => void }) {
   const launched = wave.launchedAt !== null;
   const now = useNow(60_000);
+  const state = launched ? (wave.waiting > 0 ? "partly" : "launched") : "waiting";
   const parts = [
-    wave.working > 0 && { text: `${wave.working} working`, tone: "text-ok" },
-    wave.moving > 0 && { text: `${wave.moving} moving`, tone: "text-muted" },
-    wave.needsYou > 0 && { text: `${wave.needsYou} need you`, tone: "text-warn" },
-    wave.waiting > 0 && launched && { text: `${wave.waiting} still waiting`, tone: "text-muted" },
+    wave.working > 0 && { text: `${wave.working.toLocaleString()} working`, tone: "text-ok" },
+    wave.moving > 0 && { text: `${wave.moving.toLocaleString()} moving`, tone: "text-muted" },
+    wave.needsYou > 0 && { text: `${wave.needsYou.toLocaleString()} need you`, tone: "text-warn" },
+    wave.waiting > 0 && launched && { text: `${wave.waiting.toLocaleString()} still waiting`, tone: "text-muted" },
   ].filter(Boolean) as { text: string; tone: string }[];
   return (
-    <li className="flex items-center justify-between gap-3 rounded-lg border border-border px-4 py-3">
-      <div className="min-w-0">
-        <div className="text-sm font-medium">{wave.label}</div>
-        <div className="text-xs text-muted">
-          {plural(wave.devices, "device")}
-          {launched && wave.launchedAt && ` · launched ${ago(wave.launchedAt, now)} ago`}
-        </div>
-        {launched && parts.length > 0 && (
-          <div className="mt-0.5 flex flex-wrap gap-x-3 text-xs">
-            {parts.map((p) => (
-              <span key={p.text} className={p.tone}>
-                {p.text}
-              </span>
-            ))}
+    <li>
+      <Card className={`flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 ${state === "waiting" ? "border-accent/40" : ""}`}>
+        <div className="min-w-0 flex-[1_1_240px] space-y-0.5">
+          <div className="flex items-center gap-2">
+            <span className="truncate font-semibold" title={wave.label}>
+              {wave.label}
+            </span>
+            <span className={`shrink-0 rounded-full px-2 text-[11px] leading-5 font-semibold ${WAVE_CHIP[state]}`}>
+              {state === "waiting" ? "Waiting" : state === "partly" ? "Partly launched" : "Launched"}
+            </span>
           </div>
-        )}
-      </div>
-      <div className="flex shrink-0 items-center gap-3">
-        <Status tone={launched ? (wave.waiting > 0 ? "accent" : "ok") : "muted"} label={launched ? (wave.waiting > 0 ? "Partly launched" : "Launched") : "Waiting"} />
-        {wave.waiting > 0 && (
-          <Button size="sm" variant="primary" onClick={onLaunch}>
-            Launch…
-          </Button>
-        )}
-        {launched && (
-          <Button size="sm" onClick={onTrack}>
-            Track
-          </Button>
-        )}
-      </div>
+          <div className="text-sm text-muted">
+            {plural(wave.devices, "device")}
+            {launched && wave.launchedAt ? ` · launched ${ago(wave.launchedAt, now)} ago` : " · not launched"}
+          </div>
+          {launched && parts.length > 0 && (
+            <div className="flex flex-wrap gap-x-3 text-xs">
+              {parts.map((p) => (
+                <span key={p.text} className={p.tone}>
+                  {p.text}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          {wave.waiting > 0 && (
+            <Button size="sm" variant="primary" onClick={onLaunch}>
+              Launch…
+            </Button>
+          )}
+          {launched && (
+            <Button size="sm" onClick={onTrack}>
+              Track
+            </Button>
+          )}
+        </div>
+      </Card>
     </li>
   );
 }
+
+/** Lists past this many waves fold, newest first. */
+const WAVES_SHOWN = 3;
 
 /** Waves are made here, then launched (step 5 in docs/migration/11-gui-design.md). */
 export function LaunchStep({ projectId, onGo }: { projectId: string; onGo: (step: StepId) => void }) {
   const launch = useLaunch(projectId);
   const [making, setMaking] = useState(false);
   const [launching, setLaunching] = useState<number | null>(null);
+  const [allWaves, setAllWaves] = useState(false);
   const view = launch.data;
+  const waves = [...(view?.waves ?? [])].sort((a, b) => b.number - a.number);
+  const shown = allWaves ? waves : waves.slice(0, WAVES_SHOWN);
 
   return (
-    <div className="mx-auto max-w-2xl space-y-4 px-6 py-5">
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="text-sm font-semibold">Launch</h2>
-        <Button size="sm" disabled={!view || view.unassigned === 0} onClick={() => setMaking(true)}>
+    <div className="space-y-4">
+      <HeaderActions>
+        <Button variant="primary" disabled={!view || view.unassigned === 0} onClick={() => setMaking(true)}>
           <Plus />
           New wave
         </Button>
-      </div>
+      </HeaderActions>
 
       {launch.isError ? (
         <ErrorNote>{String(launch.error)}</ErrorNote>
@@ -224,8 +256,13 @@ export function LaunchStep({ projectId, onGo }: { projectId: string; onGo: (step
         <p className="text-sm text-muted">Loading…</p>
       ) : (
         <>
+          {view.unassigned > 0 && view.waves.length > 0 && (
+            <Card className="px-4 py-3 text-sm">
+              <span className="font-semibold">{plural(view.unassigned, "planned device")}</span> <span className="text-muted">aren't in a wave yet.</span>
+            </Card>
+          )}
           {view.waves.length === 0 ? (
-            <div className="space-y-2 rounded-lg border border-border px-4 py-5 text-sm">
+            <Card className="space-y-3 px-4 py-5 text-sm">
               {view.unassigned === 0 ? (
                 <>
                   <p className="text-muted">No devices are planned yet.</p>
@@ -236,15 +273,21 @@ export function LaunchStep({ projectId, onGo }: { projectId: string; onGo: (step
               ) : (
                 <p className="text-muted">Make a first wave from the planned devices. A pilot of a few devices is a good start.</p>
               )}
-            </div>
+            </Card>
           ) : (
-            <ul className="space-y-2">
-              {view.waves.map((w) => (
-                <WaveCard key={w.number} wave={w} onLaunch={() => setLaunching(w.number)} onTrack={() => onGo("track")} />
-              ))}
-            </ul>
+            <>
+              <ul className="space-y-2">
+                {shown.map((w) => (
+                  <WaveCard key={w.number} wave={w} onLaunch={() => setLaunching(w.number)} onTrack={() => onGo("track")} />
+                ))}
+              </ul>
+              {waves.length > WAVES_SHOWN && (
+                <button type="button" onClick={() => setAllWaves(!allWaves)} className="text-sm font-medium text-accent hover:text-accent-hover">
+                  {allWaves ? "Show the latest 3" : `Show all ${waves.length} waves`}
+                </button>
+              )}
+            </>
           )}
-          {view.unassigned > 0 && view.waves.length > 0 && <p className="text-sm text-muted">{plural(view.unassigned, "planned device")} aren't in a wave yet.</p>}
         </>
       )}
 

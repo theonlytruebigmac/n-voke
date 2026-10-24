@@ -57,7 +57,11 @@ export function AssignTagDialog({
   }
 
   return (
-    <Modal title={`Tag ${devices.length} device${devices.length === 1 ? "" : "s"}`} description="Pick a static tag or create one" onClose={onClose}>
+    <Modal
+      title={`Tag ${devices.length.toLocaleString()} device${devices.length === 1 ? "" : "s"}`}
+      description="Add them to a static tag, or make a new one."
+      onClose={onClose}
+    >
       <div className="-mx-5 -mb-5 border-t border-border">
         <SearchList<Tag>
           search={search}
@@ -68,11 +72,11 @@ export function AssignTagDialog({
           onPick={(t) => void assign(t)}
           exactMatch={(t, term) => t.name.toLowerCase() === term.toLowerCase()}
           renderItem={(t) => (
-            <div className="flex items-center gap-2">
+            <div className="grid grid-cols-[14px_minmax(0,1fr)_auto] items-center gap-2.5 whitespace-nowrap" title={t.name}>
               <TagKindIcon kind={t.__typename} />
               <span className="truncate">{t.name}</span>
-              <span className="ml-auto shrink-0 text-xs text-faint tabular-nums">
-                {busyId === t.id ? <Loader2 className="size-3.5 animate-spin" /> : `${t.assetCount ?? 0}`}
+              <span className="text-right text-xs text-faint tabular-nums">
+                {busyId === t.id ? <Loader2 className="ml-auto size-3.5 animate-spin" /> : `${(t.assetCount ?? 0).toLocaleString()} device${t.assetCount === 1 ? "" : "s"}`}
               </span>
             </div>
           )}

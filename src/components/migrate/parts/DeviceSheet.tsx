@@ -3,16 +3,18 @@ import type { DeviceAction, DeviceCommand, DeviceDetail } from "../../../lib/mig
 import { ACTION_WORDS, ago } from "../../../lib/migrate/track";
 import { useDevice, useDeviceActions } from "../../../lib/migrate/queries";
 import { describeStage, ECO_OVERDUE, ecoWords, eventWords, stageView, ufaStepTitle, ufaWords } from "../../../lib/migrate/words";
-import { Button, ErrorNote, Modal, Sheet, Status } from "../../ui";
+import { Button, Card, ErrorNote, Modal, Sheet, Status, type Tone } from "../../ui";
 import { useNow } from "../../../lib/format";
 
 const PATH_WORDS = { ecoverse: "Ecoverse", rest: "N-central" } as const;
+/** The stage card takes the stage's tone, so a device that needs the person stands out. */
+const STAGE_CARD: Record<Tone, "warn" | "err" | "accent" | undefined> = { warn: "warn", err: "err", accent: "accent", ok: undefined, muted: undefined };
 
-function Timeline({ events }: { events: DeviceDetail["events"] }) {
+function History({ events }: { events: DeviceDetail["events"] }) {
   return (
-    <ol className="space-y-2">
+    <ol className="divide-y divide-border">
       {[...events].reverse().map((e, i) => (
-        <li key={`${e.at}-${i}`} className="grid grid-cols-[7.5rem_1fr] gap-3 text-xs">
+        <li key={`${e.at}-${i}`} className="grid grid-cols-[7.5rem_1fr] gap-3 py-2 text-xs">
           <span className="text-faint tabular-nums">{new Date(e.at).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
           <span className="min-w-0">
             <span className="font-medium">{eventWords(e.kind, e.detail).title}</span>
@@ -68,9 +70,9 @@ export function DeviceSheet({ projectId, index, onClose }: { projectId: string; 
       ) : !d ? (
         <p className="text-sm text-muted">Loading…</p>
       ) : (
-        <div className="space-y-5">
-          <div className="space-y-1">
-            <Status tone={stageView(d.stage, d.waitingForEcoverse).tone} pulse={stageView(d.stage, d.waitingForEcoverse).pulse} label={stageView(d.stage, d.waitingForEcoverse).short} />
+        <div className="space-y-4">
+          <Card tone={STAGE_CARD[stageView(d.stage, d.waitingForEcoverse).tone]} className="space-y-1 px-4 py-3">
+            <Status tone={stageView(d.stage, d.waitingForEcoverse).tone} pulse={stageView(d.stage, d.waitingForEcoverse).pulse} label={<span className="font-semibold">{stageView(d.stage, d.waitingForEcoverse).short}</span>} />
             <p className="text-sm text-muted">{describeStage(d.stage, { since: ago(d.since, now), destination: d.destination, reason: d.lastError, waitingForEcoverse: d.waitingForEcoverse })}</p>
             <p className="text-xs text-faint">
               {d.path ? PATH_WORDS[d.path] : "No path"}
@@ -78,10 +80,31 @@ export function DeviceSheet({ projectId, index, onClose }: { projectId: string; 
               {d.attempts > 1 && ` · ${d.attempts} attempts`}
             </p>
             {d.launchUnsure && <p className="text-xs text-warn">A launch for this device was sent and its answer lost, so it may be running. Look in Activity (Ecoverse) or the task list (N-central) before retrying.</p>}
-          </div>
+          </Card>
+
+          {d.actions.filter((a) => a !== "chooseMatch").length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {d.actions
+                .filter((a) => a !== "chooseMatch")
+                .map((a, i) => (
+                  <Button
+                    key={a}
+                    size="sm"
+                    variant={a === "markResolved" ? "ghost" : i === 0 ? "primary" : undefined}
+                    busy={command.isPending && confirming === null && active === a}
+                    disabled={command.isPending && active !== a}
+                    onClick={() => ask(a, d)}
+                  >
+                    {ACTION_WORDS[a].label}
+                  </Button>
+                ))}
+            </div>
+          )}
+          {message && <p className="text-sm break-words text-ok">{message}</p>}
+          {command.isError && !confirming && <ErrorNote>{String(command.error)}</ErrorNote>}
 
           {(d.ecoverse !== null || d.waitingForEcoverse) && (
-            <div className={`space-y-1 rounded-lg border p-3 ${d.waitingForEcoverse ? "border-warn/40" : "border-border"}`}>
+            <div className={`space-y-1 rounded-xl border p-3 ${d.waitingForEcoverse ? "border-warn/40 bg-warn-soft/30" : "border-border bg-surface"}`}>
               <Status tone={ecoWords(d.ecoverse).tone} label={ecoWords(d.ecoverse).short} />
               <p className="text-xs text-muted">{ecoWords(d.ecoverse).long}</p>
               {d.ecoverseOverdue && <p className="text-xs break-words text-warn">{ECO_OVERDUE.long}</p>}
@@ -90,8 +113,8 @@ export function DeviceSheet({ projectId, index, onClose }: { projectId: string; 
           )}
 
           {d.deviceUfa && (
-            <div className="space-y-1 rounded-lg border border-border p-3">
-              <p className="text-xs font-semibold">Ecoverse agent on the device</p>
+            <div className="space-y-1 rounded-xl border border-border bg-surface p-3">
+              <p className="text-sm font-semibold">Ecoverse agent on the device</p>
               <Status tone={ufaWords(d.deviceUfa).tone} label={ufaWords(d.deviceUfa).short} />
               <p className="text-xs text-muted">{ufaWords(d.deviceUfa).long}</p>
               <p className="text-xs text-faint">
@@ -115,7 +138,7 @@ export function DeviceSheet({ projectId, index, onClose }: { projectId: string; 
             </div>
           )}
 
-          <dl className="grid grid-cols-[7rem_1fr] gap-x-3 gap-y-1 text-xs">
+          <dl className="grid grid-cols-[7rem_1fr] gap-x-3 gap-y-1.5 text-xs">
             <dt className="text-muted">Old device</dt>
             <dd className="tabular-nums">{d.sourceDeviceId}</dd>
             <dt className="text-muted">New device</dt>
@@ -129,11 +152,11 @@ export function DeviceSheet({ projectId, index, onClose }: { projectId: string; 
           </dl>
 
           {d.candidates.length > 0 && (
-            <div className="space-y-2 rounded-lg border border-warn/40 p-3">
+            <Card tone="warn" className="space-y-2 p-3">
               <p className="text-sm">More than one device on the new server fits this one. Which is it?</p>
               {d.candidates.map((c) => (
                 <div key={c.deviceId} className="flex items-center justify-between gap-3 text-sm">
-                  <span>
+                  <span className="min-w-0 truncate" title={c.name}>
                     {c.name} <span className="text-xs text-faint">{c.deviceId}</span>
                   </span>
                   <Button size="sm" busy={command.isPending && active === "chooseMatch"} onClick={() => run({ kind: "chooseMatch", destDeviceId: c.deviceId }, "chooseMatch")}>
@@ -141,26 +164,12 @@ export function DeviceSheet({ projectId, index, onClose }: { projectId: string; 
                   </Button>
                 </div>
               ))}
-            </div>
+            </Card>
           )}
-
-          {d.actions.filter((a) => a !== "chooseMatch").length > 0 && (
-            <div className="flex flex-wrap gap-2">
-              {d.actions
-                .filter((a) => a !== "chooseMatch")
-                .map((a) => (
-                  <Button key={a} size="sm" variant={a === "markResolved" ? "ghost" : undefined} busy={command.isPending && confirming === null && active === a} disabled={command.isPending && active !== a} onClick={() => ask(a, d)}>
-                    {ACTION_WORDS[a].label}
-                  </Button>
-                ))}
-            </div>
-          )}
-          {message && <p className="text-sm break-words text-ok">{message}</p>}
-          {command.isError && !confirming && <ErrorNote>{String(command.error)}</ErrorNote>}
 
           <div>
-            <h3 className="mb-2 text-sm font-semibold">Timeline</h3>
-            <Timeline events={d.events} />
+            <h3 className="mb-1 text-sm font-semibold">History</h3>
+            <History events={d.events} />
           </div>
         </div>
       )}
