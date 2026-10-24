@@ -563,16 +563,19 @@ impl Core {
     /// credential is sent, and only the path N-central documents for these files on the configured host is fetched.
     pub async fn ncentral_task_output(&self, server_id: &str, output_file_name: &str) -> Result<RestOutput, RestError> {
         const PREFIX: &str = "/download/scheduled_tasks/output_files/";
-        // The file is named after the task, so it carries whatever the task name does (a colon, spaces); `%`, `?`, `#` and `\` stay out.
-        let plain = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | ' ' | ':');
+        // The file is named after the task and the device, so it carries whatever their names do: a colon, spaces,
+        // accented letters, and the punctuation device names have ("PC (2)", "Bob's-PC", "R&D"). Those are plain path
+        // characters. `%`, `?`, `#` and `\` stay out, as does `..`, so the path can't be steered elsewhere.
+        let plain = |c: char| c.is_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | ' ' | ':' | '(' | ')' | '\'' | '+' | ',' | '&' | '=' | '!' | '~' | '[' | ']' | '@' | '$' | ';');
+        let elsewhere = || RestError::new(None, format!("The task's output file isn't where N-central keeps them ({output_file_name})."));
         if !output_file_name.starts_with(PREFIX) || output_file_name.contains("..") || !output_file_name.chars().all(plain) {
-            return Err(RestError::new(None, "The task's output file isn't where N-central keeps them."));
+            return Err(elsewhere());
         }
         let host = self.ncentral_server(server_id)?.host;
         let mut url = reqwest::Url::parse(&format!("https://{host}/")).map_err(|e| RestError::new(None, e.to_string()))?;
         url.set_path(output_file_name);
         if !url.path().starts_with(PREFIX) {
-            return Err(RestError::new(None, "The task's output file isn't where N-central keeps them."));
+            return Err(elsewhere());
         }
         let response = self.rest_send(RestRequest { method: Method::Get, url: url.to_string(), bearer: None, body: None }).await?;
         if response.status >= 300 {
@@ -590,8 +593,12 @@ impl Core {
         self.require_capability(server_id, Capability::RestLaunch).await?;
         let host = self.ncentral_server(server_id)?.host;
         let numeric = |what: &str, v: &str| v.parse::<u64>().map_err(|_| RestError::new(None, format!("The {what} \"{v}\" isn't numeric.")));
+        // N-central refuses a task whose name the device already has a task under ("3409 The name must be unique for
+        // remote execution task"): a device's second probe, or a retry in the same wave. The time keeps each name new;
+        // it is digits and a dash, so the output file N-central names after the task stays readable.
+        let name = format!("{} {}", task.name, chrono::Utc::now().format("%Y%m%d-%H%M%S"));
         let body = json!({
-            "name": task.name,
+            "name": name,
             "itemId": numeric("script item ID", task.item_id)?,
             "taskType": "Script",
             "customerId": numeric("customer ID", task.customer_id)?,
@@ -599,7 +606,7 @@ impl Core {
             "credential": { "type": "LocalSystem" },
             "parameters": [{ "name": "CommandLine", "value": task.command_line, "type": "password", "description": "N-voke migration inputs" }],
         });
-        let meta = AuditMeta { action: "migration.launch.rest".into(), summary: format!("{} on {} via {host}", task.name, task.device_label) };
+        let meta = AuditMeta { action: "migration.launch.rest".into(), summary: format!("{name} on {} via {host}", task.device_label) };
         let result = self.ncentral_call(server_id, Call::write(Method::Post, "/api/scheduled-tasks/direct", Some(body), meta)).await;
         let body = match result {
             Err(e) if e.status == Some(500) && e.message.contains("REST API accessible flag") => {
@@ -1002,6 +1009,10 @@ mod tests {
         assert_eq!(body["credential"], json!({ "type": "LocalSystem" }));
         assert_eq!(body["parameters"][0]["name"], "CommandLine");
         assert_eq!(body["parameters"][0]["value"], line, "the device gets the real value");
+        // A second probe of one device must not reuse a name N-central has seen for it (3409 "must be unique").
+        let name = body["name"].as_str().unwrap();
+        let stamp = name.strip_prefix("N-voke migration Launch ").expect(name);
+        assert!(stamp.len() == 15 && stamp.chars().all(|c| c.is_ascii_digit() || c == '-'), "{name}");
         let log = serde_json::to_string(&core.audit_log(None).unwrap().entries).unwrap();
         assert!(log.contains("migration.launch.rest") && log.contains("-RegistrationToken [redacted] -MigrationId m1"), "{log}");
         assert!(!log.contains("ab12-secret-token"));
@@ -1066,6 +1077,11 @@ mod tests {
         // As N-central names the file for the task "N-voke migration: launch wave 1" (seen on a real server).
         let named_for_the_task = "/download/scheduled_tasks/output_files/429/1680521407/673238524/N-vokemigration:launchwave1_SUP-2190_20261022093126.zip";
         assert!(core.ncentral_task_output(&id, named_for_the_task).await.is_ok(), "a colon in the task's name is fine");
+        // Device names carry punctuation and accents, and the file is named after the device too.
+        for device in ["PC (2)", "Bob's-PC", "R&D-WS+1", "Bürokopierer", "WS[3],x=1!~@$;"] {
+            let name = format!("/download/scheduled_tasks/output_files/429/1/2/N-vokemigration:Status20261024-010612_{device}_20261024010612.zip");
+            assert!(core.ncentral_task_output(&id, &name).await.is_ok(), "{name}");
+        }
         let download = fake.seen().into_iter().find(|r| r.url.contains("/download/")).unwrap();
         assert_eq!(download.bearer, None, "nothing secret goes with an unauthenticated download");
         assert!(download.url.starts_with("https://src.example.com/download/scheduled_tasks/output_files/"));
