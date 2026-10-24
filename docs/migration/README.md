@@ -31,6 +31,7 @@ Redeploying an N-central agent means running `WindowsAgentSetup.exe` against the
 | 10 | [Phase 0 findings](10-phase0-findings.md) | What the lab tests showed, and how it changes the plan |
 | 11 | [Desktop app design](11-gui-design.md) | The Migrate page: screens, wording, commands, live updates and build order (draft for review) |
 | 12 | [Troubleshooting](12-troubleshooting.md) | The Ecoverse agent after a move: network prerequisites, reading the device sheet, checking the network path, and the repair by hand |
+| 13 | [N-sight research](13-n-sight-research.md) | Research only: whether N-sight devices can be moved to N-central, what carries over, and the open questions |
 
 ## Goals
 
